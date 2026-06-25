@@ -17,7 +17,19 @@ export type Job = {
   stage: string;
   progress: number;
   modalities: string[];
+  metrics?: {
+    total_elapsed_seconds?: number | null;
+    stages?: Record<string, { elapsed_seconds?: number; status?: string; [key: string]: unknown }>;
+  };
   error?: string;
+};
+
+export type IndexOptions = {
+  visualSampleFps?: number;
+  visualSegmentSeconds?: number;
+  faceSampleFps?: number;
+  asrModel?: string;
+  asrLanguage?: string;
 };
 
 export type Entity = {
@@ -38,7 +50,16 @@ export type SearchResult = {
   modalities: string[];
   thumbnail_url?: string;
   media_url: string;
+  decision?: string;
+  above_threshold: boolean;
   evidence: Evidence[];
+};
+
+export type SearchResponse = {
+  count: number;
+  above_count?: number;
+  elapsed_seconds?: number;
+  results: SearchResult[];
 };
 
 async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
@@ -58,12 +79,27 @@ export const api = {
     if (transcript) form.append("transcript", transcript);
     return json<Video>("/api/videos", { method: "POST", body: form });
   },
-  indexVideo: (videoId: string, modalities: string[]) =>
+  indexVideo: (videoId: string, modalities: string[], options: IndexOptions = {}) =>
     json<Job>(`/api/videos/${videoId}/index`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ modalities }),
+      body: JSON.stringify({
+        modalities,
+        visual_sample_fps: options.visualSampleFps,
+        visual_segment_seconds: options.visualSegmentSeconds,
+        face_sample_fps: options.faceSampleFps,
+        asr_model: options.asrModel,
+        asr_language: options.asrLanguage,
+      }),
     }),
+  renameVideo: (videoId: string, name: string) =>
+    json<Video>(`/api/videos/${videoId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }),
+  deleteVideo: (videoId: string) =>
+    json<{ status: string; id: string }>(`/api/videos/${videoId}`, { method: "DELETE" }),
   createEntity: (name: string, reference: File) => {
     const form = new FormData();
     form.append("name", name);
@@ -76,6 +112,7 @@ export const api = {
     modalities: string[];
     videoIds: string[];
     alpha: number;
+    limit?: number;
   }) => {
     const form = new FormData();
     if (params.queryText) form.append("query_text", params.queryText);
@@ -83,7 +120,7 @@ export const api = {
     form.append("modalities", params.modalities.join(","));
     form.append("video_ids", JSON.stringify(params.videoIds));
     form.append("alpha", String(params.alpha));
-    return json<{ count: number; results: SearchResult[] }>("/api/search", { method: "POST", body: form });
+    form.append("limit", String(params.limit ?? 50));
+    return json<SearchResponse>("/api/search", { method: "POST", body: form });
   },
 };
-

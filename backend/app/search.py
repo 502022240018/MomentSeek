@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -24,6 +25,7 @@ class Candidate:
     robust_z: float | None = None
     percentile: float | None = None
     decision: str = "hit"
+    above_threshold: bool = True
     distribution_reliable: bool | None = None
     distribution_median: float | None = None
     distribution_mad: float | None = None
@@ -40,6 +42,7 @@ class SearchResult:
     thumbnail_url: str | None
     media_url: str
     decision: str
+    above_threshold: bool = True
     evidence: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -50,8 +53,25 @@ class SearchResult:
         return value
 
 
+_CHINESE_VARIANT_FOLD = str.maketrans({
+    "來": "来", "這": "这", "邊": "边", "們": "们", "癡": "痴", "魚": "鱼",
+    "電": "电", "資": "资", "聲": "声", "語": "语", "話": "话", "說": "说",
+    "聽": "听", "見": "见", "個": "个", "時": "时", "過": "过", "兩": "两",
+    "錢": "钱", "買": "买", "賣": "卖", "樓": "楼", "請": "请", "沒": "没",
+    "麼": "么", "麵": "面", "點": "点", "對": "对", "樣": "样", "裡": "里",
+    "裏": "里", "後": "后", "會": "会", "給": "给", "還": "还", "為": "为",
+    "嗎": "吗", "著": "着", "兒": "儿", "間": "间", "場": "场", "開": "开",
+    "關": "关", "門": "门", "車": "车", "長": "长", "當": "当", "從": "从",
+    "愛": "爱", "認": "认", "識": "识", "寫": "写", "讀": "读", "問": "问",
+    "讓": "让", "應": "应", "該": "该", "經": "经", "難": "难", "離": "离",
+    "實": "实", "現": "现", "發": "发", "國": "国", "頭": "头", "歲": "岁",
+    "萬": "万", "與": "与", "誰": "谁", "妳": "你",
+})
+
+
 def normalize_text(text: str) -> str:
-    return "".join(character.casefold() for character in text if character.isalnum())
+    folded = unicodedata.normalize("NFKC", text).casefold().translate(_CHINESE_VARIANT_FOLD)
+    return "".join(character for character in folded if character.isalnum())
 
 
 def lexical_score(query: str, text: str) -> float:
@@ -98,27 +118,47 @@ def robust_distribution(scores: np.ndarray) -> dict:
     }
 
 
+def face_confidence(cosine: float) -> float:
+    """Map an ArcFace (buffalo_l) cosine to a calibrated [0,1] confidence.
+
+    Face cosine is absolutely meaningful (distance to a reference identity), unlike
+    CLIP text-image scores. Raw cosines for true matches cluster around 0.45-0.7,
+    so a logistic centred at 0.45 lifts a strong match to ~1.0 — putting it on the
+    same scale as the visual empirical percentile, which is what the fusion step
+    weighs. Without this, a cosine=0.6 face hit (raw 0.6) would lose to a visual
+    percentile=0.98 hit even though both are strong.
+    """
+    return float(1.0 / (1.0 + np.exp(-12.0 * (cosine - 0.45))))
+
+
 def _top_vectors(data, query: np.ndarray, modality: str, video_id: str, limit: int, threshold: float) -> list[Candidate]:
     embeddings = data["embeddings"]
     if not len(embeddings):
         return []
     scores = embeddings @ normalize(query)
     candidates = []
+    # Recall everything sorted by score; tag whether each clears the threshold
+    # instead of hard-dropping, so the UI can surface borderline matches marked
+    # as low-confidence rather than silently discarding them.
     for index in np.argsort(scores)[::-1]:
-        score = float(scores[index])
-        if score < threshold or len(candidates) >= limit:
+        if len(candidates) >= limit:
             break
+        cosine = float(scores[index])
+        above = cosine >= threshold
+        confidence = face_confidence(cosine) if modality == "face" else cosine
         thumbnail = str(data["thumbnails"][index]) if "thumbnails" in data.files else ""
+        detail = f"{modality} cosine={cosine:.3f} · confidence={confidence * 100:.1f}%"
         candidates.append(Candidate(
             video_id=video_id,
             start_time=float(data["start_times"][index]),
             end_time=float(data["end_times"][index]),
-            score=score,
+            score=confidence,
             modality=modality,
             thumbnail=thumbnail or None,
-            evidence=f"{modality} cosine={score:.3f}",
-            raw_score=score,
-            decision="absolute_hit",
+            evidence=detail if above else detail + " · 低于阈值",
+            raw_score=cosine,
+            decision="absolute_hit" if above else "weak",
+            above_threshold=above,
         ))
     return candidates
 
@@ -138,36 +178,39 @@ def _visual_candidates(
     fallback_counts = {"recall": 3, "balanced": 2, "precision": 1}
     fallback_indices = set(int(index) for index in raw_order[:min(len(raw_order), fallback_counts[profile])])
     candidates = []
+    cap = 500 if profile == "recall" else limit
 
+    # Recall every bucket sorted by score (capped), tagging each as above/below the
+    # profile threshold instead of dropping it, so borderline segments stay visible.
     for index in raw_order:
+        if len(candidates) >= cap:
+            break
         index = int(index)
         raw_score = float(raw_scores[index])
         z_score = float(z_scores[index])
         percentile = float(percentiles[index])
         if reliable:
             if z_score >= 2.0 or percentile >= 0.975:
-                decision = "strong"
+                decision, above = "strong", True
             elif percentile >= 0.80:
-                decision = "fuzzy"
+                qualifies = not (
+                    (profile == "balanced" and not (z_score >= 1.0 or percentile >= 0.90))
+                    or profile == "precision"
+                )
+                decision, above = ("fuzzy", True) if qualifies else ("weak", False)
             else:
-                continue
-            if profile == "balanced" and decision == "fuzzy" and not (z_score >= 1.0 or percentile >= 0.90):
-                continue
-            if profile == "precision" and decision != "strong":
-                continue
+                decision, above = "weak", False
             ranking_score = percentile
+            detail = f"visual cosine={raw_score:.3f} · percentile={percentile * 100:.1f}% · robust_z={z_score:.2f}"
         else:
-            if index not in fallback_indices:
-                continue
-            decision = "fallback"
+            if index in fallback_indices:
+                decision, above = "fallback", True
+            else:
+                decision, above = "weak", False
             ranking_score = float(np.clip((raw_score + 1.0) / 2.0, 0, 1))
+            detail = f"visual cosine={raw_score:.3f} · distribution fallback (n={len(raw_scores)})"
 
         thumbnail = str(data["thumbnails"][index]) if "thumbnails" in data.files else ""
-        detail = (
-            f"visual cosine={raw_score:.3f} · percentile={percentile * 100:.1f}% · robust_z={z_score:.2f}"
-            if reliable else
-            f"visual cosine={raw_score:.3f} · distribution fallback (n={len(raw_scores)})"
-        )
         candidates.append(Candidate(
             video_id=video_id,
             start_time=float(data["start_times"][index]),
@@ -175,28 +218,49 @@ def _visual_candidates(
             score=ranking_score,
             modality="visual",
             thumbnail=thumbnail or None,
-            evidence=detail,
+            evidence=detail if above else detail + " · 低于阈值",
             raw_score=raw_score,
             robust_z=z_score,
             percentile=percentile,
             decision=decision,
+            above_threshold=above,
             distribution_reliable=reliable,
             distribution_median=distribution["median"],
             distribution_mad=distribution["mad"],
         ))
-    if profile == "recall":
-        return candidates[:500]
-    return candidates[:limit]
+    return candidates
 
 
-def _groups(candidates: list[Candidate], gap: float) -> list[list[Candidate]]:
+def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_duration: float) -> bool:
+    if group[0].video_id != candidate.video_id:
+        return False
+    group_start = min(item.start_time for item in group)
+    group_end = max(item.end_time for item in group)
+    merged_start = min(group_start, candidate.start_time)
+    merged_end = max(group_end, candidate.end_time)
+    if merged_end - merged_start > max_duration:
+        return False
+
+    group_modalities = {item.modality for item in group}
+    overlaps = candidate.start_time < group_end and candidate.end_time > group_start
+    near = candidate.start_time <= group_end + gap
+
+    # Visual buckets are already the display granularity. Do not chain adjacent
+    # visual-only hits into a full-video result; merge them only when another
+    # modality anchors the same moment, or when intervals genuinely overlap.
+    if candidate.modality == "visual" and group_modalities == {"visual"}:
+        return overlaps
+    if candidate.modality == "visual" or group_modalities == {"visual"}:
+        return overlaps or (near and bool(group_modalities - {"visual"}))
+    return near
+
+
+def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -> list[list[Candidate]]:
     groups: list[list[Candidate]] = []
     for candidate in sorted(candidates, key=lambda item: (item.video_id, item.start_time, item.end_time)):
-        if groups and groups[-1][0].video_id == candidate.video_id:
-            group_end = max(item.end_time for item in groups[-1])
-            if candidate.start_time <= group_end + gap:
-                groups[-1].append(candidate)
-                continue
+        if groups and _should_merge(groups[-1], candidate, gap, max_duration):
+            groups[-1].append(candidate)
+            continue
         groups.append([candidate])
     return groups
 
@@ -210,9 +274,10 @@ class SearchEngine:
 
     def _clip(self):
         if self._clip_encoder is None:
-            from app.indexing.visual import ClipEncoder
+            from app.indexing.visual import ClipEncoder, resolve_device
 
-            self._clip_encoder = ClipEncoder(self.settings.clip_model, self.settings.clip_pretrained, "cpu")
+            device = resolve_device(self.settings.npu_enabled, self.settings.npu_device_id, self.settings.cuda_enabled)
+            self._clip_encoder = ClipEncoder(self.settings.clip_model, self.settings.clip_pretrained, device)
         return self._clip_encoder
 
     def _face(self):
@@ -233,6 +298,7 @@ class SearchEngine:
         alpha: float = 0.5,
         limit: int = 24,
         merge_gap: float = 2,
+        max_result_seconds: float = 15,
         visual_profile: str = "balanced",
     ) -> list[dict]:
         if visual_profile not in {"recall", "balanced", "precision"}:
@@ -272,17 +338,22 @@ class SearchEngine:
                     reverse=True,
                 )
                 for score, chunk in scored[:limit * 3]:
-                    if score < 0.25:
+                    if score <= 0:
                         continue
+                    above = score >= 0.25
                     candidates.append(Candidate(
                         video["id"], float(chunk["start_time"]), float(chunk["end_time"]), score,
-                        "asr", evidence=chunk["text"], raw_score=score, decision="lexical_hit",
+                        "asr", evidence=chunk["text"], raw_score=score,
+                        decision="lexical_hit" if above else "weak", above_threshold=above,
                     ))
 
         names = {video["id"]: video["name"] for video in videos}
+        # Each modality score is now calibrated to a comparable [0,1] scale —
+        # visual=empirical percentile, face=logistic-calibrated cosine, asr=lexical
+        # coverage — so these weights express modality priority, not scale fixes.
         weights = {"face": 0.55, "visual": 0.30, "asr": 0.15}
         results = []
-        for group in _groups(candidates, merge_gap):
+        for group in _groups(candidates, merge_gap, max_result_seconds):
             best_by_modality = {}
             for item in group:
                 best_by_modality[item.modality] = max(best_by_modality.get(item.modality, -1), item.score)
@@ -292,9 +363,10 @@ class SearchEngine:
             video_id = group[0].video_id
             group_decisions = {item.decision for item in group}
             decision = next(
-                (name for name in ("strong", "fuzzy", "fallback", "absolute_hit", "lexical_hit") if name in group_decisions),
+                (name for name in ("strong", "fuzzy", "fallback", "absolute_hit", "lexical_hit", "weak") if name in group_decisions),
                 "hit",
             )
+            group_above = any(item.above_threshold for item in group)
             results.append(SearchResult(
                 video_id=video_id,
                 video_name=names.get(video_id, video_id),
@@ -305,6 +377,7 @@ class SearchEngine:
                 thumbnail_url=(f"/api/thumbnails/{video_id}/{best_thumbnail}" if best_thumbnail else None),
                 media_url=f"/api/videos/{video_id}/media",
                 decision=decision,
+                above_threshold=group_above,
                 evidence=[{
                     "modality": item.modality,
                     "score": round(item.score, 4),
@@ -318,6 +391,8 @@ class SearchEngine:
                     "detail": item.evidence,
                 } for item in group],
             ))
-        results.sort(key=lambda item: item.score, reverse=True)
+        # Above-threshold results first (each block sorted by score), so the UI can
+        # draw a single divider where matches start dropping below threshold.
+        results.sort(key=lambda item: (item.above_threshold, item.score), reverse=True)
         result_limit = 500 if visual_profile == "recall" else limit
         return [item.to_dict() for item in results[:result_limit]]
