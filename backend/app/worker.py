@@ -2,24 +2,38 @@ from __future__ import annotations
 
 import argparse
 import os
+import json
 import subprocess
 import sys
+import time
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
 
 from app.db import Catalog
+from app.settings import Settings
 from app.settings import get_settings
 
 
 @contextmanager
-def exclusive_worker_lock(path: Path):
+def exclusive_worker_lock(path: Path, poll_seconds: float = 1.0):
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a+")
+    handle.seek(0)
     if os.name == "nt":
         import msvcrt
 
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        # Windows msvcrt LK_LOCK only retries for ~10s before raising EDEADLOCK,
+        # unlike fcntl.flock(LOCK_EX) which blocks forever. A long stage on another
+        # job (face indexing runs many minutes) would otherwise crash every worker
+        # queued behind it and leave the job stuck as "queued". Poll a non-blocking
+        # lock instead so we wait indefinitely.
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                time.sleep(poll_seconds)
     else:
         import fcntl
 
@@ -31,7 +45,10 @@ def exclusive_worker_lock(path: Path):
             import msvcrt
 
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
         else:
             import fcntl
 
@@ -51,18 +68,25 @@ def execute_job(job_id: str) -> None:
 
     lock_path = settings.app_data_dir / "index-worker.lock"
     with exclusive_worker_lock(lock_path):
-        catalog.update_job(job_id, status="running", stage="starting", progress=0.01, worker_pid=os.getpid())
+        metrics = {"stages": {}, "total_elapsed_seconds": None}
+        job_start = time.perf_counter()
+        catalog.update_job(
+            job_id, status="running", stage="starting", progress=0.01,
+            error=None, metrics=metrics, worker_pid=os.getpid(),
+        )
         catalog.update_video(video["id"], status="indexing")
         completed = set(video.get("indexed_modalities", []))
         stages = job["modalities"]
         try:
             for index, stage in enumerate(stages):
+                stage_start = time.perf_counter()
                 catalog.update_job(
                     job_id,
                     stage=stage,
                     progress=round(index / max(1, len(stages)), 3),
                 )
                 environment = os.environ.copy()
+                environment.update(worker_environment(settings))
                 if settings.npu_enabled:
                     environment["ASCEND_RT_VISIBLE_DEVICES"] = str(settings.npu_device_id)
                 process = subprocess.run(
@@ -70,37 +94,76 @@ def execute_job(job_id: str) -> None:
                     cwd=str(Path(__file__).resolve().parents[1]),
                     env=environment,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     capture_output=True,
                 )
+                elapsed = round(time.perf_counter() - stage_start, 3)
                 if process.returncode != 0:
+                    metrics["stages"][stage] = {"elapsed_seconds": elapsed, "status": "failed"}
+                    metrics["total_elapsed_seconds"] = round(time.perf_counter() - job_start, 3)
+                    catalog.update_job(job_id, metrics=metrics)
                     details = process.stderr.strip() or process.stdout.strip()
                     raise RuntimeError(f"{stage} 阶段失败: {details[-4000:]}")
+                stage_result = parse_stage_result(process.stdout)
+                metrics["stages"][stage] = {
+                    "elapsed_seconds": elapsed,
+                    "status": "completed",
+                    **stage_result,
+                }
                 completed.add(stage)
                 catalog.update_video(video["id"], indexed_modalities=sorted(completed))
                 catalog.update_job(
                     job_id,
                     progress=round((index + 1) / max(1, len(stages)), 3),
+                    metrics=metrics,
                 )
-            catalog.update_job(job_id, status="completed", stage="completed", progress=1, error=None)
+            metrics["total_elapsed_seconds"] = round(time.perf_counter() - job_start, 3)
+            catalog.update_job(job_id, status="completed", stage="completed", progress=1, error=None, metrics=metrics)
             catalog.update_video(video["id"], status="ready")
         except Exception as exc:
-            catalog.update_job(job_id, status="failed", stage="failed", error=str(exc))
+            metrics["total_elapsed_seconds"] = round(time.perf_counter() - job_start, 3)
+            catalog.update_job(job_id, status="failed", stage="failed", error=str(exc), metrics=metrics)
             catalog.update_video(video["id"], status="failed")
             traceback.print_exc()
             raise
 
 
 def launch_job(job_id: str) -> int:
+    settings = get_settings()
     backend_dir = Path(__file__).resolve().parents[1]
+    log_path = settings.app_data_dir / f"job-{job_id}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen(
         [sys.executable, "-m", "app.worker", job_id],
         cwd=str(backend_dir),
+        env={**os.environ.copy(), **worker_environment(settings)},
         start_new_session=True,
-        stdout=(get_settings().app_data_dir / f"job-{job_id}.log").open("a", encoding="utf-8"),
+        stdout=log_path.open("a", encoding="utf-8"),
         stderr=subprocess.STDOUT,
     )
-    Catalog(get_settings().db_path).update_job(job_id, worker_pid=process.pid)
+    Catalog(settings.db_path).update_job(job_id, worker_pid=process.pid)
     return process.pid
+
+
+def worker_environment(settings: Settings) -> dict[str, str]:
+    return {
+        "APP_DATA_DIR": str(settings.app_data_dir.resolve()),
+        "APP_MODEL_DIR": str(settings.app_model_dir.resolve()),
+        "CUDA_ENABLED": str(settings.cuda_enabled).lower(),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+    }
+
+
+def parse_stage_result(output: str) -> dict:
+    for line in reversed([item.strip() for item in output.splitlines() if item.strip()]):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        return value if isinstance(value, dict) else {}
+    return {}
 
 
 def main() -> None:
@@ -112,4 +175,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
