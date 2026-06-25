@@ -3,7 +3,7 @@
 面向私有视频素材的三索引 baseline：
 
 - `face_index`：InsightFace / ArcFace，同一人物与明星出现片段。
-- `visual_index`：OpenCLIP，文本或参考图检索场景、物体和视觉语义。
+- `visual_index`：OpenCLIP，默认 5fps 抽帧、5 秒逻辑分段，文本或参考图检索场景、物体和视觉语义。
 - `asr_index`：Whisper baseline（保留 FunASR 适配器），检索带时间戳的语音内容。
 
 前端参考视频检索 Playground 的交互形态，后端提供 FastAPI 和 OpenAPI 文档。检索结果统一返回连续的 `start_time/end_time`、置信度、缩略图和命中证据。
@@ -73,13 +73,15 @@ NPU_DEVICE_ID=7 docker compose -f compose.yml -f compose.server.yml -f compose.a
 
 更完整的 GitHub 迁移、clone 后部署、运行时数据迁移和共享服务器资源检查流程见 [DEPLOY.md](DEPLOY.md)。
 
+共同开发交接、pipeline 细节、数据结构、已知问题和后续路线见 [docs/HANDOFF.md](docs/HANDOFF.md)。
+
 ## 模型准备
 
 模型不提交到 Git。当前 baseline 约定：
 
 1. 将 OpenCLIP 权重放到 `models/ViT-B-32.openai.bin`。
 2. InsightFace `buffalo_l` 首次使用时下载到 `models/insightface/`。
-3. MVP 冒烟默认使用 Whisper `tiny`，正式精度测试可切换 `small`；也可以上传 JSON/SRT/VTT 字幕绕过 ASR 推理。FunASR 通过适配器保留为下一步的昇腾优化项。
+3. MVP 当前使用 Whisper baseline，前端可选 `base / small / medium / large-v3` 和 `zh / en / auto`；也可以上传 JSON/SRT/VTT 字幕绕过 ASR 推理。FunASR 通过适配器保留为下一步的昇腾优化项。
 
 在新的昇腾服务器上，通过 `ASCEND_RUNTIME_IMAGE` 指向与驱动匹配的 ARM64 CANN/torch_npu 基础镜像，不需要修改业务代码。
 当前服务器镜像额外固定 NumPy 1.26，以兼容 InsightFace 的 ONNXRuntime；ARM64 wheel 放在不入 Git 的 `vendor-wheels/`，部署脚本可重新下载。
@@ -88,7 +90,7 @@ NPU_DEVICE_ID=7 docker compose -f compose.yml -f compose.server.yml -f compose.a
 
 - 参考图找人：参考图用于 ArcFace 身份向量，文字可作为场景约束。
 - 文字找明星：先在“人物库”登记名称和参考正脸，之后文字中出现该名称即可调用 `face_index`。
-- 文本/图片找场景物体：CLIP 支持纯文本、纯图片和加权组合。
+- 文本/图片找场景物体：CLIP 支持纯文本、纯图片和加权组合；Visual 检索默认返回独立短片段，不再把连续 5 秒桶一路合并成整段视频。
 - 文本找语音：ASR 首先支持关键词和近似字符匹配；语义文本 embedding 是后续升级项。
 
 ## MVP 验收
