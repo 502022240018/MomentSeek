@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+ARG ASCEND_RUNTIME_IMAGE=0a8e7788f0d1
+FROM node:20-alpine AS frontend-build
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# Override this with a portable CANN/torch_npu ARM64 base image on another server.
+FROM ${ASCEND_RUNTIME_IMAGE}
+USER root
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app/backend
+COPY vendor-wheels/ /tmp/vendor-wheels/
+COPY backend/requirements-ascend.txt ./
+RUN pip install --no-index --no-deps /tmp/vendor-wheels/insightface-1.0.1-py3-none-any.whl \
+    && pip install --no-index --find-links=/tmp/vendor-wheels -r requirements-ascend.txt \
+    && rm -rf /tmp/vendor-wheels
+COPY backend/ ./
+COPY --from=frontend-build /src/frontend/dist ./app/static
+RUN mkdir -p /app/runtime /app/models
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

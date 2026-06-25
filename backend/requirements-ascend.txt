@@ -1,0 +1,9 @@
+# The selected Ascend base image already provides torch/torch_npu, FastAPI,
+# InsightFace, onnxruntime-cann, OpenCV and openai-whisper.
+numpy==1.26.4
+onnx==1.17.0
+scikit-image==0.25.2
+tifffile==2025.6.11
+open_clip_torch==3.3.0
+python-multipart==0.0.22
+pydantic-settings==2.12.0

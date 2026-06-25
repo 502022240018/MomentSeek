@@ -1,0 +1,31 @@
+name: momentseek-mvp
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: momentseek-mvp:cpu
+    container_name: momentseek-mvp-app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8300}:8000"
+    env_file:
+      - .env
+    environment:
+      APP_DATA_DIR: /app/runtime
+      APP_MODEL_DIR: /app/models
+      NPU_ENABLED: "false"
+    volumes:
+      - ./runtime:/app/runtime
+      - ./models:/app/models
+    cpus: 24
+    mem_limit: 48g
+    pids_limit: 4096
+    shm_size: 4gb
+    stop_grace_period: 30s
+    networks:
+      - momentseek
+
+networks:
+  momentseek:
+    name: momentseek-mvp-net

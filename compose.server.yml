@@ -1,0 +1,12 @@
+# Server bootstrap: use the compatible Ascend runtime image, but expose no NPU device.
+# Add compose.ascend.yml only after a card is explicitly approved.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.ascend
+      args:
+        ASCEND_RUNTIME_IMAGE: "${ASCEND_RUNTIME_IMAGE:-0a8e7788f0d1}"
+    image: momentseek-mvp:ascend
+    environment:
+      NPU_ENABLED: "false"

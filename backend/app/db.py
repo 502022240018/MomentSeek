@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
+
+SCHEMA = """
+PRAGMA foreign_keys=ON;
+CREATE TABLE IF NOT EXISTS videos (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  duration REAL NOT NULL DEFAULT 0,
+  fps REAL NOT NULL DEFAULT 0,
+  width INTEGER NOT NULL DEFAULT 0,
+  height INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'uploaded',
+  indexed_modalities TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'queued',
+  stage TEXT NOT NULL DEFAULT 'queued',
+  progress REAL NOT NULL DEFAULT 0,
+  modalities TEXT NOT NULL DEFAULT '[]',
+  options TEXT NOT NULL DEFAULT '{}',
+  error TEXT,
+  worker_pid INTEGER,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS entities (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  reference_path TEXT NOT NULL,
+  embedding_path TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+class Catalog:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.connect() as connection:
+            connection.executescript(SCHEMA)
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=30000")
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
+
+    def create_video(self, record: dict) -> dict:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO videos(id,name,file_path,duration,fps,width,height,status)
+                   VALUES(:id,:name,:file_path,:duration,:fps,:width,:height,:status)""",
+                record,
+            )
+        return self.get_video(record["id"])
+
+    def list_videos(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM videos ORDER BY created_at DESC").fetchall()
+        return [self._decode_video(row) for row in rows]
+
+    def get_video(self, video_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
+        return self._decode_video(row) if row else None
+
+    def update_video(self, video_id: str, **values) -> None:
+        allowed = {"status", "indexed_modalities", "duration", "fps", "width", "height"}
+        values = {key: value for key, value in values.items() if key in allowed}
+        if not values:
+            return
+        if "indexed_modalities" in values:
+            values["indexed_modalities"] = json.dumps(values["indexed_modalities"])
+        clause = ",".join(f"{key}=?" for key in values)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE videos SET {clause},updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (*values.values(), video_id),
+            )
+
+    def create_job(self, record: dict) -> dict:
+        payload = dict(record)
+        payload["modalities"] = json.dumps(payload.get("modalities", []))
+        payload["options"] = json.dumps(payload.get("options", {}), ensure_ascii=False)
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO jobs(id,video_id,status,stage,progress,modalities,options)
+                   VALUES(:id,:video_id,:status,:stage,:progress,:modalities,:options)""",
+                payload,
+            )
+        return self.get_job(record["id"])
+
+    def get_job(self, job_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return self._decode_job(row) if row else None
+
+    def list_jobs(self, video_id: str | None = None) -> list[dict]:
+        query, args = "SELECT * FROM jobs", ()
+        if video_id:
+            query, args = query + " WHERE video_id=?", (video_id,)
+        query += " ORDER BY created_at DESC"
+        with self.connect() as connection:
+            rows = connection.execute(query, args).fetchall()
+        return [self._decode_job(row) for row in rows]
+
+    def update_job(self, job_id: str, **values) -> None:
+        allowed = {"status", "stage", "progress", "error", "worker_pid"}
+        values = {key: value for key, value in values.items() if key in allowed}
+        if not values:
+            return
+        clause = ",".join(f"{key}=?" for key in values)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE jobs SET {clause},updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (*values.values(), job_id),
+            )
+
+    def create_entity(self, record: dict) -> dict:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO entities(id,name,reference_path,embedding_path) VALUES(:id,:name,:reference_path,:embedding_path)",
+                record,
+            )
+        return self.get_entity(record["id"])
+
+    def update_entity_embedding(self, entity_id: str, embedding_path: str) -> None:
+        with self.connect() as connection:
+            connection.execute("UPDATE entities SET embedding_path=? WHERE id=?", (embedding_path, entity_id))
+
+    def list_entities(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM entities ORDER BY name").fetchall()
+        return [dict(row) for row in rows]
+
+    def get_entity(self, entity_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
+        return dict(row) if row else None
+
+    def find_entity_in_text(self, text: str) -> dict | None:
+        lowered = text.casefold()
+        matches = [entity for entity in self.list_entities() if entity["name"].casefold() in lowered]
+        return max(matches, key=lambda item: len(item["name"]), default=None)
+
+    @staticmethod
+    def _decode_video(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["indexed_modalities"] = json.loads(item["indexed_modalities"] or "[]")
+        return item
+
+    @staticmethod
+    def _decode_job(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["modalities"] = json.loads(item["modalities"] or "[]")
+        item["options"] = json.loads(item["options"] or "{}")
+        return item
+
