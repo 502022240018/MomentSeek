@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,11 +73,23 @@ def extract_audio(video_path: str | Path, output_path: str | Path) -> Path:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        ffmpeg_executable(), "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(output_path),
     ]
     subprocess.run(command, check=True)
     return output_path
+
+
+def ffmpeg_executable() -> str:
+    executable = shutil.which("ffmpeg")
+    if executable:
+        return executable
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:
+        raise FileNotFoundError("未找到 ffmpeg；请安装 ffmpeg 或 imageio-ffmpeg") from exc
 
 
 _TIMECODE = re.compile(r"(?:(\d+):)?(\d{2}):(\d{2})[,.](\d{3})")
@@ -88,4 +101,3 @@ def parse_timecode(value: str) -> float:
         raise ValueError(f"无法解析时间: {value}")
     hours, minutes, seconds, millis = match.groups()
     return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(millis) / 1000
-

@@ -15,11 +15,12 @@ class Settings(BaseSettings):
 
     npu_enabled: bool = False
     npu_device_id: int = 7
+    cuda_enabled: bool = False
     model_idle_policy: str = "process_exit"
 
     clip_model: str = "ViT-B-32"
     clip_pretrained: str = "openai"
-    visual_sample_fps: float = 1.0
+    visual_sample_fps: float = 5.0
     visual_segment_seconds: float = 5.0
     visual_batch_size: int = 32
 
@@ -28,8 +29,10 @@ class Settings(BaseSettings):
     face_provider: str = "cpu"
 
     asr_engine: str = "auto"
-    asr_model: str = "paraformer-zh"
-    asr_device: str = "cpu"
+    asr_model: str = "small"
+    asr_zh_model: str = "paraformer-zh"
+    asr_device: str = "auto"
+    asr_language: str = "zh"
 
     @property
     def db_path(self) -> Path:
@@ -62,10 +65,23 @@ class Settings(BaseSettings):
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
+    def resolve_path(self, value: str | Path) -> Path:
+        path = Path(value)
+        if path.is_absolute():
+            return path
+
+        candidates: list[Path] = []
+        if path.parts and path.parts[0] == self.app_data_dir.name:
+            candidates.append(self.app_data_dir.parent / path)
+        candidates.extend([Path.cwd() / path, self.app_data_dir / path])
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0].resolve()
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     settings = Settings()
     settings.ensure_dirs()
     return settings
-

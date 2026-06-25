@@ -25,12 +25,16 @@ def run(stage: str, job_id: str) -> dict:
     thumbnail_dir.mkdir(parents=True, exist_ok=True)
     working_dir.mkdir(parents=True, exist_ok=True)
     options = job.get("options") or {}
+    video_path = str(settings.resolve_path(video["file_path"]))
+    sidecar_path = options.get("sidecar_path")
+    if sidecar_path:
+        sidecar_path = str(settings.resolve_path(sidecar_path))
 
     if stage == "visual":
         from app.indexing.visual import build_visual_index
 
         return build_visual_index(
-            video_path=video["file_path"],
+            video_path=video_path,
             output_path=str(video_index_dir / "visual.npz"),
             thumbnail_dir=str(thumbnail_dir),
             model_name=settings.clip_model,
@@ -40,12 +44,13 @@ def run(stage: str, job_id: str) -> dict:
             batch_size=int(options.get("visual_batch_size", settings.visual_batch_size)),
             npu_enabled=settings.npu_enabled,
             npu_device_id=settings.npu_device_id,
+            cuda_enabled=settings.cuda_enabled,
         )
     if stage == "face":
         from app.indexing.faces import build_face_index
 
         return build_face_index(
-            video_path=video["file_path"],
+            video_path=video_path,
             output_path=str(video_index_dir / "faces.npz"),
             thumbnail_dir=str(thumbnail_dir),
             model_name=settings.face_model,
@@ -55,17 +60,19 @@ def run(stage: str, job_id: str) -> dict:
             model_root=str(settings.app_model_dir / "insightface"),
         )
     if stage == "asr":
-        from app.indexing.asr import build_asr_index
+        from app.indexing.asr import build_asr_index, resolve_asr_device
 
         return build_asr_index(
-            video_path=video["file_path"],
+            video_path=video_path,
             output_path=str(video_index_dir / "asr.json"),
             working_dir=str(working_dir),
             engine=settings.asr_engine,
-            model_name=settings.asr_model,
-            device=settings.asr_device,
+            model_name=str(options.get("asr_model", settings.asr_model)),
+            device=resolve_asr_device(settings.asr_device, settings.cuda_enabled, settings.npu_enabled, settings.npu_device_id),
             model_dir=str(settings.app_model_dir / "whisper"),
-            sidecar_path=options.get("sidecar_path"),
+            language=str(options.get("asr_language", settings.asr_language)),
+            sidecar_path=sidecar_path,
+            funasr_model=settings.asr_zh_model,
         )
     raise ValueError(f"未知索引阶段: {stage}")
 

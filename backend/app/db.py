@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   progress REAL NOT NULL DEFAULT 0,
   modalities TEXT NOT NULL DEFAULT '[]',
   options TEXT NOT NULL DEFAULT '{}',
+  metrics TEXT NOT NULL DEFAULT '{}',
   error TEXT,
   worker_pid INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -51,6 +52,13 @@ class Catalog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            self._ensure_columns(connection)
+
+    @staticmethod
+    def _ensure_columns(connection: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "metrics" not in columns:
+            connection.execute("ALTER TABLE jobs ADD COLUMN metrics TEXT NOT NULL DEFAULT '{}'")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -83,7 +91,7 @@ class Catalog:
         return self._decode_video(row) if row else None
 
     def update_video(self, video_id: str, **values) -> None:
-        allowed = {"status", "indexed_modalities", "duration", "fps", "width", "height"}
+        allowed = {"name", "status", "indexed_modalities", "duration", "fps", "width", "height"}
         values = {key: value for key, value in values.items() if key in allowed}
         if not values:
             return
@@ -96,14 +104,23 @@ class Catalog:
                 (*values.values(), video_id),
             )
 
+    def delete_video(self, video_id: str) -> bool:
+        # connect() does not enable PRAGMA foreign_keys, so the jobs cascade would
+        # not fire; delete the video's jobs explicitly in the same transaction.
+        with self.connect() as connection:
+            connection.execute("DELETE FROM jobs WHERE video_id=?", (video_id,))
+            cursor = connection.execute("DELETE FROM videos WHERE id=?", (video_id,))
+            return cursor.rowcount > 0
+
     def create_job(self, record: dict) -> dict:
         payload = dict(record)
         payload["modalities"] = json.dumps(payload.get("modalities", []))
         payload["options"] = json.dumps(payload.get("options", {}), ensure_ascii=False)
+        payload["metrics"] = json.dumps(payload.get("metrics", {}), ensure_ascii=False)
         with self.connect() as connection:
             connection.execute(
-                """INSERT INTO jobs(id,video_id,status,stage,progress,modalities,options)
-                   VALUES(:id,:video_id,:status,:stage,:progress,:modalities,:options)""",
+                """INSERT INTO jobs(id,video_id,status,stage,progress,modalities,options,metrics)
+                   VALUES(:id,:video_id,:status,:stage,:progress,:modalities,:options,:metrics)""",
                 payload,
             )
         return self.get_job(record["id"])
@@ -123,10 +140,12 @@ class Catalog:
         return [self._decode_job(row) for row in rows]
 
     def update_job(self, job_id: str, **values) -> None:
-        allowed = {"status", "stage", "progress", "error", "worker_pid"}
+        allowed = {"status", "stage", "progress", "error", "worker_pid", "metrics"}
         values = {key: value for key, value in values.items() if key in allowed}
         if not values:
             return
+        if "metrics" in values:
+            values["metrics"] = json.dumps(values["metrics"], ensure_ascii=False)
         clause = ",".join(f"{key}=?" for key in values)
         with self.connect() as connection:
             connection.execute(
@@ -172,5 +191,5 @@ class Catalog:
         item = dict(row)
         item["modalities"] = json.loads(item["modalities"] or "[]")
         item["options"] = json.loads(item["options"] or "{}")
+        item["metrics"] = json.loads(item.get("metrics") or "{}")
         return item
-

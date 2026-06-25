@@ -11,7 +11,12 @@ from app.indexing.common import atomic_save_npz, normalize
 from app.media import iter_sampled_frames, save_thumbnail
 
 
-def resolve_device(npu_enabled: bool, npu_device_id: int) -> str:
+def resolve_device(npu_enabled: bool, npu_device_id: int, cuda_enabled: bool = False) -> str:
+    if cuda_enabled:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
     if not npu_enabled:
         return "cpu"
     try:
@@ -85,8 +90,9 @@ def build_visual_index(
     batch_size: int,
     npu_enabled: bool,
     npu_device_id: int,
+    cuda_enabled: bool = False,
 ) -> dict:
-    device = resolve_device(npu_enabled, npu_device_id)
+    device = resolve_device(npu_enabled, npu_device_id, cuda_enabled)
     encoder = ClipEncoder(model_name, pretrained, device)
     buckets: dict[int, list[np.ndarray]] = defaultdict(list)
     times: dict[int, list[float]] = defaultdict(list)
@@ -135,4 +141,3 @@ def build_visual_index(
         model=np.asarray([model_name]),
     )
     return {"segments": len(bucket_ids), "frames": total_frames, "device": device}
-

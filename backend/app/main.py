@@ -4,6 +4,7 @@ import json
 import shutil
 import sqlite3
 import tempfile
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.db import Catalog
 from app.media import probe_video
-from app.schemas import HealthResponse, IndexRequest
+from app.schemas import HealthResponse, IndexRequest, VideoRenameRequest
 from app.search import SearchEngine
 from app.settings import get_settings
 from app.worker import launch_job
@@ -61,6 +62,18 @@ def _save_upload(upload: UploadFile, destination: Path) -> None:
         shutil.copyfileobj(upload.file, target, length=1024 * 1024)
 
 
+def _remove_video_files(video: dict, video_id: str) -> None:
+    files = [settings.resolve_path(video["file_path"])] if video.get("file_path") else []
+    files += [settings.upload_dir / f"{video_id}.transcript.{suffix}" for suffix in ("json", "srt", "vtt")]
+    for path in files:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+    for directory in (settings.index_dir / video_id, settings.thumbnail_dir / video_id):
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 @app.get("/api/health", response_model=HealthResponse)
 def health() -> dict:
     return {
@@ -68,6 +81,7 @@ def health() -> dict:
         "version": __version__,
         "npu_enabled": settings.npu_enabled,
         "npu_device_id": settings.npu_device_id if settings.npu_enabled else None,
+        "cuda_enabled": settings.cuda_enabled,
         "model_idle_policy": settings.model_idle_policy,
     }
 
@@ -95,14 +109,14 @@ async def upload_video(
     record = catalog.create_video({
         "id": video_id,
         "name": video.filename or video_path.name,
-        "file_path": str(video_path),
+        "file_path": str(video_path.resolve()),
         "duration": info.duration,
         "fps": info.fps,
         "width": info.width,
         "height": info.height,
         "status": "uploaded",
     })
-    record["sidecar_path"] = str(sidecar_path) if sidecar_path else None
+    record["sidecar_path"] = str(sidecar_path.resolve()) if sidecar_path else None
     return record
 
 
@@ -120,12 +134,38 @@ def get_video(video_id: str) -> dict:
     return video
 
 
+@app.patch("/api/videos/{video_id}")
+def rename_video(video_id: str, request: VideoRenameRequest) -> dict:
+    if not catalog.get_video(video_id):
+        raise HTTPException(status_code=404, detail="视频不存在")
+    catalog.update_video(video_id, name=request.name)
+    return catalog.get_video(video_id)
+
+
+@app.delete("/api/videos/{video_id}")
+def delete_video(video_id: str) -> dict:
+    video = catalog.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    jobs = catalog.list_jobs(video_id)
+    if any(job["status"] in {"queued", "running"} for job in jobs):
+        raise HTTPException(status_code=409, detail="该视频有索引任务进行中，请等任务结束后再删除")
+    _remove_video_files(video, video_id)
+    for job in jobs:
+        (settings.app_data_dir / f"job-{job['id']}.log").unlink(missing_ok=True)
+    catalog.delete_video(video_id)
+    return {"status": "deleted", "id": video_id}
+
+
 @app.get("/api/videos/{video_id}/media")
 def video_media(video_id: str):
     video = catalog.get_video(video_id)
-    if not video or not Path(video["file_path"]).exists():
+    if not video:
         raise HTTPException(status_code=404, detail="视频文件不存在")
-    return FileResponse(video["file_path"], filename=video["name"], content_disposition_type="inline")
+    video_path = settings.resolve_path(video["file_path"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+    return FileResponse(video_path, filename=video["name"], content_disposition_type="inline")
 
 
 @app.post("/api/videos/{video_id}/index", status_code=202)
@@ -141,6 +181,8 @@ def create_index_job(video_id: str, request: IndexRequest = Body(default_factory
             "visual_sample_fps": request.visual_sample_fps,
             "visual_segment_seconds": request.visual_segment_seconds,
             "face_sample_fps": request.face_sample_fps,
+            "asr_model": request.asr_model,
+            "asr_language": request.asr_language,
         }.items() if value is not None
     }
     for suffix in ("json", "srt", "vtt"):
@@ -238,6 +280,7 @@ async def search(
         image_path = settings.query_dir / f"{uuid.uuid4().hex}{_safe_suffix(query_image.filename, '.jpg')}"
         await run_in_threadpool(_save_upload, query_image, image_path)
     try:
+        started = time.perf_counter()
         results = await run_in_threadpool(
             search_engine.search,
             query_text.strip() if query_text else None,
@@ -247,12 +290,20 @@ async def search(
             max(0, min(1, alpha)),
             max(1, min(100, limit)),
         )
+        elapsed_seconds = round(time.perf_counter() - started, 3)
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
         if image_path:
             image_path.unlink(missing_ok=True)
-    return {"query": query_text, "modalities": selected_modalities, "count": len(results), "results": results}
+    return {
+        "query": query_text,
+        "modalities": selected_modalities,
+        "count": len(results),
+        "above_count": sum(1 for item in results if item.get("above_threshold")),
+        "elapsed_seconds": elapsed_seconds,
+        "results": results,
+    }
 
 
 @app.get("/api/thumbnails/{video_id}/{filename}")
@@ -281,4 +332,3 @@ else:
     @app.get("/", include_in_schema=False)
     def root():
         return JSONResponse({"name": "MomentSeek", "docs": "/docs", "status": "frontend not built"})
-
