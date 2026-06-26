@@ -73,7 +73,9 @@ NPU_DEVICE_ID=7 docker compose -f compose.yml -f compose.server.yml -f compose.a
 
 更完整的 GitHub 迁移、clone 后部署、运行时数据迁移和共享服务器资源检查流程见 [DEPLOY.md](DEPLOY.md)。
 
-共同开发交接、pipeline 细节、数据结构、已知问题和后续路线见 [docs/HANDOFF.md](docs/HANDOFF.md)。
+最新共同开发交接、pipeline 细节、当前服务器/公网链路、数据结构、已知问题和后续路线见 [docs/HANDOFF_CURRENT.md](docs/HANDOFF_CURRENT.md)。
+
+历史交接记录保留在 [docs/HANDOFF.md](docs/HANDOFF.md)，以 `HANDOFF_CURRENT.md` 为准。
 
 ## 模型准备
 
