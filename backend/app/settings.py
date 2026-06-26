@@ -18,6 +18,16 @@ class Settings(BaseSettings):
     cuda_enabled: bool = False
     model_idle_policy: str = "process_exit"
 
+    # Indexing execution mode:
+    #   "subprocess" (default) — API spawns a per-job worker; models load+exit per
+    #     stage (process_exit). Safe, no resident NPU memory.
+    #   "daemon" — API only enqueues jobs and starts the warm-pool indexer daemon,
+    #     which keeps CLIP/InsightFace resident and releases them after idle. Skips
+    #     ~14.5s model load + kernel compile per job. Holds ~2.3GB while active.
+    indexer_mode: str = "subprocess"
+    indexer_idle_timeout_seconds: float = 300.0
+    indexer_poll_seconds: float = 2.0
+
     clip_model: str = "ViT-B-32"
     clip_pretrained: str = "openai"
     visual_sample_fps: float = 5.0

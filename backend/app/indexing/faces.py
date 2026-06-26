@@ -71,8 +71,12 @@ def build_face_index(
     model_root: str | None = None,
     max_gap: float = 1.5,
     cosine_threshold: float = 0.35,
+    encoder: "FaceEncoder | None" = None,
 ) -> dict:
-    encoder = FaceEncoder(model_name, provider, device_id, model_root)
+    # encoder may be supplied by the warm pool (model already resident); otherwise
+    # load it for this call (the process_exit path).
+    if encoder is None:
+        encoder = FaceEncoder(model_name, provider, device_id, model_root)
     active: list[Track] = []
     finished: list[Track] = []
     next_number = 0
