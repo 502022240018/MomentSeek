@@ -22,7 +22,7 @@ from app.media import probe_video
 from app.schemas import HealthResponse, IndexRequest, VideoRenameRequest
 from app.search import SearchEngine
 from app.settings import get_settings
-from app.worker import launch_job
+from app.worker import launch_job, worker_environment
 
 
 settings = get_settings()
@@ -30,10 +30,38 @@ catalog = Catalog(settings.db_path)
 search_engine = SearchEngine(settings, catalog)
 
 
+def _spawn_indexer_daemon():
+    """Start the warm-pool daemon as a child of the API (daemon mode only).
+
+    Inherits the container env (incl. Ascend NPU vars) so it uses the same card as
+    the proven docker-exec path; does not override ASCEND_RT_VISIBLE_DEVICES.
+    """
+    import os
+    import subprocess
+    import sys
+
+    backend_dir = Path(__file__).resolve().parents[1]
+    log_path = settings.app_data_dir / "indexer-daemon.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    return subprocess.Popen(
+        [sys.executable, "-m", "app.indexer_daemon"],
+        cwd=str(backend_dir),
+        env={**os.environ.copy(), **worker_environment(settings)},
+        start_new_session=True,
+        stdout=log_path.open("a", encoding="utf-8"),
+        stderr=subprocess.STDOUT,
+    )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.ensure_dirs()
-    yield
+    daemon = _spawn_indexer_daemon() if settings.indexer_mode == "daemon" else None
+    try:
+        yield
+    finally:
+        if daemon is not None and daemon.poll() is None:
+            daemon.terminate()
 
 
 app = FastAPI(
@@ -200,7 +228,10 @@ def create_index_job(video_id: str, request: IndexRequest = Body(default_factory
         "modalities": request.modalities,
         "options": options,
     })
-    launch_job(job_id)
+    # In daemon mode the warm-pool indexer drains the queue itself; otherwise spawn
+    # a per-job subprocess worker.
+    if settings.indexer_mode != "daemon":
+        launch_job(job_id)
     return catalog.get_job(job_id) or job
 
 

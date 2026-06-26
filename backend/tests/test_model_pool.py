@@ -1,0 +1,85 @@
+import time
+
+from app.indexer_daemon import next_queued_job
+from app.model_pool import ModelPool
+
+
+def test_pool_caches_by_key():
+    pool = ModelPool(idle_timeout=999, reap_interval=999)
+    try:
+        calls = []
+        factory = lambda: (calls.append(1), object())[1]
+        a = pool.get("clip", factory)
+        b = pool.get("clip", factory)
+        assert a is b
+        assert len(calls) == 1  # built once, reused
+    finally:
+        pool.shutdown()
+
+
+def test_pool_separate_keys():
+    pool = ModelPool(idle_timeout=999, reap_interval=999)
+    try:
+        a = pool.get("clip", lambda: "C")
+        b = pool.get("face", lambda: "F")
+        assert a == "C" and b == "F"
+        assert set(pool.keys()) == {"clip", "face"}
+    finally:
+        pool.shutdown()
+
+
+def test_pool_evicts_idle_and_frees_then_rebuilds():
+    freed = []
+    pool = ModelPool(idle_timeout=0.05, reap_interval=999, on_free=freed.append)
+    try:
+        pool.get("clip", lambda: "model-1")
+        time.sleep(0.12)
+        assert pool.evict_idle() == ["clip"]
+        assert pool.keys() == []
+        assert freed == ["model-1"]
+        # a later request rebuilds a fresh instance
+        assert pool.get("clip", lambda: "model-2") == "model-2"
+    finally:
+        pool.shutdown()
+
+
+def test_pool_keeps_recently_used():
+    pool = ModelPool(idle_timeout=10, reap_interval=999)
+    try:
+        pool.get("clip", lambda: "m")
+        assert pool.evict_idle() == []  # used just now, not idle
+        assert pool.keys() == ["clip"]
+    finally:
+        pool.shutdown()
+
+
+def test_shutdown_frees_all():
+    freed = []
+    pool = ModelPool(idle_timeout=999, reap_interval=999, on_free=freed.append)
+    pool.get("a", lambda: "x")
+    pool.get("b", lambda: "y")
+    pool.shutdown()
+    assert set(freed) == {"x", "y"}
+    assert pool.keys() == []
+
+
+class _FakeCatalog:
+    def __init__(self, jobs):
+        self._jobs = jobs
+
+    def list_jobs(self):
+        return self._jobs
+
+
+def test_next_queued_job_oldest_first():
+    jobs = [
+        {"id": "b", "status": "queued", "created_at": "2026-06-26 02:00:00"},
+        {"id": "a", "status": "queued", "created_at": "2026-06-26 01:00:00"},
+        {"id": "c", "status": "running", "created_at": "2026-06-26 00:00:00"},
+    ]
+    assert next_queued_job(_FakeCatalog(jobs))["id"] == "a"
+
+
+def test_next_queued_job_none_when_no_queued():
+    jobs = [{"id": "x", "status": "completed", "created_at": "2026-06-26 00:00:00"}]
+    assert next_queued_job(_FakeCatalog(jobs)) is None
