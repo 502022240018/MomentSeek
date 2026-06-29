@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     indexer_idle_timeout_seconds: float = 300.0
     indexer_poll_seconds: float = 2.0
 
+    # Frame source for indexing decode:
+    #   "ffmpeg" (default) — ffmpeg multithreaded decode + fps/scale in one C pass,
+    #     decoding directly to a small size (decode + preprocess is ~89% of visual
+    #     and ~58% of face, all CPU). Falls back to cv2 if ffmpeg can't start.
+    #   "cv2" — original single-threaded cv2 full-resolution decode.
+    frame_reader: str = "ffmpeg"
+    # Decode height fed to each stage (0 = source resolution). Visual only needs
+    # 224 for CLIP, so 256 is plenty; face detector resizes to 640 internally, so
+    # 720 keeps detection while cutting decode + pipe bytes. Source is never upscaled.
+    visual_decode_height: int = 256
+    face_decode_height: int = 720
+
     clip_model: str = "ViT-B-32"
     clip_pretrained: str = "openai"
     visual_sample_fps: float = 5.0
@@ -43,6 +55,15 @@ class Settings(BaseSettings):
     asr_zh_model: str = "paraformer-zh"
     asr_device: str = "auto"
     asr_language: str = "zh"
+    asr_semantic_enabled: bool = True
+    asr_semantic_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    # Keep semantic text embeddings on CPU by default; sentence-transformers on
+    # Ascend NPU is not guaranteed, and chunk embedding is cheap compared with ASR.
+    asr_semantic_device: str = "cpu"
+    asr_semantic_batch_size: int = 32
+    # Shared servers should not hang an indexing job while downloading from
+    # Hugging Face. Pre-cache/mount the model, or set this false for local dev.
+    asr_semantic_local_files_only: bool = True
 
     @property
     def db_path(self) -> Path:

@@ -32,6 +32,8 @@ def test_asr_index_handles_video_without_audio(tmp_path, monkeypatch):
 
     monkeypatch.setattr(asr, "extract_audio", no_audio)
     output_path = tmp_path / "asr.json"
+    semantic_path = tmp_path / "asr_semantic.npz"
+    semantic_path.write_bytes(b"stale")
 
     result = build_asr_index(
         video_path=str(tmp_path / "silent.mp4"),
@@ -41,8 +43,10 @@ def test_asr_index_handles_video_without_audio(tmp_path, monkeypatch):
         model_name="tiny",
         device="cpu",
         model_dir=str(tmp_path / "models"),
+        semantic_output_path=str(semantic_path),
     )
 
     assert result["engine"] == "no_audio"
     assert result["chunks"] == 0
     assert json.loads(output_path.read_text(encoding="utf-8"))["chunks"] == []
+    assert not semantic_path.exists()

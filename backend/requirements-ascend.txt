@@ -7,3 +7,4 @@ tifffile==2025.6.11
 open_clip_torch==3.3.0
 python-multipart==0.0.22
 pydantic-settings==2.12.0
+sentence-transformers==3.3.1

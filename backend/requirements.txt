@@ -9,3 +9,4 @@ open_clip_torch==3.3.0
 insightface==1.0.1
 funasr==1.3.9
 pydantic-settings==2.12.0
+sentence-transformers==3.3.1

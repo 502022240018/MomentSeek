@@ -49,6 +49,8 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             npu_device_id=settings.npu_device_id,
             cuda_enabled=settings.cuda_enabled,
             encoder=encoder,
+            decode_height=settings.visual_decode_height,
+            prefer_ffmpeg=settings.frame_reader == "ffmpeg",
         )
     if stage == "face":
         from app.indexing.faces import FaceEncoder, build_face_index
@@ -84,6 +86,13 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             language=str(options.get("asr_language", settings.asr_language)),
             sidecar_path=sidecar_path,
             funasr_model=settings.asr_zh_model,
+            semantic_enabled=settings.asr_semantic_enabled,
+            semantic_output_path=str(video_index_dir / "asr_semantic.npz"),
+            semantic_model=settings.asr_semantic_model,
+            semantic_device=settings.asr_semantic_device,
+            semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
+            semantic_batch_size=settings.asr_semantic_batch_size,
+            semantic_local_files_only=settings.asr_semantic_local_files_only,
         )
     raise ValueError(f"未知索引阶段: {stage}")
 

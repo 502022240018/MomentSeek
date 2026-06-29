@@ -39,7 +39,18 @@ export type Entity = {
   embedding_path?: string;
 };
 
-export type Evidence = { modality: string; score: number; detail?: string };
+export type Evidence = {
+  modality: string;
+  score: number;
+  detail?: string;
+  best_time?: number | null;
+  visual_top1?: number | null;
+  visual_top3?: number | null;
+  visual_mean?: number | null;
+  lexical_score?: number | null;
+  semantic_score?: number | null;
+  semantic_cosine?: number | null;
+};
 
 export type SearchResult = {
   video_id: string;

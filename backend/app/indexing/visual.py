@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from app.indexing.common import atomic_save_npz, normalize
-from app.media import iter_sampled_frames, save_thumbnail
+from app.media import read_frames, save_thumbnail
 
 
 def resolve_device(npu_enabled: bool, npu_device_id: int, cuda_enabled: bool = False) -> str:
@@ -141,6 +141,8 @@ def build_visual_index(
     npu_device_id: int,
     cuda_enabled: bool = False,
     encoder: "ClipEncoder | None" = None,
+    decode_height: int = 0,
+    prefer_ffmpeg: bool = True,
 ) -> dict:
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
@@ -150,6 +152,9 @@ def build_visual_index(
     buckets: dict[int, list[np.ndarray]] = defaultdict(list)
     times: dict[int, list[float]] = defaultdict(list)
     thumbnails: dict[int, str] = {}
+    frame_embeddings: list[np.ndarray] = []
+    frame_times: list[float] = []
+    frame_segment_ids: list[int] = []
     pending_frames: list[np.ndarray] = []
     pending_meta: list[tuple[int, float]] = []
     thumbnail_dir = Path(thumbnail_dir)
@@ -163,9 +168,12 @@ def build_visual_index(
         for (bucket, timestamp), vector in zip(pending_meta, vectors):
             buckets[bucket].append(vector)
             times[bucket].append(timestamp)
+            frame_embeddings.append(vector)
+            frame_times.append(timestamp)
+            frame_segment_ids.append(bucket)
         pending_frames, pending_meta = [], []
 
-    for timestamp, frame in iter_sampled_frames(video_path, sample_fps):
+    for timestamp, frame in read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg):
         bucket = int(timestamp // segment_seconds)
         if bucket not in thumbnails:
             thumbnail = thumbnail_dir / f"visual_{bucket:06d}.jpg"
@@ -187,10 +195,15 @@ def build_visual_index(
     thumbnail_names = np.asarray([thumbnails[bucket] for bucket in bucket_ids], dtype="U128")
     atomic_save_npz(
         output_path,
+        schema_version=np.asarray([2], dtype=np.int16),
+        segment_ids=np.asarray(bucket_ids, dtype=np.int32),
         embeddings=embeddings.astype(np.float32),
         start_times=starts,
         end_times=ends,
         thumbnails=thumbnail_names,
+        frame_embeddings=np.stack(frame_embeddings).astype(np.float32),
+        frame_times=np.asarray(frame_times, dtype=np.float32),
+        frame_segment_ids=np.asarray(frame_segment_ids, dtype=np.int32),
         model=np.asarray([model_name]),
     )
-    return {"segments": len(bucket_ids), "frames": total_frames, "device": device}
+    return {"segments": len(bucket_ids), "frames": total_frames, "schema_version": 2, "device": device}

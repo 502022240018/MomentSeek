@@ -45,6 +45,8 @@ def run(stage: str, job_id: str) -> dict:
             npu_enabled=settings.npu_enabled,
             npu_device_id=settings.npu_device_id,
             cuda_enabled=settings.cuda_enabled,
+            decode_height=settings.visual_decode_height,
+            prefer_ffmpeg=settings.frame_reader == "ffmpeg",
         )
     if stage == "face":
         from app.indexing.faces import build_face_index
@@ -58,6 +60,8 @@ def run(stage: str, job_id: str) -> dict:
             provider=settings.face_provider,
             device_id=settings.npu_device_id,
             model_root=str(settings.app_model_dir / "insightface"),
+            decode_height=settings.face_decode_height,
+            prefer_ffmpeg=settings.frame_reader == "ffmpeg",
         )
     if stage == "asr":
         from app.indexing.asr import build_asr_index, resolve_asr_device
@@ -73,6 +77,13 @@ def run(stage: str, job_id: str) -> dict:
             language=str(options.get("asr_language", settings.asr_language)),
             sidecar_path=sidecar_path,
             funasr_model=settings.asr_zh_model,
+            semantic_enabled=settings.asr_semantic_enabled,
+            semantic_output_path=str(video_index_dir / "asr_semantic.npz"),
+            semantic_model=settings.asr_semantic_model,
+            semantic_device=settings.asr_semantic_device,
+            semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
+            semantic_batch_size=settings.asr_semantic_batch_size,
+            semantic_local_files_only=settings.asr_semantic_local_files_only,
         )
     raise ValueError(f"未知索引阶段: {stage}")
 

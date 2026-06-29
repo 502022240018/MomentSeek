@@ -58,6 +58,79 @@ def iter_sampled_frames(path: str | Path, sample_fps: float) -> Iterator[tuple[f
         capture.release()
 
 
+def _read_exact(stream, size: int) -> bytes | None:
+    buffer = bytearray()
+    while len(buffer) < size:
+        chunk = stream.read(size - len(buffer))
+        if not chunk:
+            return None
+        buffer += chunk
+    return bytes(buffer)
+
+
+def iter_ffmpeg_frames(path: str | Path, sample_fps: float, out_height: int = 0) -> Iterator[tuple[float, np.ndarray]]:
+    """Decode + sample (+ optional downscale) via ffmpeg, yielding (timestamp, bgr_frame).
+
+    ffmpeg decodes multithreaded in C and the fps/scale filters resample and shrink
+    in one pass, so we skip cv2's single-threaded full-resolution decode and the
+    per-frame resize. Frames come out as bgr24 (cv2 convention) so consumers are
+    unchanged. Raises on setup/stream error so callers can fall back to cv2.
+    """
+    if sample_fps <= 0:
+        raise ValueError("sample_fps 必须大于 0")
+    info = probe_video(path)
+    src_w, src_h = int(info.width), int(info.height)
+    if src_w <= 0 or src_h <= 0:
+        raise OSError(f"无法获取视频尺寸: {path}")
+    if out_height and out_height < src_h:
+        out_h = int(out_height)
+        out_w = int(round(src_w * out_h / src_h / 2) * 2)  # even width for rawvideo
+    else:
+        out_h, out_w = src_h, src_w
+    video_filter = f"fps={sample_fps}"
+    if (out_w, out_h) != (src_w, src_h):
+        video_filter += f",scale={out_w}:{out_h}"
+    command = [
+        ffmpeg_executable(), "-hide_banner", "-loglevel", "error", "-i", str(path),
+        "-vf", video_filter, "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10 ** 8)
+    frame_bytes = out_w * out_h * 3
+    index = 0
+    try:
+        while True:
+            raw = _read_exact(process.stdout, frame_bytes)
+            if raw is None:
+                break
+            yield index / sample_fps, np.frombuffer(raw, dtype=np.uint8).reshape(out_h, out_w, 3)
+            index += 1
+    finally:
+        if process.stdout:
+            process.stdout.close()
+        process.wait()
+    if process.returncode not in (0, None):
+        raise RuntimeError(f"ffmpeg 抽帧失败 (code {process.returncode})")
+
+
+_FRAME_SENTINEL = object()
+
+
+def read_frames(path: str | Path, sample_fps: float, out_height: int = 0, prefer_ffmpeg: bool = True) -> Iterator[tuple[float, np.ndarray]]:
+    """Yield sampled frames, preferring ffmpeg; fall back to cv2 if ffmpeg can't start."""
+    if prefer_ffmpeg:
+        iterator = iter_ffmpeg_frames(path, sample_fps, out_height)
+        first = _FRAME_SENTINEL
+        try:
+            first = next(iterator)
+        except Exception:  # setup failure or zero frames -> fall back to cv2
+            first = _FRAME_SENTINEL
+        if first is not _FRAME_SENTINEL:
+            yield first
+            yield from iterator
+            return
+    yield from iter_sampled_frames(path, sample_fps)
+
+
 def save_thumbnail(frame: np.ndarray, path: str | Path, max_width: int = 480) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
