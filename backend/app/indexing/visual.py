@@ -163,6 +163,19 @@ def _hf_load_source(model_cache_dir: str | Path | None, model_id: str) -> tuple[
     return model_id, False
 
 
+def _resolve_openclip_pretrained(model_name: str, pretrained: str) -> str:
+    if pretrained in {"openai", "laion2b_s34b_b79k"}:
+        filename = f"{model_name}.{pretrained}.bin"
+        for candidate in (
+            Path("/app/models") / filename,
+            Path("models") / filename,
+            Path.cwd() / "models" / filename,
+        ):
+            if candidate.exists():
+                return str(candidate)
+    return pretrained
+
+
 class OpenClipEncoder:
     def __init__(self, model_name: str, pretrained: str, device: str):
         import open_clip
@@ -173,7 +186,7 @@ class OpenClipEncoder:
         self.model_key = visual_model_from_legacy(model_name, pretrained)
         self.model_label = VISUAL_MODEL_REGISTRY[self.model_key].label
         self.backend = "openclip"
-        source = pretrained
+        source = _resolve_openclip_pretrained(model_name, pretrained)
         if pretrained not in {"openai", "laion2b_s34b_b79k"} and not Path(pretrained).exists():
             raise FileNotFoundError(f"CLIP 权重不存在: {pretrained}")
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
