@@ -25,9 +25,11 @@ export type Job = {
 };
 
 export type IndexOptions = {
+  visualModel?: string;
   visualSampleFps?: number;
   visualSegmentSeconds?: number;
   faceSampleFps?: number;
+  ocrSampleFps?: number;
   asrModel?: string;
   asrLanguage?: string;
 };
@@ -61,6 +63,7 @@ export type SearchResult = {
   modalities: string[];
   thumbnail_url?: string;
   media_url: string;
+  clip_url?: string;
   decision?: string;
   above_threshold: boolean;
   evidence: Evidence[];
@@ -96,9 +99,11 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         modalities,
+        visual_model: options.visualModel,
         visual_sample_fps: options.visualSampleFps,
         visual_segment_seconds: options.visualSegmentSeconds,
         face_sample_fps: options.faceSampleFps,
+        ocr_sample_fps: options.ocrSampleFps,
         asr_model: options.asrModel,
         asr_language: options.asrLanguage,
       }),

@@ -42,6 +42,8 @@ class Settings(BaseSettings):
 
     clip_model: str = "ViT-B-32"
     clip_pretrained: str = "openai"
+    visual_model: str = "siglip2-so400m-384"
+    visual_hf_cache_dir: Path = Path("runtime/hf_cache")
     visual_sample_fps: float = 5.0
     visual_segment_seconds: float = 5.0
     visual_batch_size: int = 32
@@ -65,6 +67,21 @@ class Settings(BaseSettings):
     # Hugging Face. Pre-cache/mount the model, or set this false for local dev.
     asr_semantic_local_files_only: bool = True
 
+    ocr_engine: str = "rapidocr"
+    ocr_device: str = "auto"
+    # RapidOCR 3.9's default PP-OCRv6 ONNX models attach to CANN on the Ascend
+    # container but return empty OCR results in practice. PP-OCRv4 English mobile
+    # is the current verified NPU baseline for video text overlays.
+    ocr_version: str = "PP-OCRv4"
+    ocr_det_lang: str = "en"
+    ocr_rec_lang: str = "en"
+    ocr_model_type: str = "mobile"
+    ocr_sample_fps: float = 0.05
+    ocr_decode_height: int = 720
+    ocr_min_confidence: float = 0.5
+    ocr_semantic_enabled: bool = True
+    ocr_npu_self_test: bool = True
+
     @property
     def db_path(self) -> Path:
         return self.app_data_dir / "catalog.sqlite3"
@@ -82,6 +99,10 @@ class Settings(BaseSettings):
         return self.app_data_dir / "thumbnails"
 
     @property
+    def clip_cache_dir(self) -> Path:
+        return self.app_data_dir / "clips"
+
+    @property
     def query_dir(self) -> Path:
         return self.app_data_dir / "queries"
 
@@ -92,7 +113,9 @@ class Settings(BaseSettings):
             self.upload_dir,
             self.index_dir,
             self.thumbnail_dir,
+            self.clip_cache_dir,
             self.query_dir,
+            self.resolve_path(self.visual_hf_cache_dir),
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

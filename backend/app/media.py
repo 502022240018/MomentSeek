@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -150,6 +151,48 @@ def extract_audio(video_path: str | Path, output_path: str | Path) -> Path:
         "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(output_path),
     ]
     subprocess.run(command, check=True)
+    return output_path
+
+
+def export_preview_clip(
+    video_path: str | Path,
+    output_path: str | Path,
+    start_time: float,
+    end_time: float,
+    max_seconds: float = 45.0,
+) -> Path:
+    """Export a browser-friendly MP4 preview for a matched moment.
+
+    Search results point to short clips instead of asking the browser to stream a
+    full source video and seek across a tunnel. We transcode to H.264/AAC because
+    uploaded sources may be HEVC/H.265 or have no filename extension, both of
+    which frequently fail in browser `<video>` playback.
+    """
+    start = max(0.0, float(start_time))
+    end = max(start + 0.25, float(end_time))
+    duration = min(max_seconds, end - start)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(f".{output_path.stem}.{uuid.uuid4().hex}.tmp.mp4")
+    command = [
+        ffmpeg_executable(), "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{start:.3f}", "-i", str(video_path),
+        "-t", f"{duration:.3f}",
+        "-map", "0:v:0", "-map", "0:a?",
+        "-vf", "scale='min(1280,iw)':-2",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-tag:v", "avc1",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(temp_path),
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        temp_path.replace(output_path)
+    except subprocess.CalledProcessError as exc:
+        temp_path.unlink(missing_ok=True)
+        details = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(f"片段导出失败: {details[-1200:]}") from exc
     return output_path
 
 

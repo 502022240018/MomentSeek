@@ -5,19 +5,56 @@ from pydantic import BaseModel, Field, field_validator
 
 class IndexRequest(BaseModel):
     modalities: list[str] = Field(default_factory=lambda: ["visual", "face", "asr"])
+    visual_model: str | None = None
     visual_sample_fps: float | None = Field(default=None, gt=0, le=10)
     visual_segment_seconds: float | None = Field(default=None, gt=0, le=60)
     face_sample_fps: float | None = Field(default=None, gt=0, le=15)
+    ocr_sample_fps: float | None = Field(default=None, gt=0, le=5)
     asr_model: str | None = None
     asr_language: str | None = None
 
     @field_validator("modalities")
     @classmethod
     def validate_modalities(cls, value: list[str]) -> list[str]:
-        allowed = {"visual", "face", "asr"}
+        allowed = {"visual", "face", "asr", "ocr"}
         normalized = list(dict.fromkeys(item.lower() for item in value))
         if not normalized or any(item not in allowed for item in normalized):
-            raise ValueError("modalities 只能包含 visual、face、asr")
+            raise ValueError("modalities 只能包含 visual、face、asr、ocr")
+        return normalized
+
+    @field_validator("visual_model")
+    @classmethod
+    def validate_visual_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        aliases = {
+            "siglip2": "siglip2-so400m-384",
+            "siglip2-so400m": "siglip2-so400m-384",
+            "google/siglip2-so400m-patch14-384": "siglip2-so400m-384",
+            "chinese": "chinese-clip-vit-b16",
+            "chineseclip": "chinese-clip-vit-b16",
+            "chinese-clip-vit-b-16": "chinese-clip-vit-b16",
+            "chinese-vit-b-16": "chinese-clip-vit-b16",
+            "chinese vit-b-16": "chinese-clip-vit-b16",
+            "ofa-sys/chinese-clip-vit-base-patch16": "chinese-clip-vit-b16",
+            "openclip-b32": "openclip-vit-b32",
+            "vit-b-32": "openclip-vit-b32",
+            "openclip-b16": "openclip-vit-b16",
+            "vit-b-16": "openclip-vit-b16",
+            "openclip-l14": "openclip-vit-l14",
+            "vit-l-14": "openclip-vit-l14",
+        }
+        normalized = aliases.get(normalized, normalized)
+        allowed = {
+            "siglip2-so400m-384",
+            "chinese-clip-vit-b16",
+            "openclip-vit-b32",
+            "openclip-vit-b16",
+            "openclip-vit-l14",
+        }
+        if normalized not in allowed:
+            raise ValueError("visual_model must be one of: " + ", ".join(sorted(allowed)))
         return normalized
 
     @field_validator("asr_model")

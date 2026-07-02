@@ -55,7 +55,7 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .image-drop.has-image { min-height: 130px; flex-direction: row; gap: 12px; justify-content: flex-start; text-align: left; }
 .image-drop.has-image img { width: 90px; height: 90px; object-fit: cover; border-radius: 11px; }
 .image-drop.has-image span { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.mode-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .mode-grid button { position: relative; display: flex; min-height: 78px; padding: 10px; flex-direction: column; align-items: flex-start; border: 1px solid #deddd8; border-radius: 12px; background: #fafaf8; cursor: pointer; }
 .mode-grid button > span { position: absolute; top: 8px; right: 8px; display: grid; place-items: center; width: 17px; height: 17px; border: 1px solid #d0cfca; border-radius: 5px; font-size: 10px; }
 .mode-grid button b { margin-top: 11px; font-size: 12px; }
@@ -104,6 +104,7 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .chip.face { background: #f0e6f8; color: #774797; }
 .chip.visual { background: #e6f0e0; color: #53733e; }
 .chip.asr { background: #e7edf7; color: #506986; }
+.chip.ocr { background: #fff0d8; color: #8a5a1f; }
 .chip.below-tag { background: #f3e4df; color: #9a5a44; }
 .result-card.below { opacity: .58; filter: saturate(.85); }
 .result-card.below:hover { opacity: 1; }
@@ -131,7 +132,9 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .index-options h2 { margin: 5px 0 0; font-size: 20px; letter-spacing: -.04em; }
 .index-options p { margin: 7px 0 0; color: #888780; font-size: 11px; }
 .index-options label { display: flex; flex-direction: column; gap: 7px; color: #6f6e68; font-size: 11px; font-weight: 650; }
+.index-options label.inline-check { flex-direction: row; align-items: center; justify-content: flex-start; padding: 10px 0; }
 .index-options input, .index-options select { width: 100%; padding: 10px 11px; border: 1px solid #d9d8d3; border-radius: 10px; outline: none; background: white; }
+.index-options label.inline-check input { width: auto; }
 .index-options input:focus, .index-options select:focus { border-color: #a477d9; box-shadow: 0 0 0 4px #a477d917; }
 .table-panel { padding: 27px; }
 .asset-list, .job-list { display: flex; flex-direction: column; }

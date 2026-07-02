@@ -45,6 +45,8 @@ def run(stage: str, job_id: str) -> dict:
             npu_enabled=settings.npu_enabled,
             npu_device_id=settings.npu_device_id,
             cuda_enabled=settings.cuda_enabled,
+            visual_model=str(options.get("visual_model", settings.visual_model)),
+            model_cache_dir=str(settings.resolve_path(settings.visual_hf_cache_dir)),
             decode_height=settings.visual_decode_height,
             prefer_ffmpeg=settings.frame_reader == "ffmpeg",
         )
@@ -85,12 +87,43 @@ def run(stage: str, job_id: str) -> dict:
             semantic_batch_size=settings.asr_semantic_batch_size,
             semantic_local_files_only=settings.asr_semantic_local_files_only,
         )
+    if stage == "ocr":
+        from app.indexing.ocr import build_ocr_index
+
+        device = settings.ocr_device
+        if device == "auto":
+            device = "npu" if settings.npu_enabled else "cpu"
+        return build_ocr_index(
+            video_path=video_path,
+            output_path=str(video_index_dir / "ocr.json"),
+            thumbnail_dir=str(thumbnail_dir),
+            working_dir=str(working_dir),
+            sample_fps=float(options.get("ocr_sample_fps", settings.ocr_sample_fps)),
+            decode_height=settings.ocr_decode_height,
+            min_confidence=settings.ocr_min_confidence,
+            device=device,
+            device_id=settings.npu_device_id,
+            model_root=str(settings.app_model_dir / "rapidocr"),
+            ocr_version=settings.ocr_version,
+            det_lang=settings.ocr_det_lang,
+            rec_lang=settings.ocr_rec_lang,
+            model_type=settings.ocr_model_type,
+            npu_self_test=settings.ocr_npu_self_test,
+            prefer_ffmpeg=settings.frame_reader == "ffmpeg",
+            semantic_enabled=settings.ocr_semantic_enabled,
+            semantic_output_path=str(video_index_dir / "ocr_semantic.npz"),
+            semantic_model=settings.asr_semantic_model,
+            semantic_device=settings.asr_semantic_device,
+            semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
+            semantic_batch_size=settings.asr_semantic_batch_size,
+            semantic_local_files_only=settings.asr_semantic_local_files_only,
+        )
     raise ValueError(f"未知索引阶段: {stage}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=["visual", "face", "asr"])
+    parser.add_argument("stage", choices=["visual", "face", "asr", "ocr"])
     parser.add_argument("job_id")
     arguments = parser.parse_args()
     result = run(arguments.stage, arguments.job_id)

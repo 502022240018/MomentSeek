@@ -48,6 +48,7 @@ class SearchResult:
     modalities: list[str]
     thumbnail_url: str | None
     media_url: str
+    clip_url: str
     decision: str
     above_threshold: bool = True
     evidence: list[dict] = field(default_factory=list)
@@ -295,11 +296,33 @@ def _visual_candidates(
     return candidates
 
 
+def _visual_model_key_from_index(data, default_model: str) -> str:
+    from app.indexing.visual import normalize_visual_model
+
+    if "visual_model" in data.files:
+        return normalize_visual_model(str(data["visual_model"][0]))
+    if "model" in data.files:
+        label = str(data["model"][0])
+        lowered = label.lower()
+        if "siglip2" in lowered:
+            return "siglip2-so400m-384"
+        if "chinese" in lowered:
+            return "chinese-clip-vit-b16"
+        if "vit-b-16" in lowered or "vit-b/16" in lowered:
+            return "openclip-vit-b16"
+        if "vit-l-14" in lowered or "vit-l/14" in lowered:
+            return "openclip-vit-l14"
+        if "vit-b-32" in lowered or "vit-b/32" in lowered:
+            return "openclip-vit-b32"
+    return normalize_visual_model(default_model)
+
+
 def _asr_candidates(
     chunks: list[dict],
     query_text: str,
     video_id: str,
     limit: int,
+    modality: str = "asr",
     semantic_data=None,
     semantic_query: np.ndarray | None = None,
 ) -> list[Candidate]:
@@ -374,7 +397,8 @@ def _asr_candidates(
             start_time=float(chunk.get("start_time", 0)),
             end_time=float(chunk.get("end_time", 0)),
             score=score,
-            modality="asr",
+            modality=modality,
+            thumbnail=str(chunk.get("thumbnail") or "") or None,
             evidence=evidence if above else evidence + " · 低于阈值",
             raw_score=score,
             decision=decision,
@@ -424,17 +448,24 @@ class SearchEngine:
     def __init__(self, settings: Settings, catalog: Catalog):
         self.settings = settings
         self.catalog = catalog
-        self._clip_encoder = None
+        self._clip_encoders = {}
         self._face_encoder = None
         self._text_encoders = {}
 
-    def _clip(self):
-        if self._clip_encoder is None:
-            from app.indexing.visual import ClipEncoder, resolve_device
+    def _clip(self, visual_model: str | None = None):
+        from app.indexing.visual import ClipEncoder, normalize_visual_model, resolve_device
 
+        model_key = normalize_visual_model(visual_model or self.settings.visual_model)
+        if model_key not in self._clip_encoders:
             device = resolve_device(self.settings.npu_enabled, self.settings.npu_device_id, self.settings.cuda_enabled)
-            self._clip_encoder = ClipEncoder(self.settings.clip_model, self.settings.clip_pretrained, device)
-        return self._clip_encoder
+            self._clip_encoders[model_key] = ClipEncoder(
+                self.settings.clip_model,
+                self.settings.clip_pretrained,
+                device,
+                visual_model=model_key,
+                model_cache_dir=str(self.settings.resolve_path(self.settings.visual_hf_cache_dir)),
+            )
+        return self._clip_encoders[model_key]
 
     def _face(self):
         if self._face_encoder is None:
@@ -479,9 +510,8 @@ class SearchEngine:
             videos = [video for video in videos if video["id"] in allowed]
         candidates: list[Candidate] = []
 
-        visual_query = None
-        if "visual" in modalities and (text or image_path):
-            visual_query = self._clip().encode_query(text, image_path, alpha)
+        visual_queries: dict[str, np.ndarray] = {}
+        wants_visual = "visual" in modalities and bool(text or image_path)
 
         face_query = None
         if "face" in modalities:
@@ -494,8 +524,12 @@ class SearchEngine:
 
         for video in videos:
             index_dir = self.settings.index_dir / video["id"]
-            if visual_query is not None and (index_dir / "visual.npz").exists():
+            if wants_visual and (index_dir / "visual.npz").exists():
                 with np.load(index_dir / "visual.npz", allow_pickle=False) as data:
+                    visual_model = _visual_model_key_from_index(data, self.settings.visual_model)
+                    if visual_model not in visual_queries:
+                        visual_queries[visual_model] = self._clip(visual_model).encode_query(text, image_path, alpha)
+                    visual_query = visual_queries[visual_model]
                     candidates.extend(_visual_candidates(data, visual_query, video["id"], visual_profile, limit * 3))
             if face_query is not None and (index_dir / "faces.npz").exists():
                 with np.load(index_dir / "faces.npz", allow_pickle=False) as data:
@@ -526,12 +560,38 @@ class SearchEngine:
                 finally:
                     if semantic_data is not None:
                         semantic_data.close()
+            if "ocr" in modalities and text and (index_dir / "ocr.json").exists():
+                payload = json.loads((index_dir / "ocr.json").read_text(encoding="utf-8"))
+                semantic_data = None
+                semantic_query = None
+                semantic_path = index_dir / "ocr_semantic.npz"
+                if semantic_path.exists():
+                    semantic_data = np.load(semantic_path, allow_pickle=False)
+                    try:
+                        model_name = str(semantic_data["model"][0]) if "model" in semantic_data.files else self.settings.asr_semantic_model
+                        semantic_query = self._encode_asr_query(text, model_name)
+                    except Exception:
+                        semantic_data.close()
+                        semantic_data = None
+                        semantic_query = None
+                try:
+                    candidates.extend(_asr_candidates(
+                        payload.get("chunks", []),
+                        text,
+                        video["id"],
+                        limit * 3,
+                        modality="ocr",
+                        semantic_data=semantic_data,
+                        semantic_query=semantic_query,
+                    ))
+                finally:
+                    if semantic_data is not None:
+                        semantic_data.close()
 
         names = {video["id"]: video["name"] for video in videos}
-        # Each modality score is now calibrated to a comparable [0,1] scale —
-        # visual=empirical percentile, face=logistic-calibrated cosine, asr=lexical
-        # coverage — so these weights express modality priority, not scale fixes.
-        weights = {"face": 0.55, "visual": 0.30, "asr": 0.15}
+        # Each modality score is calibrated to a comparable [0,1] scale, so these
+        # weights express modality priority, not scale fixes.
+        weights = {"face": 0.55, "visual": 0.30, "ocr": 0.20, "asr": 0.15}
         results = []
         for group in _groups(candidates, merge_gap, max_result_seconds):
             best_by_modality = {}
@@ -556,6 +616,7 @@ class SearchEngine:
                 modalities=sorted(best_by_modality),
                 thumbnail_url=(f"/api/thumbnails/{video_id}/{best_thumbnail}" if best_thumbnail else None),
                 media_url=f"/api/videos/{video_id}/media",
+                clip_url=f"/api/videos/{video_id}/clip?start={min(item.start_time for item in group):.3f}&end={max(item.end_time for item in group):.3f}",
                 decision=decision,
                 above_threshold=group_above,
                 evidence=[{
