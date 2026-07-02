@@ -878,6 +878,27 @@ ASR     total 12.2s | audio 0.6  load 3.5  transcribe 8.2(14句)
 - 测试：`backend/tests/test_model_pool.py`（缓存/空闲驱逐/队列取最旧），全套 16 项通过。
 - **部署注意**：①cv2 部署后新建的 visual 索引用 cv2，旧索引用 PIL，两者 cosine 0.996 可混用，无需重建；②warm pool 守护进程会和 `launch_job` 抢同一队列，启用时需二选一（要么跑 daemon、要么走子进程）；③改服务器代码后必须 `docker restart`（见上方部署教训）。
 
+### 9.5.2 Visual CLIP 选型评测（2026-07-01）
+
+新增专门文档：[`docs/visual-clip-910b-eval.md`](visual-clip-910b-eval.md)。
+
+本轮在 drama-server 物理 2 号 910B 上比较了 `ViT-B-32 / ViT-B-16 / ViT-L-14`，并评测 `center_crop / letterbox-padding / sliding window`。核心结论：
+
+- 效果最好：`ViT-L-14 + sliding_mvp_mix`，image R@10=67.6%、MRR=0.456；sequence R@10=83.1%、MRR=0.543。
+- image/frame 索引耗时瓶颈主要是预处理，不是 NPU encoder。
+- 1 小时视频按 3fps 抽帧，即 10800 帧：
+  - `ViT-B-32 + letterbox`：约 12.81min，其中 encoder 约 0.11min。
+  - `ViT-B-32 + sliding`：约 23.47min，其中 encoder 约 0.39min。
+  - `ViT-L-14 + sliding`：约 28.83min，其中 encoder 约 2.73min。
+
+完整结果文件：
+
+```text
+eval/visual/outputs/visual_clip_910b_report.md
+eval/visual/outputs/visual_clip_910b_speed_summary.csv
+eval/visual/outputs/visual_clip_910b_effect_summary.csv
+```
+
 ## 10. 当前已知问题
 
 ### 10.1 公网链接依赖 PC
