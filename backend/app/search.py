@@ -217,7 +217,10 @@ def _visual_candidates(
         top1_scores = top1_values
         top3_scores = top3_values
         best_times = best_time_values
-        raw_scores = (0.65 * top1_scores) + (0.25 * top3_scores) + (0.10 * mean_scores)
+        # Recall/rank visual segments by the single best matching frame. Earlier
+        # versions blended top1/top3/segment-mean, but that can dilute short
+        # visual events in a 5s bucket. Keep top3/mean only as diagnostics.
+        raw_scores = top1_scores
 
     distribution = robust_distribution(raw_scores)
     z_scores = distribution["z_scores"]

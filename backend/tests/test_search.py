@@ -201,6 +201,7 @@ def test_visual_v2_frame_maxsim_can_beat_segment_mean(tmp_path):
 
     assert candidates[0].start_time == 5
     assert candidates[0].best_time == 5.5
+    assert candidates[0].raw_score == 1.0
     assert candidates[0].visual_top1 == 1.0
     assert candidates[0].visual_mean < candidates[1].visual_mean
     assert "best_frame=5.50s" in (candidates[0].evidence or "")
