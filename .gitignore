@@ -9,3 +9,7 @@ backend/app/static/
 runtime/
 models/
 vendor-wheels/
+eval/visual/**/*.local.json
+eval/visual/**/*.local.jsonl
+eval/visual/**/*.local.ps1
+eval/visual/outputs/

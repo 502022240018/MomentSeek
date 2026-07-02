@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "created_for": "MomentSeek visual retrieval evaluation",
+  "notes": [
+    "Queries are attached to group_id, so the same annotations can evaluate all resolution variants of the same content.",
+    "Prefer native high-resolution sources for resolution comparison. Upscaled variants should be marked is_upscaled=true."
+  ],
+  "video_groups": [
+    {
+      "group_id": "example_worldcup_ad",
+      "name": "世界杯广告",
+      "content_tags": ["sports", "advertisement", "crowd", "football"],
+      "variants": [
+        {
+          "variant_id": "example_worldcup_ad_source",
+          "role": "source",
+          "path": "runtime/uploads/example.mp4",
+          "width": 960,
+          "height": 544,
+          "fps": 18.0,
+          "duration": 360.333,
+          "resolution_label": "544p",
+          "is_upscaled": false,
+          "source_variant_id": null,
+          "notes": "Example only. Replace with a local videos.local.json generated from the catalog."
+        }
+      ]
+    }
+  ]
+}
