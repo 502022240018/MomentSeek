@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "created_for": "MomentSeek sequence-level visual retrieval evaluation",
+  "segment_seconds": 5.0,
+  "stride_seconds": 5.0,
+  "segments": [
+    {
+      "segment_id": "example_worldcup_ad_720p_s000010_000015",
+      "group_id": "worldcup_ad",
+      "variant_id": "worldcup_ad_720p",
+      "start": 10.0,
+      "end": 15.0,
+      "duration": 5.0,
+      "resolution_label": "720p",
+      "source_video_path": "runtime/uploads/example.mp4"
+    }
+  ]
+}

@@ -9,7 +9,7 @@
 
 - Visual：OpenCLIP 做场景/物体/视觉语义索引和检索；per-query/per-video robust z-score + percentile 自适应阈值。
 - Face：InsightFace / ArcFace 做人物出现片段索引和检索；logistic confidence 校准与 visual 分数同量纲。
-- ASR：代码支持 `engine=auto`（中文优先 FunASR/Paraformer，fallback Whisper），但服务器镜像未装 funasr，当前实跑 Whisper small；ASR 检索是关键词/近似字符匹配，还不是语义检索。
+- ASR：代码支持 `engine=auto`（中文优先 FunASR/Paraformer，fallback Whisper），服务器镜像未装 funasr 时实跑 Whisper small；ASR 现在支持 lexical + semantic 双路检索，语义索引文件为 `asr_semantic.npz`。
 - 前端：React + Vite，风格参考 TwelveLabs Playground。
 - 后端：FastAPI + SQLite + 本地文件索引。
 - 当前有本地和服务器两套前后端并行运行。
@@ -479,18 +479,28 @@ backend/app/indexing/visual.py
 2. 按 `timestamp // segment_seconds` 分桶，当前默认 5 秒。
 3. 每个桶保存一张缩略图。
 4. CLIP encode_image。
-5. 每个桶向量求平均并 normalize。
+5. Visual v2 同时保存帧级向量和段级平均向量。
 6. 保存 `visual.npz`。
 
 `visual.npz`：
 
 ```text
+schema_version
+segment_ids
 embeddings
 start_times
 end_times
 thumbnails
+frame_embeddings
+frame_times
+frame_segment_ids
 model
 ```
+
+说明：
+
+- 旧索引没有 `schema_version/frame_embeddings` 时仍可检索，会自动走 legacy 段均值逻辑。
+- 新索引使用 Visual v2：保留帧级 CLIP embedding，检索时用帧级 MaxSim + 段级均值粗排，避免关键目标被 5 秒平均池化稀释。
 
 当前服务器：
 
@@ -615,9 +625,27 @@ limit
 ### 8.1 Visual 检索
 
 1. CLIP encode_text / encode_image。
-2. 与 `visual.npz` 做 cosine。
-3. 对每个视频内部分数做 robust distribution。
-4. 返回 strong/fuzzy/weak/fallback 候选。
+2. 如果是 Visual v2 索引，先算每帧 cosine，再按 segment 汇总。
+3. 每段 visual score：
+
+```text
+0.65 * top1_frame_score + 0.25 * top3_frame_mean + 0.10 * segment_mean_score
+```
+
+4. 如果是旧索引，回退到 `segment_mean cosine`。
+5. 对每个视频内部分数做 robust distribution。
+6. 返回 strong/fuzzy/weak/fallback 候选。
+
+Visual evidence 会包含：
+
+```text
+best_frame
+top1
+top3
+mean
+percentile
+robust_z
+```
 
 当前已经不用固定 `cos >= 0.12`，而是结合：
 
@@ -647,20 +675,39 @@ confidence = 1 / (1 + exp(-12 * (cosine - 0.45)))
 
 ### 8.3 ASR 检索
 
-当前 ASR 检索不是语义检索，是 lexical：
+当前 ASR 是 lexical + semantic 双路：
 
-- 子串命中得分最高。
-- 否则用字符 n-gram coverage。
-- 支持部分简繁折叠。
+- `asr.json`：Whisper/FunASR/字幕得到的时间戳文本 chunks。
+- `asr_semantic.npz`：每个 chunk 的文本 embedding。
+- lexical：子串命中 + 字符 n-gram coverage，适合精确词。
+- semantic：query embedding 与 chunk embedding cosine，适合同义/近义表达。
 
-所以：
+默认语义模型：
 
 ```text
-How many times → 可以搜到 "How many times?"
-someone complains → 不一定能搜到 "How many times?"
+sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 ```
 
-后续要加真正 ASR 语义检索，需要给 ASR chunk 建文本 embedding 索引，例如 `asr_semantic.npz`。
+语义索引默认走 CPU，避免共享 NPU 上额外引入 sentence-transformers 兼容风险。默认 `ASR_SEMANTIC_LOCAL_FILES_ONLY=true`，即索引/搜索时不在线下载 Hugging Face 模型；需要提前把模型缓存到 `models/text-embeddings` 或挂载到容器。ASR 检索融合：
+
+```text
+combined_score = max(lexical_score, 0.65 * semantic_score + 0.35 * lexical_score)
+```
+
+如果 `sentence-transformers` 未安装、模型未缓存完整或 `asr_semantic.npz` 不存在，搜索自动退回 lexical，不影响旧 ASR 索引。若希望本地开发时自动下载，可设置：
+
+```text
+ASR_SEMANTIC_LOCAL_FILES_ONLY=false
+```
+
+ASR evidence 会包含：
+
+```text
+lexical_score
+semantic_score
+semantic_cosine
+decision = semantic_hit / semantic_lexical_hit / lexical_hit / weak
+```
 
 ### 8.4 片段合并
 
@@ -677,7 +724,7 @@ modalities
 evidence
 thumbnail_url
 above_threshold   # 是否高于阈值
-decision          # strong / fuzzy / weak / lexical_hit
+decision          # strong / fuzzy / weak / semantic_hit / semantic_lexical_hit / lexical_hit
 ```
 
 搜索返回全召回结果，`above_threshold=false` 的候选排在后面，前端用分隔线和 dimming 区分。
@@ -831,6 +878,27 @@ ASR     total 12.2s | audio 0.6  load 3.5  transcribe 8.2(14句)
 - 测试：`backend/tests/test_model_pool.py`（缓存/空闲驱逐/队列取最旧），全套 16 项通过。
 - **部署注意**：①cv2 部署后新建的 visual 索引用 cv2，旧索引用 PIL，两者 cosine 0.996 可混用，无需重建；②warm pool 守护进程会和 `launch_job` 抢同一队列，启用时需二选一（要么跑 daemon、要么走子进程）；③改服务器代码后必须 `docker restart`（见上方部署教训）。
 
+### 9.5.2 Visual CLIP 选型评测（2026-07-01）
+
+新增专门文档：[`docs/visual-clip-910b-eval.md`](visual-clip-910b-eval.md)。
+
+本轮在 drama-server 物理 2 号 910B 上比较了 `ViT-B-32 / ViT-B-16 / ViT-L-14`，并评测 `center_crop / letterbox-padding / sliding window`。核心结论：
+
+- 效果最好：`ViT-L-14 + sliding_mvp_mix`，image R@10=67.6%、MRR=0.456；sequence R@10=83.1%、MRR=0.543。
+- image/frame 索引耗时瓶颈主要是预处理，不是 NPU encoder。
+- 1 小时视频按 3fps 抽帧，即 10800 帧：
+  - `ViT-B-32 + letterbox`：约 12.81min，其中 encoder 约 0.11min。
+  - `ViT-B-32 + sliding`：约 23.47min，其中 encoder 约 0.39min。
+  - `ViT-L-14 + sliding`：约 28.83min，其中 encoder 约 2.73min。
+
+完整结果文件：
+
+```text
+eval/visual/outputs/visual_clip_910b_report.md
+eval/visual/outputs/visual_clip_910b_speed_summary.csv
+eval/visual/outputs/visual_clip_910b_effect_summary.csv
+```
+
 ## 10. 当前已知问题
 
 ### 10.1 公网链接依赖 PC
@@ -853,20 +921,21 @@ ASR     total 12.2s | audio 0.6  load 3.5  transcribe 8.2(14句)
 - 简单访问密码。
 - 或 Cloudflare Access。
 
-### 10.3 ASR 不是语义检索
+### 10.3 ASR semantic 依赖模型环境
 
-当前 ASR 只能关键词/近似字符匹配。后续要做语义，需要：
+ASR 语义检索代码已完成，但新环境需要安装：
 
 ```text
-asr chunks → text embedding → asr_semantic.npz
-query text → same embedding model → cosine search
+sentence-transformers==3.3.1
 ```
 
-可选模型：
+并确保默认模型可下载或已缓存：
 
-- bge-small-zh/en
-- multilingual-e5
-- text2vec
+```text
+sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+```
+
+如果依赖或模型不可用，索引任务不会失败，但只会生成 `asr.json`，不会生成 `asr_semantic.npz`；搜索会自动退回 lexical。默认不会在索引任务里在线下载模型，避免共享服务器任务被 Hugging Face 网络卡住。
 - 服务器上可考虑轻量 embedding 模型。
 
 ### 10.4 medium OOM
@@ -1022,7 +1091,7 @@ git config https.proxy http://127.0.0.1:7890
 3. 把公网 tunnel 从 PC quick tunnel 改成服务器直接跑的 named tunnel（现在 PC 断开公网就断）。
 4. 在服务器镜像里装 funasr，重建容器把 `ASR_ENGINE=auto`，改善中文（尤其台语腔）ASR 质量。
 5. 前端增加”ASR 文本预览”，快速判断搜不到是 ASR 问题还是搜索问题。
-6. ASR 加语义检索（chunk → text embedding → cosine）。
+6. 对 ASR semantic 做模型 A/B：当前默认 MiniLM，可对比 bge-m3 / multilingual-e5 / bge-small-zh。
 7. 给 job 加 cancel 功能。
 8. Face CANN 做 profile，确认实际 NPU 加速效果。
 9. 把前端 `main.tsx` 拆组件，方便多人协作。

@@ -4,7 +4,7 @@
 
 - `face_index`：InsightFace / ArcFace，同一人物与明星出现片段。
 - `visual_index`：OpenCLIP，默认 5fps 抽帧、5 秒逻辑分段，文本或参考图检索场景、物体和视觉语义。
-- `asr_index`：Whisper baseline（保留 FunASR 适配器），检索带时间戳的语音内容。
+- `asr_index`：Whisper baseline（保留 FunASR 适配器）+ 文本 embedding 语义索引，检索带时间戳的语音内容。
 
 前端参考视频检索 Playground 的交互形态，后端提供 FastAPI 和 OpenAPI 文档。检索结果统一返回连续的 `start_time/end_time`、置信度、缩略图和命中证据。
 
@@ -93,7 +93,7 @@ NPU_DEVICE_ID=7 docker compose -f compose.yml -f compose.server.yml -f compose.a
 - 参考图找人：参考图用于 ArcFace 身份向量，文字可作为场景约束。
 - 文字找明星：先在“人物库”登记名称和参考正脸，之后文字中出现该名称即可调用 `face_index`。
 - 文本/图片找场景物体：CLIP 支持纯文本、纯图片和加权组合；Visual 检索默认返回独立短片段，不再把连续 5 秒桶一路合并成整段视频。
-- 文本找语音：ASR 首先支持关键词和近似字符匹配；语义文本 embedding 是后续升级项。
+- 文本找语音：ASR 支持关键词/近似字符匹配 + 语义 embedding 检索；语义索引文件为 `asr_semantic.npz`。
 
 ## MVP 验收
 

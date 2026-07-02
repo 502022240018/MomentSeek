@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "task": "compare visual indexing/search schemes across video resolutions",
+  "primary_metrics": ["recall@1", "recall@5", "recall@10", "mrr", "overlap_hit_rate"],
+  "cost_metrics": ["index_seconds", "index_seconds_per_video_minute", "search_ms", "embedding_count", "index_size_mb"],
+  "hit_rules": {
+    "minimum_overlap_seconds": 1.0,
+    "minimum_time_iou": 0.0,
+    "notes": "MVP 阶段先用 >=1s overlap 判断命中；后续可以提高到 IoU >= 0.3。"
+  },
+  "schemes": [
+    {
+      "scheme_id": "center_256_1fps",
+      "description": "Current baseline-like setup: center crop only, low decode height.",
+      "sample_fps": 1.0,
+      "decode_height": 256,
+      "views": ["center_crop"],
+      "aggregation": "segment_mean_plus_frame_maxsim"
+    },
+    {
+      "scheme_id": "center_512_5fps",
+      "description": "Higher frame sampling and decode height, still center crop only.",
+      "sample_fps": 5.0,
+      "decode_height": 512,
+      "views": ["center_crop"],
+      "aggregation": "segment_mean_plus_frame_maxsim"
+    },
+    {
+      "scheme_id": "center_padding_512_2fps",
+      "description": "Keep center crop and add padded full-frame view.",
+      "sample_fps": 2.0,
+      "decode_height": 512,
+      "views": ["center_crop", "padded_full"],
+      "aggregation": "view_maxsim_top3"
+    },
+    {
+      "scheme_id": "center_padding_hcrops_512_2fps",
+      "description": "Add left/center/right horizontal crops for wide videos.",
+      "sample_fps": 2.0,
+      "decode_height": 512,
+      "views": ["center_crop", "padded_full", "left_crop", "middle_crop", "right_crop"],
+      "aggregation": "view_maxsim_top3"
+    },
+    {
+      "scheme_id": "center_padding_tiles_720_1fps",
+      "description": "Heavier local branch for small objects and edge targets.",
+      "sample_fps": 1.0,
+      "decode_height": 720,
+      "views": ["center_crop", "padded_full", "tile_3x2"],
+      "aggregation": "view_maxsim_top3"
+    }
+  ],
+  "recommended_breakdowns": [
+    "by_resolution_label",
+    "by_query_type",
+    "by_resolution_sensitivity",
+    "by_scheme_id",
+    "by_video_group"
+  ]
+}

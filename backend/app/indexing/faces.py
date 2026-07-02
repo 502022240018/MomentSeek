@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from app.indexing.common import atomic_save_npz, normalize
-from app.media import iter_sampled_frames, save_thumbnail
+from app.media import read_frames, save_thumbnail
 
 
 def _iou(first: np.ndarray, second: np.ndarray) -> float:
@@ -72,6 +72,8 @@ def build_face_index(
     max_gap: float = 1.5,
     cosine_threshold: float = 0.35,
     encoder: "FaceEncoder | None" = None,
+    decode_height: int = 0,
+    prefer_ffmpeg: bool = True,
 ) -> dict:
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
@@ -82,7 +84,7 @@ def build_face_index(
     next_number = 0
     detections = 0
 
-    for timestamp, frame in iter_sampled_frames(video_path, sample_fps):
+    for timestamp, frame in read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg):
         retained = []
         for track in active:
             if timestamp - track.end <= max_gap:

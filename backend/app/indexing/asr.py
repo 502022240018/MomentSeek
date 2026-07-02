@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from app.indexing.common import atomic_save_json
+from app.indexing.text_semantic import build_text_semantic_index, resolve_text_embedding_device
 from app.media import extract_audio, parse_timecode
 
 
@@ -142,8 +143,17 @@ def build_asr_index(
     language: str = "auto",
     sidecar_path: str | None = None,
     funasr_model: str = "paraformer-zh",
+    semantic_enabled: bool = True,
+    semantic_output_path: str | None = None,
+    semantic_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    semantic_device: str = "cpu",
+    semantic_model_dir: str | None = None,
+    semantic_batch_size: int = 32,
+    semantic_local_files_only: bool = True,
 ) -> dict:
     effective_model = model_name
+    semantic_result: dict | None = None
+    semantic_target = Path(semantic_output_path) if semantic_output_path else Path(output_path).with_name("asr_semantic.npz")
     if sidecar_path:
         chunks = load_sidecar(sidecar_path)
         used_engine = "sidecar"
@@ -154,6 +164,7 @@ def build_asr_index(
             chunks = []
             used_engine = "no_audio"
             atomic_save_json(output_path, {"engine": used_engine, "model": model_name, "language": language, "chunks": chunks})
+            semantic_target.unlink(missing_ok=True)
             return {"chunks": 0, "engine": used_engine, "warning": "no audio stream found"}
         # Chinese transcription quality: prefer FunASR/Paraformer when available
         # (far better on Mandarin than small Whisper); otherwise fall back to the
@@ -172,4 +183,34 @@ def build_asr_index(
             chunks = _whisper(str(audio_path), model_name, device, model_dir, language)
             used_engine = "whisper"
     atomic_save_json(output_path, {"engine": used_engine, "model": effective_model, "language": language, "chunks": chunks})
-    return {"chunks": len(chunks), "engine": used_engine, "model": effective_model, "language": language}
+
+    if not semantic_enabled:
+        semantic_target.unlink(missing_ok=True)
+    else:
+        try:
+            resolved_device = resolve_text_embedding_device(semantic_device, cuda_enabled=False)
+            semantic_result = build_text_semantic_index(
+                chunks=chunks,
+                output_path=semantic_target,
+                model_name=semantic_model,
+                model_dir=semantic_model_dir or str(Path(model_dir).parent / "text-embeddings"),
+                device=resolved_device,
+                batch_size=semantic_batch_size,
+                local_files_only=semantic_local_files_only,
+            )
+        except Exception as exc:
+            # Keep ASR itself usable even if the optional semantic model is not
+            # installed or unavailable on the current server. Search will fall
+            # back to lexical matching when asr_semantic.npz is absent.
+            semantic_target.unlink(missing_ok=True)
+            semantic_result = {
+                "semantic_chunks": 0,
+                "semantic_model": semantic_model,
+                "semantic_status": "unavailable",
+                "semantic_error": str(exc),
+            }
+
+    result = {"chunks": len(chunks), "engine": used_engine, "model": effective_model, "language": language}
+    if semantic_result is not None:
+        result.update(semantic_result)
+    return result

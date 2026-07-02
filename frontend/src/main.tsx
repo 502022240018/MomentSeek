@@ -105,7 +105,7 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [image, setImage] = useState<File>();
-  const [modalities, setModalities] = useState(["visual", "face", "asr"]);
+  const [modalities, setModalities] = useState(["visual", "face", "asr", "ocr"]);
   const [alpha, setAlpha] = useState(0.5);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -155,7 +155,7 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
 
       <label>检索通道</label>
       <div className="mode-grid">
-        {[['visual','Visual','场景与物体'],['face','Face','同一人物'],['asr','ASR','语音内容']].map(([value,title,sub]) =>
+        {[['visual','Visual','场景与物体'],['face','Face','同一人物'],['asr','ASR','语音内容'],['ocr','OCR','画面文字']].map(([value,title,sub]) =>
           <button key={value} className={modalities.includes(value) ? "selected" : ""} onClick={() => toggleMode(value)}>
             <span>{modalities.includes(value) ? "✓" : "+"}</span><b>{title}</b><small>{sub}</small>
           </button>)}
@@ -170,6 +170,7 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
         <Example title="参考图中的人物" tags={["FACE", "VISUAL"]} text="上传一张清晰正脸，找出人物所有出现片段" setQuery={setQuery} />
         <Example title="舞台上讲话" tags={["VISUAL"]} text="a person speaking on a stage" setQuery={setQuery} />
         <Example title="语音中提到某话题" tags={["ASR", "LEXICAL"]} text="电影投资" setQuery={setQuery} />
+        <Example title="画面中出现文字" tags={["OCR", "TEXT"]} text="logo on screen" setQuery={setQuery} />
         <Example title="红色行李箱" tags={["VISUAL", "IMAGE"]} text="a red suitcase" setQuery={setQuery} />
       </div> : <div className="result-grid">{results.map((result, index) => <React.Fragment key={`${result.video_id}-${result.start_time}-${index}`}>{index === firstBelow && <div className="threshold-divider"><span>以下片段低于阈值 · 仅供参考</span></div>}<ResultCard result={result} onPlay={() => setPlaying(result)} /></React.Fragment>)}</div>}
     </div>
@@ -191,24 +192,30 @@ function ResultCard({ result, onPlay }: { result: SearchResult; onPlay: () => vo
 
 function PlayerModal({ result, onClose }: { result: SearchResult; onClose: () => void }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const sourceUrl = result.clip_url || result.media_url;
+  const sourceStart = result.clip_url ? 0 : result.start_time;
+  const sourceEnd = result.clip_url ? Math.max(0.25, result.end_time - result.start_time) : result.end_time;
   // Restrict playback to the matched [start, end] window: seek in on load, and
   // loop back to start once playback passes the segment end.
   const clampToSegment = () => {
     const video = ref.current;
     if (!video) return;
-    if (video.currentTime >= result.end_time || video.currentTime < result.start_time - 0.5) {
-      video.currentTime = result.start_time;
+    if (video.currentTime >= sourceEnd || video.currentTime < sourceStart - 0.5) {
+      video.currentTime = sourceStart;
     }
   };
-  return <div className="modal-backdrop" onMouseDown={onClose}><div className="player-modal" onMouseDown={event => event.stopPropagation()}><button className="close" onClick={onClose}>×</button><video ref={ref} src={result.media_url} controls autoPlay onLoadedMetadata={() => { if (ref.current) ref.current.currentTime = result.start_time; }} onTimeUpdate={clampToSegment} /><div className="player-info"><div><span className="panel-label">MATCHED MOMENT</span><h3>{result.video_name}</h3></div><b>{formatTime(result.start_time)} — {formatTime(result.end_time)} · 仅循环播放命中片段</b></div></div></div>;
+  return <div className="modal-backdrop" onMouseDown={onClose}><div className="player-modal" onMouseDown={event => event.stopPropagation()}><button className="close" onClick={onClose}>×</button><video ref={ref} src={sourceUrl} controls autoPlay onLoadedMetadata={() => { if (ref.current) ref.current.currentTime = sourceStart; }} onTimeUpdate={clampToSegment} /><div className="player-info"><div><span className="panel-label">MATCHED MOMENT</span><h3>{result.video_name}</h3></div><b>{formatTime(result.start_time)} — {formatTime(result.end_time)} · 仅循环播放命中片段</b></div></div></div>;
 }
 
 function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
   const [videoFile, setVideoFile] = useState<File>();
   const [transcript, setTranscript] = useState<File>();
+  const [visualModel, setVisualModel] = useState("siglip2-so400m-384");
   const [visualSampleFps, setVisualSampleFps] = useState(5);
   const [visualSegmentSeconds, setVisualSegmentSeconds] = useState(5);
   const [faceSampleFps, setFaceSampleFps] = useState(2);
+  const [includeOcr, setIncludeOcr] = useState(false);
+  const [ocrSampleFps, setOcrSampleFps] = useState(0.05);
   const [asrModel, setAsrModel] = useState("small");
   const [asrLanguage, setAsrLanguage] = useState("zh");
   const [uploading, setUploading] = useState(false);
@@ -221,15 +228,18 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
   };
   const index = async (id: string) => {
     try {
-      await api.indexVideo(id, ["visual", "face", "asr"], {
+      const selectedModalities = includeOcr ? ["visual", "face", "asr", "ocr"] : ["visual", "face", "asr"];
+      await api.indexVideo(id, selectedModalities, {
+        visualModel,
         visualSampleFps,
         visualSegmentSeconds,
         faceSampleFps,
+        ocrSampleFps: includeOcr ? ocrSampleFps : undefined,
         asrModel,
         asrLanguage,
       });
       await refresh();
-      setNotice(`索引任务已进入队列：Visual ${visualSampleFps}fps / ${visualSegmentSeconds}s 段，Face ${faceSampleFps}fps，ASR ${asrModel}/${asrLanguage}`);
+      setNotice(`索引任务已进入队列：Visual ${visualModel} · ${visualSampleFps}fps / ${visualSegmentSeconds}s 段，Face ${faceSampleFps}fps${includeOcr ? `，OCR ${ocrSampleFps}fps` : ""}，ASR ${asrModel}/${asrLanguage}`);
     }
     catch (error) { setNotice(error instanceof Error ? error.message : "任务创建失败"); }
   };
@@ -247,7 +257,7 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
     catch (error) { setNotice(error instanceof Error ? error.message : "删除失败"); }
   };
   return <div className="stack-page"><div className="upload-panel panel"><div><span className="panel-label">NEW ASSET</span><h2>添加视频素材</h2><p>上传后可一次建立 Face、Visual 和 ASR 三路索引。</p></div><label className="file-line"><input type="file" accept="video/*" onChange={event => setVideoFile(event.target.files?.[0])} /><span>{videoFile?.name || "选择视频文件"}</span><b>浏览</b></label><label className="file-line secondary"><input type="file" accept=".json,.srt,.vtt" onChange={event => setTranscript(event.target.files?.[0])} /><span>{transcript?.name || "可选：已有字幕 JSON / SRT / VTT"}</span><b>添加</b></label><button className="primary compact" onClick={upload} disabled={uploading}>{uploading ? "正在上传…" : "上传素材"}</button></div>
-    <div className="index-options panel"><div><span className="panel-label">INDEX OPTIONS</span><h2>索引参数</h2><p>Visual 默认提高到 5fps；ASR 默认 small，更适合共享 NPU。medium/large-v3 更吃显存。</p></div><label>Visual fps<input type="number" min="0.2" max="10" step="0.5" value={visualSampleFps} onChange={event => setVisualSampleFps(Number(event.target.value))} /></label><label>Visual 分段秒数<input type="number" min="1" max="60" step="1" value={visualSegmentSeconds} onChange={event => setVisualSegmentSeconds(Number(event.target.value))} /></label><label>Face fps<input type="number" min="0.2" max="15" step="0.5" value={faceSampleFps} onChange={event => setFaceSampleFps(Number(event.target.value))} /></label><label>ASR 模型<select value={asrModel} onChange={event => setAsrModel(event.target.value)}><option value="base">base 更快</option><option value="small">small 推荐</option><option value="medium">medium 更准更慢</option><option value="large-v3">large-v3 高风险</option></select></label><label>ASR 语言<select value={asrLanguage} onChange={event => setAsrLanguage(event.target.value)}><option value="zh">中文</option><option value="en">English</option><option value="auto">Auto</option></select></label></div>
+    <div className="index-options panel"><div><span className="panel-label">INDEX OPTIONS</span><h2>索引参数</h2><p>Visual 默认 5fps；OCR 需显式勾选，服务器优先走 NPU/CANN，长视频建议先低采样；ASR 默认 small。</p></div><label>Visual model<select value={visualModel} onChange={event => setVisualModel(event.target.value)}><option value="siglip2-so400m-384">SigLIP2 So400m-384 默认</option><option value="chinese-clip-vit-b16">ChineseCLIP ViT-B/16</option><option value="openclip-vit-b32">OpenCLIP ViT-B/32</option><option value="openclip-vit-b16">OpenCLIP ViT-B/16</option><option value="openclip-vit-l14">OpenCLIP ViT-L/14</option></select></label><label>Visual fps<input type="number" min="0.2" max="10" step="0.5" value={visualSampleFps} onChange={event => setVisualSampleFps(Number(event.target.value))} /></label><label>Visual 分段秒数<input type="number" min="1" max="60" step="1" value={visualSegmentSeconds} onChange={event => setVisualSegmentSeconds(Number(event.target.value))} /></label><label>Face fps<input type="number" min="0.2" max="15" step="0.5" value={faceSampleFps} onChange={event => setFaceSampleFps(Number(event.target.value))} /></label><label className="inline-check"><input type="checkbox" checked={includeOcr} onChange={event => setIncludeOcr(event.target.checked)} />包含 OCR</label><label>OCR fps<input type="number" min="0.02" max="5" step="0.05" value={ocrSampleFps} onChange={event => setOcrSampleFps(Number(event.target.value))} /></label><label>ASR 模型<select value={asrModel} onChange={event => setAsrModel(event.target.value)}><option value="base">base 更快</option><option value="small">small 推荐</option><option value="medium">medium 更准更慢</option><option value="large-v3">large-v3 高风险</option></select></label><label>ASR 语言<select value={asrLanguage} onChange={event => setAsrLanguage(event.target.value)}><option value="zh">中文</option><option value="en">English</option><option value="auto">Auto</option></select></label></div>
     <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">LIBRARY</span><h2>视频资产</h2></div><span>{videos.length} items</span></div><div className="asset-list">{videos.map(video => <div className="asset-row" key={video.id}><div className="asset-icon">▶</div><div className="asset-main"><b>{video.name}</b><small>{formatTime(video.duration)} · {video.width}×{video.height} · {video.fps.toFixed(1)} fps</small></div><div className="chips">{video.indexed_modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}</div><span className={`status ${video.status}`}>{statusText(video.status)}</span><div className="asset-actions">{video.status !== "indexing" && <button className="outline" onClick={() => index(video.id)}>{video.indexed_modalities.length ? "重建索引" : "建立索引"}</button>}<button className="outline" onClick={() => rename(video)}>重命名</button><button className="outline danger" disabled={video.status === "indexing"} onClick={() => remove(video)}>删除</button></div></div>)}{!videos.length && <div className="empty-list">还没有视频素材</div>}</div></div>
   </div>;
 }
@@ -256,7 +266,7 @@ function IndexesPage({ jobs, videos }: { jobs: Job[]; videos: Video[] }) {
   const names = Object.fromEntries(videos.map(video => [video.id, video.name]));
   return <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">PIPELINE</span><h2>索引任务</h2></div><span>阶段子进程退出后释放模型</span></div><div className="job-list">{jobs.map(job => {
     const stages = job.metrics?.stages || {};
-    return <div className="job-row" key={job.id}><div className={`job-state ${job.status}`}>{job.status === "completed" ? "✓" : job.status === "failed" ? "!" : "↻"}</div><div className="job-main"><b>{names[job.video_id] || job.video_id}</b><small>{job.modalities.join(" → ")} · 当前：{job.stage} · 总耗时 {formatDuration(job.metrics?.total_elapsed_seconds)}</small><div className="stage-times">{["visual", "face", "asr"].filter(stage => job.modalities.includes(stage) || stages[stage]).map(stage => <span key={stage}>{stage}: {formatDuration(stages[stage]?.elapsed_seconds)}</span>)}</div><div className="progress"><span style={{ width: `${job.progress * 100}%` }} /></div></div><span className={`status ${job.status}`}>{statusText(job.status)}</span>{job.error && <p>{job.error}</p>}</div>;
+    return <div className="job-row" key={job.id}><div className={`job-state ${job.status}`}>{job.status === "completed" ? "✓" : job.status === "failed" ? "!" : "↻"}</div><div className="job-main"><b>{names[job.video_id] || job.video_id}</b><small>{job.modalities.join(" → ")} · 当前：{job.stage} · 总耗时 {formatDuration(job.metrics?.total_elapsed_seconds)}</small><div className="stage-times">{["visual", "face", "asr", "ocr"].filter(stage => job.modalities.includes(stage) || stages[stage]).map(stage => <span key={stage}>{stage}: {formatDuration(stages[stage]?.elapsed_seconds)}</span>)}</div><div className="progress"><span style={{ width: `${job.progress * 100}%` }} /></div></div><span className={`status ${job.status}`}>{statusText(job.status)}</span>{job.error && <p>{job.error}</p>}</div>;
   })}{!jobs.length && <div className="empty-list">还没有索引任务</div>}</div></div>;
 }
 
@@ -268,7 +278,7 @@ function EntitiesPage({ entities, refresh, setNotice }: { entities: Entity[]; re
 
 function Overview({ videos, jobs, entities, setPage }: { videos: Video[]; jobs: Job[]; entities: Entity[]; setPage: (page: Page) => void }) {
   const ready = videos.filter(video => video.status === "ready").length;
-  return <div className="overview"><div className="hero panel"><div><span className="panel-label">MVP BASELINE</span><h2>让长视频变成<br />可以搜索的素材库。</h2><p>三路独立索引，保留时间证据；模型只在索引阶段短暂加载。</p><button className="primary compact" onClick={() => setPage("assets")}>添加第一条视频 <span>→</span></button></div><div className="hero-visual"><div className="orbit one">Face</div><div className="orbit two">Visual</div><div className="orbit three">ASR</div><span className="core">M</span></div></div><div className="stats"><article><span>视频资产</span><b>{videos.length}</b><small>{ready} 条可检索</small></article><article><span>人物实体</span><b>{entities.length}</b><small>参考脸向量</small></article><article><span>索引任务</span><b>{jobs.length}</b><small>{jobs.filter(job => job.status === "running").length} 个正在运行</small></article><article><span>NPU 常驻</span><b>0</b><small>任务结束即释放</small></article></div></div>;
+  return <div className="overview"><div className="hero panel"><div><span className="panel-label">MVP BASELINE</span><h2>让长视频变成<br />可以搜索的素材库。</h2><p>Face / Visual / ASR / OCR 四路独立索引，保留时间证据；模型只在索引阶段短暂加载。</p><button className="primary compact" onClick={() => setPage("assets")}>添加第一条视频 <span>→</span></button></div><div className="hero-visual"><div className="orbit one">Face</div><div className="orbit two">Visual</div><div className="orbit three">ASR</div><span className="core">M</span></div></div><div className="stats"><article><span>视频资产</span><b>{videos.length}</b><small>{ready} 条可检索</small></article><article><span>人物实体</span><b>{entities.length}</b><small>参考脸向量</small></article><article><span>索引任务</span><b>{jobs.length}</b><small>{jobs.filter(job => job.status === "running").length} 个正在运行</small></article><article><span>NPU 常驻</span><b>0</b><small>任务结束即释放</small></article></div></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

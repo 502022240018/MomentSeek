@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.db import Catalog
-from app.media import probe_video
+from app.media import export_preview_clip, probe_video
 from app.schemas import HealthResponse, IndexRequest, VideoRenameRequest
 from app.search import SearchEngine
 from app.settings import get_settings
@@ -67,7 +67,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="MomentSeek API",
     version=__version__,
-    description="Local-first face, visual and ASR video moment retrieval MVP.",
+    description="Local-first face, visual, ASR and OCR video moment retrieval MVP.",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -98,8 +98,26 @@ def _remove_video_files(video: dict, video_id: str) -> None:
             Path(path).unlink(missing_ok=True)
         except OSError:
             pass
-    for directory in (settings.index_dir / video_id, settings.thumbnail_dir / video_id):
+    for directory in (settings.index_dir / video_id, settings.thumbnail_dir / video_id, settings.clip_cache_dir / video_id):
         shutil.rmtree(directory, ignore_errors=True)
+
+
+def _video_media_type(path: Path, name: str | None = None) -> str:
+    suffix = (Path(name or "").suffix or path.suffix).lower()
+    return {
+        ".mp4": "video/mp4",
+        ".m4v": "video/mp4",
+        ".mov": "video/quicktime",
+        ".webm": "video/webm",
+        ".mkv": "video/x-matroska",
+        ".avi": "video/x-msvideo",
+    }.get(suffix, "video/mp4")
+
+
+def _clip_cache_path(video_id: str, start_time: float, end_time: float) -> Path:
+    start_ms = max(0, round(start_time * 1000))
+    end_ms = max(start_ms + 250, round(end_time * 1000))
+    return settings.clip_cache_dir / video_id / f"{start_ms:012d}_{end_ms:012d}.mp4"
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -193,7 +211,49 @@ def video_media(video_id: str):
     video_path = settings.resolve_path(video["file_path"])
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="视频文件不存在")
-    return FileResponse(video_path, filename=video["name"], content_disposition_type="inline")
+    return FileResponse(
+        video_path,
+        media_type=_video_media_type(video_path, video.get("name")),
+        filename=video["name"],
+        content_disposition_type="inline",
+    )
+
+
+@app.get("/api/videos/{video_id}/clip")
+async def video_clip(
+    video_id: str,
+    start: float = Query(..., ge=0),
+    end: float = Query(..., gt=0),
+):
+    video = catalog.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+    if end <= start:
+        raise HTTPException(status_code=400, detail="片段结束时间必须大于开始时间")
+    video_path = settings.resolve_path(video["file_path"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+
+    max_seconds = 45.0
+    duration = float(video.get("duration") or 0)
+    bounded_end = min(end, start + max_seconds)
+    if duration > 0:
+        bounded_end = min(bounded_end, duration)
+    if bounded_end <= start:
+        bounded_end = start + 0.25
+
+    clip_path = _clip_cache_path(video_id, start, bounded_end)
+    if not clip_path.exists() or clip_path.stat().st_size == 0:
+        try:
+            await run_in_threadpool(export_preview_clip, video_path, clip_path, start, bounded_end, max_seconds)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return FileResponse(
+        clip_path,
+        media_type="video/mp4",
+        filename=f"{video_id}_{round(start * 1000)}_{round(bounded_end * 1000)}.mp4",
+        content_disposition_type="inline",
+    )
 
 
 @app.post("/api/videos/{video_id}/index", status_code=202)
@@ -206,9 +266,11 @@ def create_index_job(video_id: str, request: IndexRequest = Body(default_factory
         raise HTTPException(status_code=409, detail="该视频已有索引任务在运行")
     options = {
         key: value for key, value in {
+            "visual_model": request.visual_model,
             "visual_sample_fps": request.visual_sample_fps,
             "visual_segment_seconds": request.visual_segment_seconds,
             "face_sample_fps": request.face_sample_fps,
+            "ocr_sample_fps": request.ocr_sample_fps,
             "asr_model": request.asr_model,
             "asr_language": request.asr_language,
         }.items() if value is not None
@@ -296,7 +358,7 @@ def entity_reference(entity_id: str):
 async def search(
     query_text: str | None = Form(default=None),
     query_image: UploadFile | None = File(default=None),
-    modalities: str = Form(default="visual,face,asr"),
+    modalities: str = Form(default="visual,face,asr,ocr"),
     video_ids: str | None = Form(default=None),
     alpha: float = Form(default=0.5),
     limit: int = Form(default=24),
@@ -304,7 +366,7 @@ async def search(
     selected_modalities = [item.strip() for item in modalities.split(",") if item.strip()]
     if not query_text and not query_image:
         raise HTTPException(status_code=422, detail="请提供查询文字或参考图")
-    if any(item not in {"visual", "face", "asr"} for item in selected_modalities):
+    if any(item not in {"visual", "face", "asr", "ocr"} for item in selected_modalities):
         raise HTTPException(status_code=422, detail="检索通道不合法")
     image_path = None
     if query_image and query_image.filename:
