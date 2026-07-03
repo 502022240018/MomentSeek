@@ -58,8 +58,10 @@ verification
 生成入口：
 
 ```powershell
-python scripts/write_release_manifest.py --model-manifest deploy/models/ascend-prod.models.json
+python scripts/write_release_manifest.py --env-profile staging.ascend --model-manifest deploy/models/ascend-prod.models.json
 ```
+
+生成 release manifest 前应确认前端 `frontend/dist` 已由目标提交构建完成，并且工作区没有会污染 release 内容的未确认改动。
 
 staging、prod 和新服务器复制都应从 release manifest、env profile、model manifest 和 models lock 还原，而不是临时拼接命令。
 
