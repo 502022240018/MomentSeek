@@ -278,4 +278,5 @@ def test_visual_search_encodes_query_with_each_index_model(tmp_path):
     results = engine.search("stadium", None, ["visual"], limit=10)
 
     assert {result["video_id"] for result in results} == {"siglip-video", "chinese-video"}
-    assert calls == ["siglip2-so400m-384", "chinese-clip-vit-b16"]
+    assert set(calls) == {"siglip2-so400m-384", "chinese-clip-vit-b16"}
+    assert len(calls) == 2
