@@ -3,6 +3,25 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
-cd "$repo_root/backend"
+port="8000"
 
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+if [[ -f "$repo_root/.env" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*APP_PORT[[:space:]]*=[[:space:]]*(.+)[[:space:]]*$ ]] || continue
+
+    port="${BASH_REMATCH[1]}"
+    port="${port%$'\r'}"
+    port="${port#"${port%%[![:space:]]*}"}"
+    port="${port%"${port##*[![:space:]]}"}"
+    port="${port%\"}"
+    port="${port#\"}"
+    port="${port%\'}"
+    port="${port#\'}"
+    break
+  done < "$repo_root/.env"
+fi
+
+cd "$repo_root"
+
+python -m uvicorn backend.app.main:app --host 0.0.0.0 --port "$port" --reload
