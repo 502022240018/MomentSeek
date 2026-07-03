@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from app.settings import Settings
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -42,6 +44,8 @@ def test_compose_runtime_and_model_mounts_are_host_configurable():
     staging = _parse_env("deploy/env/staging.ascend.example")
     prod = _parse_env("deploy/env/prod.ascend.example")
 
+    assert "${APP_PORT:-8000}:8000" in compose
+    assert "APP_PORT:-8300" not in compose
     assert "${HOST_RUNTIME_DIR:-./runtime}:/app/runtime" in compose
     assert "${HOST_MODEL_DIR:-./models}:/app/models" in compose
     assert staging["HOST_RUNTIME_DIR"] == "/opt/momentseek/runtime"
@@ -75,6 +79,14 @@ def test_root_env_example_is_safe_dev_cpu_profile():
     assert root_env["NPU_ENABLED"] == "false"
     assert "NPU_DEVICE_ID" not in root_env
     assert "HOST_NPU_DEVICE_ID" not in root_env
+
+
+def test_runtime_defaults_match_safe_dev_cpu_profile():
+    settings = Settings(_env_file=None)
+
+    assert settings.app_public_url == "http://127.0.0.1:8000"
+    assert settings.npu_enabled is False
+    assert settings.npu_device_id == 0
 
 
 def test_resource_scripts_use_host_npu_device_id_not_container_npu_id():

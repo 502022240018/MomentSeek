@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     app_data_dir: Path = Path("runtime")
     app_model_dir: Path = Path("models")
-    app_public_url: str = "http://127.0.0.1:8300"
+    app_public_url: str = "http://127.0.0.1:8000"
 
     env_profile: str | None = None
     release_id: str | None = None
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     release_manifest_path: Path | None = None
 
     npu_enabled: bool = False
-    npu_device_id: int = 7
+    npu_device_id: int = 0
     cuda_enabled: bool = False
     ascend_visible_devices: str | None = None
     ascend_rt_visible_devices: str | None = None

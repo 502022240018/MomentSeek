@@ -10,6 +10,8 @@ def test_worker_environment_uses_absolute_runtime_paths(tmp_path):
     assert environment["APP_DATA_DIR"] == str((tmp_path / "runtime").resolve())
     assert environment["APP_MODEL_DIR"] == str((tmp_path / "models").resolve())
     assert environment["PYTHONIOENCODING"] == "utf-8"
+    assert environment["NPU_ENABLED"] == "false"
+    assert "NPU_DEVICE_ID" not in environment
 
 
 def test_worker_environment_propagates_indexing_profile_settings(tmp_path):

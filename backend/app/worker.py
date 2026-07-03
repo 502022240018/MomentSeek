@@ -155,6 +155,8 @@ def worker_environment(settings: Settings) -> dict[str, str]:
         value = getattr(settings, name)
         if value is None:
             continue
+        if name == "npu_device_id" and not settings.npu_enabled:
+            continue
         env_name = name.upper()
         if isinstance(value, bool):
             environment[env_name] = str(value).lower()
