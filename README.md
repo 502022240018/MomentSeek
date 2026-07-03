@@ -35,24 +35,23 @@ compose.ascend.yml 昇腾单卡隔离覆盖配置
 
 ## 本地开发
 
+默认先用 `dev.cpu` 做 clean clone 验证；有 NVIDIA/CUDA 环境时再切换 `dev.cuda`。
+
 ```bash
-cp .env.example .env
-python -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements-cpu.txt
-cd frontend && npm install && npm run build && cd ..
-cp -r frontend/dist backend/app/static
-cd backend && uvicorn app.main:app --reload
+[ -f .env ] || cp deploy/env/dev.cpu.example .env
+scripts/bootstrap_dev.sh dev.cpu --download
+scripts/start_backend.sh
+scripts/start_frontend.sh
 ```
 
-打开 `http://127.0.0.1:8000`，API 文档位于 `/docs`。
+Windows、CUDA 开发和 smoke check 细节见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。打开 `http://127.0.0.1:8000`，API 文档位于 `/docs`。
 
 ## Docker 部署
 
 CPU 模式（不会访问任何 NPU）：
 
 ```bash
-cp .env.example .env
+cp deploy/env/dev.cpu.example .env
 docker compose -f compose.yml up -d --build
 ```
 
@@ -71,22 +70,22 @@ NPU_DEVICE_ID=7 docker compose -f compose.yml -f compose.server.yml -f compose.a
 
 默认访问地址是 `http://SERVER_IP:8300`。除这个入口外，容器不向宿主机暴露数据库或内部端口。
 
-更完整的 GitHub 迁移、clone 后部署、运行时数据迁移和共享服务器资源检查流程见 [DEPLOY.md](DEPLOY.md)。
+更完整的 GitHub 迁移、clone 后部署、运行时数据迁移和共享服务器资源检查流程见 [DEPLOY.md](DEPLOY.md) 和 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
-最新共同开发交接、pipeline 细节、当前服务器/公网链路、数据结构、已知问题和后续路线见 [docs/HANDOFF_CURRENT.md](docs/HANDOFF_CURRENT.md)。
+最新共同开发入口和文档阅读顺序见 [docs/README.md](docs/README.md)。新会话启动 prompt 见 [docs/handoff/SESSION_BOOTSTRAP.md](docs/handoff/SESSION_BOOTSTRAP.md)。
 
-历史交接记录保留在 [docs/HANDOFF.md](docs/HANDOFF.md)，以 `HANDOFF_CURRENT.md` 为准。
+历史交接记录保留在 [docs/archive/handoff/](docs/archive/handoff/)，只作为背景参考。
 
 ## 模型准备
 
-模型不提交到 Git。当前 baseline 约定：
+模型不提交到 Git。当前约定：
 
-1. 将 OpenCLIP 权重放到 `models/ViT-B-32.openai.bin`。
-2. InsightFace `buffalo_l` 首次使用时下载到 `models/insightface/`。
-3. MVP 当前使用 Whisper baseline，前端可选 `base / small / medium / large-v3` 和 `zh / en / auto`；也可以上传 JSON/SRT/VTT 字幕绕过 ASR 推理。FunASR 通过适配器保留为下一步的昇腾优化项。
+1. 开发 profile 使用 `deploy/models/dev-full.models.json`，bootstrap 可自动下载校验脚本支持的 Hugging Face 小模型条目。
+2. Ascend staging/prod 使用 `deploy/models/ascend-prod.models.json`，模型必须预缓存并挂载到容器内 `/app/models`。
+3. visual / face / ASR / OCR 的模型、缓存和 lock 规则以 [docs/MODELS.md](docs/MODELS.md) 为准。
 
 在新的昇腾服务器上，通过 `ASCEND_RUNTIME_IMAGE` 指向与驱动匹配的 ARM64 CANN/torch_npu 基础镜像，不需要修改业务代码。
-当前服务器镜像额外固定 NumPy 1.26，以兼容 InsightFace 的 ONNXRuntime；ARM64 wheel 放在不入 Git 的 `vendor-wheels/`，部署脚本可重新下载。
+当前服务器镜像额外固定 NumPy 1.26，以兼容 InsightFace 的 ONNXRuntime；ARM64 wheel 放在不入 Git 的 `vendor-wheels/`，部署前按 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 准备。
 
 ## 查询语义
 

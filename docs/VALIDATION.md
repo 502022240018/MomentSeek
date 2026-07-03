@@ -35,13 +35,15 @@ pytest
 pytest tests/test_search.py -v
 ```
 
-## 本地 smoke check
+## 本地基础 API smoke check
 
 后端启动后，在仓库根目录运行：
 
 ```powershell
 python scripts/smoke_check.py --base-url http://127.0.0.1:8000
 ```
+
+该脚本只检查 `/api/health` 和 `/api/jobs`。release manifest 中应把它记录为 `verification.api_smoke`，不要把它等同于真实检索验证。
 
 ## 模型清单校验
 

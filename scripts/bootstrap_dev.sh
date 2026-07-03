@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-profile="${1:-dev.cuda}"
+profile="${1:-dev.cpu}"
 download_arg="${2:-}"
 
 if [[ -n "$download_arg" && "$download_arg" != "--download" ]]; then
   echo "Usage: $0 [profile] [--download]" >&2
+  exit 2
+fi
+
+if [[ "$profile" != "dev.cpu" && "$profile" != "dev.cuda" ]]; then
+  echo "bootstrap_dev only supports dev.cpu and dev.cuda; use docs/DEPLOYMENT.md for staging/prod profiles." >&2
   exit 2
 fi
 
@@ -43,11 +48,7 @@ echo "Installing frontend dependencies..."
   npm run build
 )
 
-if [[ "$profile" == *.ascend ]]; then
-  manifest_name="ascend-prod"
-else
-  manifest_name="dev-full"
-fi
+manifest_name="dev-full"
 
 manifest_path="deploy/models/${manifest_name}.models.json"
 if [[ ! -f "$manifest_path" ]]; then

@@ -19,13 +19,13 @@ deploy/models/dev-full.models.json
 开发启动时可以运行：
 
 ```powershell
-scripts/bootstrap_dev.ps1 -Profile dev.cuda -DownloadModels
+scripts/bootstrap_dev.ps1 -Profile dev.cpu -DownloadModels
 ```
 
 或：
 
 ```bash
-scripts/bootstrap_dev.sh dev.cuda --download
+scripts/bootstrap_dev.sh dev.cpu --download
 ```
 
 没有 `-DownloadModels` 或 `--download` 时，校验脚本只检查已有缓存并写 lock，不主动下载。即使传入下载开关，非 Hugging Face 条目也可能需要先按库要求准备依赖或缓存。Whisper 条目按运行时加载规则校验 `<target>/<id>.pt`；如果要在开发环境离线验证 ASR，需要准备 `models/whisper/base.pt`。
@@ -40,12 +40,15 @@ deploy/models/ascend-prod.models.json
 
 该 manifest 的 `allow_download` 为 `false`。模型必须提前放入服务器宿主机模型目录，并挂载到容器内 `/app/models`。staging/prod 启动前先运行校验并生成 lock；校验失败时修复模型缓存，而不是让服务在运行时下载。
 
+注意路径视角：`ascend-prod.models.json` 的 target 是容器内 `/app/models/...`，不是宿主机 `/opt/momentseek/models/...`。线上校验应在容器内执行，或在一个把宿主机模型目录挂载成 `/app/models` 的等价环境中执行。不要把 manifest 中的 target 临时改成宿主机路径；路径变化应通过挂载关系解决，否则 release manifest 和 runtime 配置会失去一致性。
+
 ## 模型目录
 
 当前约定路径：
 
 ```text
 开发默认：models/
+Ascend 标准宿主机：/opt/momentseek/models
 容器内：/app/models
 当前服务器宿主机：/mnt/mog2/wyl/comfyui-wxy/video-retrieval-mvp/models
 ```
@@ -104,10 +107,10 @@ python scripts/verify_models.py --manifest deploy/models/dev-full.models.json --
 python scripts/verify_models.py --manifest deploy/models/dev-full.models.json --lock runtime/dev-models.lock.json
 ```
 
-Ascend staging/prod 只校验：
+Ascend staging/prod 只校验。以下命令必须在容器内或等价 `/app/models` 挂载环境中运行：
 
 ```powershell
-python scripts/verify_models.py --manifest deploy/models/ascend-prod.models.json --lock models/models.lock.json
+python scripts/verify_models.py --manifest deploy/models/ascend-prod.models.json --lock /app/models/models.lock.json
 ```
 
 若线上校验失败，应补齐预缓存模型后重新校验。不要通过修改线上 manifest 的 `allow_download` 绕过校验。

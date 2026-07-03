@@ -120,7 +120,8 @@ def main() -> int:
             "backend_tests": "required",
             "frontend_build": "required",
             "health": "required",
-            "smoke_search": "required",
+            "api_smoke": "required",
+            "search_smoke": "required",
             "resource_check": "required",
         },
     }

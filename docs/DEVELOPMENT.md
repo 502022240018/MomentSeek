@@ -11,8 +11,8 @@
 当前开发 profile：
 
 ```text
-dev.cpu：纯 CPU 开发，启动最稳，适合文档、API、前端和轻量 smoke check。
-dev.cuda：CUDA 开发，适合有 NVIDIA GPU 的本地机器，默认开发推荐。
+dev.cpu：纯 CPU 开发，启动最稳，推荐作为 clean clone 默认入口。
+dev.cuda：CUDA 开发，适合已经准备好 NVIDIA/CUDA/PyTorch CUDA 环境的本地机器。
 ```
 
 示例文件位于：
@@ -22,7 +22,9 @@ deploy/env/dev.cpu.example
 deploy/env/dev.cuda.example
 ```
 
-`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。开发 profile 的 visual runtime 默认是 `VISUAL_MODEL=chinese-clip-vit-b16`，manifest 对应 Hugging Face 模型 `OFA-Sys/chinese-clip-vit-base-patch16`。开发 profile 的必需校验项是 Hugging Face visual / semantic 模型；Face、Whisper、RapidOCR 在 bootstrap 阶段不阻塞，首次使用对应通道时仍要由库或本地缓存准备。staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载。
+`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。开发 profile 的 visual runtime 默认是 `VISUAL_MODEL=chinese-clip-vit-b16`，manifest 对应 Hugging Face 模型 `OFA-Sys/chinese-clip-vit-base-patch16`。开发 profile 的必需校验项是 Hugging Face visual / semantic 模型；Face、Whisper、RapidOCR 在 bootstrap 阶段不阻塞，首次使用对应通道时仍要由库或本地缓存准备。staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载，也不能用 `scripts/bootstrap_dev.*` 准备环境。
+
+`scripts/bootstrap_dev.*` 只接受 `dev.cpu` 和 `dev.cuda`。它们安装的是本地开发依赖，不安装 CANN/torch_npu，也不负责准备 Ascend staging/prod。`dev.cuda` 只表示运行配置允许 CUDA；如果需要 GPU 加速，先准备匹配本机驱动的 CUDA/PyTorch 环境，并用 `python -c "import torch; print(torch.cuda.is_available())"` 验证。
 
 ## Windows 快速启动
 
@@ -31,15 +33,15 @@ deploy/env/dev.cuda.example
 Bootstrap：
 
 ```powershell
-if (-not (Test-Path .env)) { Copy-Item deploy/env/dev.cuda.example .env }
-scripts/bootstrap_dev.ps1 -Profile dev.cuda -DownloadModels
-```
-
-如果本机没有 CUDA，改用：
-
-```powershell
 if (-not (Test-Path .env)) { Copy-Item deploy/env/dev.cpu.example .env }
 scripts/bootstrap_dev.ps1 -Profile dev.cpu -DownloadModels
+```
+
+如果本机已经准备好 CUDA 环境，可改用：
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item deploy/env/dev.cuda.example .env }
+scripts/bootstrap_dev.ps1 -Profile dev.cuda -DownloadModels
 ```
 
 终端 1 启动后端：
@@ -63,8 +65,9 @@ python scripts/smoke_check.py --base-url http://127.0.0.1:8000
 需要手动创建 `.env` 时，保留的原始复制命令如下；仅在 `.env` 不存在或已经人工确认可替换时运行：
 
 ```powershell
-Copy-Item deploy/env/dev.cuda.example .env
 Copy-Item deploy/env/dev.cpu.example .env
+# 或者，在已经准备好 CUDA 环境时：
+Copy-Item deploy/env/dev.cuda.example .env
 ```
 
 ## Linux 快速启动
@@ -74,15 +77,15 @@ Copy-Item deploy/env/dev.cpu.example .env
 Bootstrap：
 
 ```bash
-[ -f .env ] || cp deploy/env/dev.cuda.example .env
-scripts/bootstrap_dev.sh dev.cuda --download
-```
-
-如果本机没有 CUDA，改用：
-
-```bash
 [ -f .env ] || cp deploy/env/dev.cpu.example .env
 scripts/bootstrap_dev.sh dev.cpu --download
+```
+
+如果本机已经准备好 CUDA 环境，可改用：
+
+```bash
+[ -f .env ] || cp deploy/env/dev.cuda.example .env
+scripts/bootstrap_dev.sh dev.cuda --download
 ```
 
 终端 1 启动后端：
@@ -106,8 +109,9 @@ python scripts/smoke_check.py --base-url http://127.0.0.1:8000
 需要手动创建 `.env` 时，保留的原始复制命令如下；仅在 `.env` 不存在或已经人工确认可替换时运行：
 
 ```bash
-cp deploy/env/dev.cuda.example .env
 cp deploy/env/dev.cpu.example .env
+# 或者，在已经准备好 CUDA 环境时：
+cp deploy/env/dev.cuda.example .env
 ```
 
 ## 模型下载策略

@@ -1,11 +1,16 @@
 param(
-    [string]$Profile = "dev.cuda",
+    [string]$Profile = "dev.cpu",
     [switch]$DownloadModels
 )
 
 $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+if ($Profile -notin @("dev.cpu", "dev.cuda")) {
+    [Console]::Error.WriteLine("bootstrap_dev only supports dev.cpu and dev.cuda; use docs/DEPLOYMENT.md for staging/prod profiles.")
+    exit 2
+}
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $RepoRoot
@@ -40,11 +45,7 @@ try {
     Pop-Location
 }
 
-if ($Profile -like "*.ascend") {
-    $ManifestName = "ascend-prod"
-} else {
-    $ManifestName = "dev-full"
-}
+$ManifestName = "dev-full"
 
 $ManifestPath = "deploy/models/$ManifestName.models.json"
 if (-not (Test-Path -LiteralPath $ManifestPath)) {
