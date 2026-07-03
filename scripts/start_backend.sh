@@ -24,4 +24,4 @@ fi
 
 cd "$repo_root"
 
-python -m uvicorn backend.app.main:app --host 0.0.0.0 --port "$port" --reload
+python -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port "$port" --reload

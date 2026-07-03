@@ -127,28 +127,30 @@ def visual_model_config(value: str | None) -> VisualModelConfig:
 def _hf_cached_snapshot_path(model_cache_dir: str | Path | None, model_id: str) -> Path | None:
     if not model_cache_dir:
         return None
-    repo_dir = Path(model_cache_dir) / "hub" / f"models--{model_id.replace('/', '--')}"
-    snapshots = repo_dir / "snapshots"
-    if not repo_dir.exists() or not snapshots.exists():
-        return None
-    ref = repo_dir / "refs" / "main"
-    if ref.exists():
-        snapshot = snapshots / ref.read_text(encoding="utf-8").strip()
-        if snapshot.exists():
-            return snapshot
-    complete_snapshots = []
-    for snapshot in snapshots.iterdir():
-        if not snapshot.is_dir():
+    cache_dir = Path(model_cache_dir)
+    repo_name = f"models--{model_id.replace('/', '--')}"
+    for repo_dir in (cache_dir / "hub" / repo_name, cache_dir / repo_name):
+        snapshots = repo_dir / "snapshots"
+        if not repo_dir.exists() or not snapshots.exists():
             continue
-        has_config = (snapshot / "config.json").exists()
-        has_weights = (snapshot / "model.safetensors").exists() or (snapshot / "pytorch_model.bin").exists()
-        if has_config and has_weights:
-            complete_snapshots.append(snapshot)
-    if complete_snapshots:
-        return sorted(complete_snapshots, key=lambda path: path.name)[0]
-    for snapshot in sorted(snapshots.iterdir(), key=lambda path: path.name):
-        if snapshot.is_dir():
-            return snapshot
+        ref = repo_dir / "refs" / "main"
+        if ref.exists():
+            snapshot = snapshots / ref.read_text(encoding="utf-8").strip()
+            if snapshot.exists():
+                return snapshot
+        complete_snapshots = []
+        for snapshot in snapshots.iterdir():
+            if not snapshot.is_dir():
+                continue
+            has_config = (snapshot / "config.json").exists()
+            has_weights = (snapshot / "model.safetensors").exists() or (snapshot / "pytorch_model.bin").exists()
+            if has_config and has_weights:
+                complete_snapshots.append(snapshot)
+        if complete_snapshots:
+            return sorted(complete_snapshots, key=lambda path: path.name)[0]
+        for snapshot in sorted(snapshots.iterdir(), key=lambda path: path.name):
+            if snapshot.is_dir():
+                return snapshot
     return None
 
 

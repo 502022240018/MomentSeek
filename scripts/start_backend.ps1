@@ -19,4 +19,4 @@ if (Test-Path -LiteralPath $EnvPath) {
 
 Set-Location $RepoRoot
 
-python -m uvicorn backend.app.main:app --host 0.0.0.0 --port $Port --reload
+python -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port $Port --reload
