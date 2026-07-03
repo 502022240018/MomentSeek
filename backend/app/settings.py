@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     npu_enabled: bool = False
     npu_device_id: int = 7
     cuda_enabled: bool = False
+    ascend_visible_devices: str | None = None
+    ascend_rt_visible_devices: str | None = None
+    torch_device_backend_autoload: str | None = None
     model_idle_policy: str = "process_exit"
 
     # Indexing execution mode:

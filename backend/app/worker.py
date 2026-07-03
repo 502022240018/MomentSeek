@@ -87,7 +87,7 @@ def execute_job(job_id: str) -> None:
                 )
                 environment = os.environ.copy()
                 environment.update(worker_environment(settings))
-                if settings.npu_enabled:
+                if settings.npu_enabled and "ASCEND_RT_VISIBLE_DEVICES" not in environment:
                     environment["ASCEND_RT_VISIBLE_DEVICES"] = str(settings.npu_device_id)
                 process = subprocess.run(
                     [sys.executable, "-m", "app.stage_runner", stage, job_id],
@@ -147,13 +147,25 @@ def launch_job(job_id: str) -> int:
 
 
 def worker_environment(settings: Settings) -> dict[str, str]:
-    return {
-        "APP_DATA_DIR": str(settings.app_data_dir.resolve()),
-        "APP_MODEL_DIR": str(settings.app_model_dir.resolve()),
-        "CUDA_ENABLED": str(settings.cuda_enabled).lower(),
+    environment = {
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
     }
+    for name in settings.__class__.model_fields:
+        value = getattr(settings, name)
+        if value is None:
+            continue
+        env_name = name.upper()
+        if isinstance(value, bool):
+            environment[env_name] = str(value).lower()
+        elif isinstance(value, Path):
+            if name in {"app_data_dir", "app_model_dir"}:
+                environment[env_name] = str(value.resolve())
+            else:
+                environment[env_name] = str(settings.resolve_path(value))
+        else:
+            environment[env_name] = str(value)
+    return environment
 
 
 def parse_stage_result(output: str) -> dict:
