@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     app_model_dir: Path = Path("models")
     app_public_url: str = "http://127.0.0.1:8300"
 
-    env_profile: str = "dev.cpu"
+    env_profile: str | None = None
     release_id: str | None = None
     git_commit: str | None = None
     image_tag: str | None = None
