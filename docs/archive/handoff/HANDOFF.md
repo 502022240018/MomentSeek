@@ -1,6 +1,8 @@
+> Archived reference. Current documentation starts at `docs/README.md`.
+
 # MomentSeek MVP 开发交接文档
 
-> 面向下一位共同开发同学：这份文档记录从项目启动到当前版本的设计、实现、运行方式、数据组织、索引/检索 pipeline、已知问题和后续建议。  
+> 面向下一位共同开发同学：这份文档记录从项目启动到当前版本的设计、实现、运行方式、数据组织、索引/检索 pipeline、已知问题和后续建议。
 > 当前项目仓库目录：`video_retrieval_mvp/`。GitHub 仓库：`https://github.com/502022240018/MomentSeek`。
 
 ## 1. 项目目标
@@ -985,5 +987,5 @@ Get-CimInstance Win32_Process |
 
 ## 18. 交接时一句话总结
 
-这套系统当前是“可跑通的多模态视频片段检索 baseline”：  
+这套系统当前是“可跑通的多模态视频片段检索 baseline”：
 Visual 用 CLIP 按时间桶建向量，Face 用 InsightFace 建人脸 track，ASR 用 Whisper/字幕建带时间戳文本；搜索时分别召回 candidates，再按时间合并成可播放片段。当前主要工程风险不是搜索慢，而是索引耗时和 ASR/Face 质量，需要下一阶段围绕模型选型、耗时记录、可解释调试和服务器隔离部署继续迭代。

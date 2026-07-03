@@ -1,3 +1,5 @@
+> Archived reference. Current documentation starts at `docs/README.md`.
+
 # 共享服务器运行规范
 
 当前部署目录：
@@ -45,4 +47,3 @@ docker-compose -f compose.yml -f compose.server.yml -f compose.ascend.yml down
 ```
 
 `runtime/` 与 `models/` 是 bind mount，停止或重建容器不会删除资产和索引。
-

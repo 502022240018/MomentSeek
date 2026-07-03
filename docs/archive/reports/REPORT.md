@@ -1,3 +1,5 @@
+> Archived reference. Current documentation starts at `docs/README.md`.
+
 # MomentSeek 检索 MVP — 方案设计 & 实验结果汇报
 
 > **一句话**：输入"一段文字 / 一张参考图 / 一个人名"，在视频库里定位到**可直接播放的时间片段**。多模态三路索引 + 融合检索，已在昇腾 910B 跑通并完成一轮性能优化。

@@ -4,6 +4,8 @@
 
 Rebuild the MomentSeek documentation and experiment-result system into a small set of long-lived, clearly owned files. Existing historical documents remain available as reference, but day-to-day project knowledge should move into stable current documents with explicit update rules.
 
+Active long-term project documents should be Chinese-first. Keep API names, code identifiers, file paths, model names, and schema fields in English where that is the project-native form.
+
 ## Current Problems
 
 - Project knowledge is split across multiple generations of handoff documents, reports, channel notes, operation notes, and experiment summaries.
@@ -103,6 +105,7 @@ Must include:
 - Data flow from upload to indexing to search.
 - Model lifecycle and worker/indexing strategy.
 - Main module responsibilities.
+- API Surface table: endpoint, method, backend function, purpose, frontend caller, related modules.
 - Storage layout.
 
 ### `docs/RETRIEVAL_CHANNELS.md`

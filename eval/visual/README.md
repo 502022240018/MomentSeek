@@ -1,5 +1,13 @@
 # MomentSeek visual evaluation set
 
+本目录保存可复现的 visual 评测资产：数据集计划、manifest、query 文件、schema 和运行说明。
+
+人类可读的实验结论和建议放在：
+
+```text
+docs/experiments/visual/
+```
+
 这个目录用于沉淀 visual 检索评估集。它先服务于我们当前讨论的核心问题：
 
 - 不同 CLIP 预处理方案：center crop、padding/full view、horizontal crops、tiles；

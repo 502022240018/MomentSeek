@@ -1,6 +1,8 @@
+> Archived reference. Current documentation starts at `docs/README.md`.
+
 # Visual CLIP 910B 评测记录
 
-更新时间：2026-07-01  
+更新时间：2026-07-01
 目的：评估 MomentSeek visual 索引候选方案在昇腾 910B 上的检索效果与处理速度，重点比较不同 CLIP 模型、center crop / padding / sliding window 等预处理方案。
 
 ## 1. 实验环境
@@ -159,4 +161,3 @@ Sequence 侧：
 2. 对 sliding window 做自适应触发：不是每帧都滑窗，只对宽高比极端、目标较小或粗排不确定的帧启用。
 3. 在索引结构中区分“全帧 embedding”和“局部 crop embedding”，避免所有查询都承担 sliding 成本。
 4. 把视频解码抽帧、数据库写入也纳入下一轮端到端耗时统计；本次表格只衡量已经抽出的 image/frame 进入 CLIP 这段。
-

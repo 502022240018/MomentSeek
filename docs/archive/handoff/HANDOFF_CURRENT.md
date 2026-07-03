@@ -1,6 +1,8 @@
+> Archived reference. Current documentation starts at `docs/README.md`.
+
 # MomentSeek 当前交接文档（2026-06-26）
 
-> 这份文档是当前开发/部署状态的交接版，覆盖本地与服务器两套服务、三路索引 pipeline、模型与设备配置、数据管理、Cloudflare 公网转发、已知问题和下一步建议。  
+> 这份文档是当前开发/部署状态的交接版，覆盖本地与服务器两套服务、三路索引 pipeline、模型与设备配置、数据管理、Cloudflare 公网转发、已知问题和下一步建议。
 > 旧版较长背景文档见 `docs/HANDOFF.md`；本文件以”现在实际能用的系统”为准。
 
 ## 0. TL;DR
@@ -1102,5 +1104,5 @@ git config https.proxy http://127.0.0.1:7890
 
 ## 14. 给接手同事的一句话
 
-MomentSeek 当前已经能演示“上传视频、建立 visual/face/asr 三路索引、按文本/图像/人物/语音检索出视频时间片段”。  
+MomentSeek 当前已经能演示“上传视频、建立 visual/face/asr 三路索引、按文本/图像/人物/语音检索出视频时间片段”。
 当前最重要的工程状态是：服务器 current 版跑在 `momentseek-current-app`，通过用户 PC 的 SSH + Cloudflare 暴露公网；三路尽量走 2 号 NPU，但 Whisper medium 在共享卡上会 OOM，所以默认必须用 small。后续重点不是把 demo 再堆功能，而是做稳定性、鉴权、ASR 语义检索、任务取消和多人协作代码整理。

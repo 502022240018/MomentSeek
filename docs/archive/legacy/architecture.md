@@ -1,3 +1,5 @@
+> Archived reference. Current documentation starts at `docs/README.md`.
+
 # MVP 架构
 
 ## 数据流
@@ -40,4 +42,3 @@ API 不导入 NPU 模型。每个索引阶段由单独 Python 子进程执行；
 - Face CPU 建索引较慢，应降低抽帧率、先跟踪后识别，或迁移到 CANN provider。
 - ASR 文本当前使用精确/字符近似检索，后续增加 BM25 与多语言文本 embedding。
 - 动作和事件依赖时序，后续在 CLIP 候选上加入 InternVideo2 精排。
-

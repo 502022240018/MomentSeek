@@ -1,3 +1,5 @@
+> Archived reference. Current documentation starts at `docs/README.md`.
+
 # 当前验证记录
 
 日期：2026-06-24
@@ -14,4 +16,3 @@
 - 所有索引子进程在任务后退出；部署前后没有新增 NPU 进程。
 
 性能结论：CPU CLIP 和 Whisper 可作为可运行 baseline；CPU Face 约 6 分钟/28 秒视频，必须作为下一轮首要优化对象。
-

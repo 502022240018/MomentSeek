@@ -1,3 +1,5 @@
+> Archived reference. Current documentation starts at `docs/README.md`.
+
 # Visual indexing benchmark: SigLIP2 31min 1080p
 
 - Date: 2026-07-02
