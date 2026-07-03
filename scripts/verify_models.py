@@ -8,6 +8,20 @@ from pathlib import Path
 from typing import Any
 
 
+REQUIRED_ENTRY_FIELDS = ("name", "kind", "id", "target")
+HF_CONFIG_FILES = {
+    "config.json",
+    "preprocessor_config.json",
+    "tokenizer_config.json",
+    "modules.json",
+}
+HF_WEIGHT_FILES = {
+    "model.safetensors",
+    "pytorch_model.bin",
+    "open_clip_pytorch_model.bin",
+}
+
+
 def load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
@@ -16,12 +30,79 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
+def validate_manifest(manifest: dict[str, Any], path: Path) -> list[dict[str, Any]]:
+    models = manifest.get("models")
+    if not isinstance(models, list) or not models:
+        raise ValueError(f"manifest must contain a non-empty models list: {path}")
+
+    entries = []
+    for index, item in enumerate(models):
+        if not isinstance(item, dict):
+            raise ValueError(f"manifest models[{index}] must be a JSON object: {path}")
+        missing = [
+            field
+            for field in REQUIRED_ENTRY_FIELDS
+            if field not in item or item[field] is None or not str(item[field]).strip()
+        ]
+        if missing:
+            raise ValueError(
+                f"manifest models[{index}] missing required field(s): {', '.join(missing)}"
+            )
+        entries.append(item)
+    return entries
+
+
+def has_any_file(target: Path) -> bool:
+    return target.is_dir() and any(path.is_file() for path in target.rglob("*"))
+
+
+def has_file_with_suffix(target: Path, suffixes: set[str]) -> bool:
+    return target.is_dir() and any(
+        path.is_file() and path.suffix.lower() in suffixes
+        for path in target.rglob("*")
+    )
+
+
+def hf_cache_dirs(target: Path, model_id: str) -> list[Path]:
+    repo_name = f"models--{model_id.replace('/', '--')}"
+    return [target / "hub" / repo_name, target / repo_name]
+
+
+def hf_snapshot_has_assets(snapshot: Path) -> bool:
+    if not snapshot.is_dir():
+        return False
+
+    has_config = any((snapshot / name).is_file() for name in HF_CONFIG_FILES)
+    if not has_config:
+        return False
+
+    return any(
+        path.is_file()
+        and (path.name in HF_WEIGHT_FILES or path.suffix.lower() in {".bin", ".safetensors"})
+        for path in snapshot.rglob("*")
+    )
+
+
 def hf_snapshot_exists(target: Path, model_id: str) -> bool:
-    repo_dir = target / "hub" / f"models--{model_id.replace('/', '--')}"
-    if not repo_dir.exists():
-        repo_dir = target / f"models--{model_id.replace('/', '--')}"
-    snapshots = repo_dir / "snapshots"
-    return snapshots.exists() and any(snapshots.iterdir())
+    for repo_dir in hf_cache_dirs(target, model_id):
+        snapshots = repo_dir / "snapshots"
+        if not snapshots.is_dir():
+            continue
+        if any(hf_snapshot_has_assets(snapshot) for snapshot in snapshots.iterdir()):
+            return True
+    return False
+
+
+def verify_non_hf_target(kind: str, target: Path) -> bool:
+    if kind == "directory":
+        return has_any_file(target)
+    if kind == "insightface":
+        return has_file_with_suffix(target, {".onnx"})
+    if kind == "whisper":
+        return has_file_with_suffix(target, {".pt", ".bin", ".safetensors"})
+    if kind == "rapidocr":
+        return has_file_with_suffix(target, {".onnx", ".bin", ".txt"})
+    raise ValueError(f"unsupported model kind: {kind}")
 
 
 def download_hf_model(target: Path, model_id: str) -> Path:
@@ -44,10 +125,9 @@ def verify_entry(entry: dict[str, Any], allow_download: bool) -> dict[str, Any]:
         verified = hf_snapshot_exists(target, model_id)
         if not verified and allow_download:
             local_path = download_hf_model(target, model_id)
-            verified = True
+            verified = hf_snapshot_has_assets(local_path)
     elif kind in {"directory", "insightface", "whisper", "rapidocr"}:
-        target.mkdir(parents=True, exist_ok=True) if allow_download and kind in {"insightface", "whisper", "rapidocr"} else None
-        verified = target.exists()
+        verified = verify_non_hf_target(kind, target)
     else:
         raise ValueError(f"unsupported model kind for {name}: {kind}")
 
@@ -81,9 +161,11 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        manifest = load_json(Path(args.manifest))
+        manifest_path = Path(args.manifest)
+        manifest = load_json(manifest_path)
+        model_entries = validate_manifest(manifest, manifest_path)
         allow_download = bool(manifest.get("allow_download", False)) and args.download
-        entries = [verify_entry(item, allow_download) for item in manifest.get("models", [])]
+        entries = [verify_entry(item, allow_download) for item in model_entries]
         write_lock(Path(args.lock), manifest, entries)
     except (FileNotFoundError, ValueError) as error:
         print(str(error), file=sys.stderr)
