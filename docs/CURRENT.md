@@ -104,6 +104,7 @@ Quick tunnel 域名不是固定的。前端出现 `failed to fetch` 时，先检
 
 ## 当前注意事项
 
+- 多人开发与可复制部署方案已设计，第一阶段新增 dev.cpu/dev.cuda/staging.ascend/prod.ascend profile 和 manifest。
 - 部分视频没有 OCR 索引。
 - ASR/OCR semantic 索引是可选增强；缺失时会退回 lexical。
 - Visual MaxSim 提高短瞬间召回，但多视频搜索时可能增加误召，见 `docs/ISSUES_AND_ROADMAP.md` 的 `RQ-001`。

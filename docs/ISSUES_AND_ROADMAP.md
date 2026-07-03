@@ -303,3 +303,49 @@ ID:
   backend/app/db.py
   frontend/src/main.tsx
 ```
+
+### ENG-007 多人开发与可复制部署第一阶段
+
+```text
+优先级：P1
+状态：in_progress
+范围：development workflow / deployment
+问题或目标：
+  GitHub clone 后可以按 dev.cpu/dev.cuda profile 开发和验证；staging/prod/new-server 可以通过 release manifest、model manifest、models lock 和 env profile 可复制部署。
+影响：
+  降低多人协作接手成本，减少服务器手工步骤和模型缓存漂移。
+证据或上下文：
+  第一阶段已新增 dev.cpu/dev.cuda/staging.ascend/prod.ascend profile 和 manifest，并补充 development、deployment、models 文档。
+下一步：
+  completing docs/env profile/model manifest/bootstrap/smoke/health metadata，并在实际 staging/prod 发布中记录 deployment record。
+相关文件或实验：
+  docs/DEVELOPMENT.md
+  docs/DEPLOYMENT.md
+  docs/MODELS.md
+  deploy/env/
+  deploy/models/
+  scripts/bootstrap_dev.ps1
+  scripts/bootstrap_dev.sh
+  scripts/smoke_check.py
+  backend/app/deployment.py
+```
+
+### ENG-008 CI/CD 与镜像化部署
+
+```text
+优先级：P2
+状态：open
+范围：deployment automation
+问题或目标：
+  Phase 1 保持 manual manifest/scripts；Phase 2 标准化 Dockerfile、compose、GitHub Actions、自动 publish 和 rollback。
+影响：
+  减少人工部署差异，提高 staging/prod/new-server 的一致性和回滚速度。
+证据或上下文：
+  当前可复制部署依赖 release manifest、env profile、model manifest、models lock 和手动脚本。
+下一步：
+  在第一阶段稳定后设计镜像构建、制品发布、部署记录写入和回滚自动化。
+相关文件或实验：
+  docs/DEPLOYMENT.md
+  deploy/releases/
+  scripts/write_release_manifest.py
+```

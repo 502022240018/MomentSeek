@@ -35,6 +35,22 @@ pytest
 pytest tests/test_search.py -v
 ```
 
+## 本地 smoke check
+
+后端启动后，在仓库根目录运行：
+
+```powershell
+python scripts/smoke_check.py --base-url http://127.0.0.1:8000
+```
+
+## 模型清单校验
+
+开发模型清单校验：
+
+```powershell
+python scripts/verify_models.py --manifest deploy/models/dev-full.models.json --lock runtime/dev-models.lock.json
+```
+
 ## 前端检查
 
 在 `video_retrieval_mvp/frontend` 下运行：

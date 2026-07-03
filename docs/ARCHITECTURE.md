@@ -93,13 +93,27 @@ backend/app/indexer_daemon.py
 
 `main.tsx` 当前较大，后续应按 upload/indexing、search、assets、player、shared controls 等职责拆分。该事项记录在 `docs/ISSUES_AND_ROADMAP.md`。
 
+## 部署元信息
+
+`/api/health` 除健康和设备状态外，也返回部署元信息，便于确认当前服务是否与 release manifest 一致。关键字段包括：
+
+```text
+env_profile
+release_id
+git_commit
+image_tag
+model_manifest
+```
+
+staging/prod 验证时应把这些字段与 `docs/DEPLOYMENT.md` 中的 release manifest 和 deployment record 对齐。
+
 ## API Surface
 
 运行中的 FastAPI 后端可通过 `/docs` 和 `/openapi.json` 查看自动文档。本表维护“接口到代码/前端调用”的人工索引。
 
 | Method | Path | 后端函数 | 功能 | 前端调用 | 相关模块 |
 |---|---|---|---|---|---|
-| `GET` | `/api/health` | `main.py::health` | 健康检查和设备状态 | smoke check | `settings.py`, `schemas.py` |
+| `GET` | `/api/health` | `main.py::health` | 健康检查、设备状态和部署元信息 | smoke check | `settings.py`, `schemas.py`, `deployment.py` |
 | `POST` | `/api/videos` | `main.py::upload_video` | 上传视频和可选字幕 | `api.ts::uploadVideo` | `media.py`, `db.py`, `runtime/uploads` |
 | `GET` | `/api/videos` | `main.py::list_videos` | 视频列表 | `api.ts::videos` | `db.py` |
 | `GET` | `/api/videos/{video_id}` | `main.py::get_video` | 视频详情和任务 | 详情/轮询流程 | `db.py` |
