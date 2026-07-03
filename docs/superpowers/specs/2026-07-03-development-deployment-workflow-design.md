@@ -19,7 +19,7 @@ MomentSeek 当前已经具备 visual / face / ASR / OCR 四条检索通道，但
 1. 新开发者从 GitHub clone 后，可以按文档完成开发环境 bootstrap。
 2. Windows 和 Linux 都是一等开发入口。
 3. 默认生产部署目标是 Ascend/NPU 服务器，同时支持 CUDA/GPU 开发和演示。
-4. 开发环境允许自动下载小模型，尽量跑通完整 visual / face / ASR / OCR 功能。
+4. 开发环境允许自动下载校验脚本支持的模型条目，优先保证 visual / semantic 可启动；face / ASR / OCR 的非 HF 资源可在首次使用时由对应库或本地缓存准备。
 5. staging / prod 不在运行时临时下载模型，必须提前准备并校验模型。
 6. 每次部署都能回答：
    - 运行的是哪个 git commit。
@@ -39,8 +39,8 @@ MomentSeek 当前已经具备 visual / face / ASR / OCR 四条检索通道，但
 
 | Profile | 用途 | 默认硬件 | 模型策略 | 说明 |
 |---|---|---|---|---|
-| `dev.cpu` | 无 GPU 的本地开发和基础调试 | CPU | 可自动下载小模型 | 功能尽量完整，速度较慢 |
-| `dev.cuda` | GPU 开发和演示 | NVIDIA CUDA | 可自动下载开发模型 | 开发者主要真实检索入口 |
+| `dev.cpu` | 无 GPU 的本地开发和基础调试 | CPU | 可自动下载 HF 开发模型，非 HF 资源运行时准备 | 功能尽量完整，速度较慢 |
+| `dev.cuda` | GPU 开发和演示 | NVIDIA CUDA | 可自动下载 HF 开发模型，非 HF 资源运行时准备 | 开发者主要真实检索入口 |
 | `staging.ascend` | 上线前验证 | Ascend NPU | 必须预缓存和校验 | 接近生产，先部署这里 |
 | `prod.ascend` | 稳定演示/生产 | Ascend NPU | 必须预缓存和校验 | 严格禁止运行时下载 |
 
@@ -113,7 +113,7 @@ scripts/start_frontend.sh
 1. 检查 Python、Node、ffmpeg 和可选 GPU runtime。
 2. 创建 `runtime/` 和 `models/`。
 3. 安装 backend 和 frontend 依赖。
-4. 按 profile 准备模型；开发 profile 可自动下载。
+4. 按 profile 准备模型；开发 profile 可自动下载校验脚本支持的 HF 条目，非 HF 条目不阻塞 bootstrap。
 5. 写入 `models/models.lock.json`。
 6. 运行基础验证命令。
 7. 输出下一步启动命令。
@@ -130,7 +130,7 @@ deploy/models/ascend-prod.models.json
 scripts/verify_models.py
 ```
 
-`dev-full.models.json` 面向开发者，允许自动下载，目标是完整功能可用：
+`dev-full.models.json` 面向开发者，允许自动下载校验脚本支持的 HF 条目；Face/Whisper/RapidOCR 等非 HF 资源在 bootstrap 阶段可选，首次使用对应通道时再由库或缓存准备：
 
 ```text
 visual: 开发默认 ChineseCLIP ViT-B/16，Ascend 可选 SigLIP2

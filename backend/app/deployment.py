@@ -14,7 +14,7 @@ def load_release_manifest(path: str | Path | None) -> dict[str, Any]:
     if not manifest_path.exists():
         return {}
     try:
-        with manifest_path.open("r", encoding="utf-8") as handle:
+        with manifest_path.open("r", encoding="utf-8-sig") as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError):
         return {}

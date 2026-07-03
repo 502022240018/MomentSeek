@@ -10,33 +10,34 @@ from app.indexing.common import atomic_save_npz
 
 def _hf_cached_snapshot_path(model_dir: str | Path, model_name: str) -> Path | None:
     root = Path(model_dir)
-    repo_dir = root / f"models--{model_name.replace('/', '--')}"
-    snapshots = repo_dir / "snapshots"
-    if not repo_dir.exists() or not snapshots.exists():
-        return None
-    ref = repo_dir / "refs" / "main"
-    if ref.exists():
-        snapshot = snapshots / ref.read_text(encoding="utf-8").strip()
-        if snapshot.exists():
-            return snapshot
-    complete_snapshots = []
-    for snapshot in snapshots.iterdir():
-        if not snapshot.is_dir():
+    repo_name = f"models--{model_name.replace('/', '--')}"
+    for repo_dir in (root / "hub" / repo_name, root / repo_name):
+        snapshots = repo_dir / "snapshots"
+        if not repo_dir.exists() or not snapshots.exists():
             continue
-        has_config = (snapshot / "config.json").exists() or (snapshot / "modules.json").exists()
-        has_weights = (
-            (snapshot / "model.safetensors").exists()
-            or (snapshot / "pytorch_model.bin").exists()
-            or any(snapshot.glob("**/model.safetensors"))
-            or any(snapshot.glob("**/pytorch_model.bin"))
-        )
-        if has_config and has_weights:
-            complete_snapshots.append(snapshot)
-    if complete_snapshots:
-        return sorted(complete_snapshots, key=lambda path: path.name)[0]
-    for snapshot in sorted(snapshots.iterdir(), key=lambda path: path.name):
-        if snapshot.is_dir():
-            return snapshot
+        ref = repo_dir / "refs" / "main"
+        if ref.exists():
+            snapshot = snapshots / ref.read_text(encoding="utf-8").strip()
+            if snapshot.exists():
+                return snapshot
+        complete_snapshots = []
+        for snapshot in snapshots.iterdir():
+            if not snapshot.is_dir():
+                continue
+            has_config = (snapshot / "config.json").exists() or (snapshot / "modules.json").exists()
+            has_weights = (
+                (snapshot / "model.safetensors").exists()
+                or (snapshot / "pytorch_model.bin").exists()
+                or any(snapshot.glob("**/model.safetensors"))
+                or any(snapshot.glob("**/pytorch_model.bin"))
+            )
+            if has_config and has_weights:
+                complete_snapshots.append(snapshot)
+        if complete_snapshots:
+            return sorted(complete_snapshots, key=lambda path: path.name)[0]
+        for snapshot in sorted(snapshots.iterdir(), key=lambda path: path.name):
+            if snapshot.is_dir():
+                return snapshot
     return None
 
 

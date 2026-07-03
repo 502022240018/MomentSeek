@@ -402,6 +402,7 @@ Create `deploy/env/staging.ascend.example`:
 
 ```dotenv
 ENV_PROFILE=staging.ascend
+RELEASE_MANIFEST_PATH=/app/release.json
 APP_PORT=18300
 APP_DATA_DIR=/app/runtime
 APP_MODEL_DIR=/app/models
@@ -469,14 +470,14 @@ Create `deploy/models/dev-full.models.json`:
       "kind": "insightface",
       "id": "buffalo_l",
       "target": "models/insightface",
-      "required": true
+      "required": false
     },
     {
       "name": "whisper_base",
       "kind": "whisper",
       "id": "base",
       "target": "models/whisper",
-      "required": true
+      "required": false
     },
     {
       "name": "text_semantic_minilm",
@@ -490,7 +491,7 @@ Create `deploy/models/dev-full.models.json`:
       "kind": "rapidocr",
       "id": "PP-OCRv4",
       "target": "models/rapidocr",
-      "required": true
+      "required": false
     }
   ]
 }

@@ -22,7 +22,7 @@ deploy/env/dev.cpu.example
 deploy/env/dev.cuda.example
 ```
 
-`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。开发 profile 的 visual runtime 默认是 `VISUAL_MODEL=chinese-clip-vit-b16`，manifest 对应 Hugging Face 模型 `OFA-Sys/chinese-clip-vit-base-patch16`。开发 profile 允许显式下载可由校验脚本处理的模型条目；staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载。
+`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。开发 profile 的 visual runtime 默认是 `VISUAL_MODEL=chinese-clip-vit-b16`，manifest 对应 Hugging Face 模型 `OFA-Sys/chinese-clip-vit-base-patch16`。开发 profile 的必需校验项是 Hugging Face visual / semantic 模型；Face、Whisper、RapidOCR 在 bootstrap 阶段不阻塞，首次使用对应通道时仍要由库或本地缓存准备。staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载。
 
 ## Windows 快速启动
 
@@ -112,7 +112,7 @@ cp deploy/env/dev.cpu.example .env
 
 ## 模型下载策略
 
-开发 profile 的目标是降低新开发者启动成本，但当前 `scripts/verify_models.py --download` 只会下载 Hugging Face 模型条目。InsightFace、Whisper 和 RapidOCR 相关条目仍需要对应库在运行时可安装、可初始化或已有缓存；全新 clone 在这些依赖或缓存未准备好时仍可能校验失败。下载入口是 bootstrap 脚本和 `scripts/verify_models.py --download`，模型清单来自 `MODEL_MANIFEST`：
+开发 profile 的目标是降低新开发者启动成本，但当前 `scripts/verify_models.py --download` 只会下载 Hugging Face 模型条目。`dev-full.models.json` 因此只把 Hugging Face visual / semantic 条目标为必需；InsightFace、Whisper 和 RapidOCR 在 bootstrap 阶段是可选校验项，缺失时不会阻塞 bootstrap。首次使用 face / ASR / OCR 通道时，对应库仍可能需要初始化、下载自己的资源或读取已有缓存。下载入口是 bootstrap 脚本和 `scripts/verify_models.py --download`，模型清单来自 `MODEL_MANIFEST`：
 
 ```text
 dev.cpu / dev.cuda -> deploy/models/dev-full.models.json
@@ -124,7 +124,7 @@ dev.cpu / dev.cuda -> deploy/models/dev-full.models.json
 models/
 ```
 
-本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。Whisper 条目必须在目标目录中存在与 `ASR_MODEL` 同名的 `.pt` 文件，例如 `models/whisper/base.pt`。其他模型条目应先按对应库的要求准备安装和缓存。
+本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。若需要离线验证 ASR，Whisper 条目必须在目标目录中存在与 `ASR_MODEL` 同名的 `.pt` 文件，例如 `models/whisper/base.pt`。其他模型条目按对应库的要求准备安装和缓存。
 
 ## 启动后端
 
@@ -204,7 +204,7 @@ Linux/macOS：
 
 `.env` 已存在：不要直接覆盖。先比较 example 和当前 `.env`，尤其是端口、模型目录、runtime 目录和设备开关。
 
-模型下载慢或失败：先确认当前 profile 是 `dev.cpu` 或 `dev.cuda`，并确认显式传入了 `-DownloadModels` 或 `--download`。当前自动下载只覆盖 Hugging Face 条目；InsightFace、Whisper 和 RapidOCR 相关缓存仍需按库要求准备。线上 profile 不应打开运行时下载。
+模型下载慢或失败：先确认当前 profile 是 `dev.cpu` 或 `dev.cuda`，并确认显式传入了 `-DownloadModels` 或 `--download`。当前自动下载只覆盖 Hugging Face 条目；InsightFace、Whisper 和 RapidOCR 相关缓存不阻塞 bootstrap，但首次使用对应通道前仍需按库要求准备。线上 profile 不应打开运行时下载。
 
 端口被占用：优先调整 `.env` 中的 `APP_PORT` 或前端开发端口。不要为了本地开发执行 broad kill。
 

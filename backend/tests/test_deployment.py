@@ -58,6 +58,23 @@ def test_load_release_manifest_reads_json(tmp_path):
     assert data["env_profile"] == "staging.ascend"
 
 
+def test_load_release_manifest_accepts_utf8_bom(tmp_path):
+    manifest = tmp_path / "release.json"
+    manifest.write_text(
+        "\ufeff" + json.dumps({
+            "release_id": "2026-07-03-bom",
+            "git_commit": "bom123",
+            "env_profile": "staging.ascend",
+        }),
+        encoding="utf-8",
+    )
+
+    data = load_release_manifest(manifest)
+
+    assert data["release_id"] == "2026-07-03-bom"
+    assert data["git_commit"] == "bom123"
+
+
 def test_build_deployment_info_uses_release_manifest_fallbacks(tmp_path, monkeypatch):
     _clear_deployment_env(monkeypatch)
     manifest = tmp_path / "release.json"

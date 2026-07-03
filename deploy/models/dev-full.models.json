@@ -15,14 +15,14 @@
       "kind": "insightface",
       "id": "buffalo_l",
       "target": "models/insightface",
-      "required": true
+      "required": false
     },
     {
       "name": "whisper_base",
       "kind": "whisper",
       "id": "base",
       "target": "models/whisper",
-      "required": true
+      "required": false
     },
     {
       "name": "text_semantic_minilm",
@@ -36,7 +36,7 @@
       "kind": "rapidocr",
       "id": "PP-OCRv4",
       "target": "models/rapidocr",
-      "required": true
+      "required": false
     }
   ]
 }
