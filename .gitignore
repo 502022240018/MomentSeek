@@ -8,7 +8,7 @@ frontend/node_modules/
 frontend/dist/
 backend/app/static/
 runtime/
-models/
+/models/
 vendor-wheels/
 eval/visual/**/*.local.json
 eval/visual/**/*.local.jsonl
