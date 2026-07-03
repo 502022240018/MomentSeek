@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-REQUIRED_ENTRY_FIELDS = ("name", "kind", "id", "target")
+REQUIRED_ENTRY_FIELDS = ("name", "kind", "id", "target", "required")
 HF_CONFIG_FILES = {
     "config.json",
     "open_clip_config.json",
@@ -24,7 +24,7 @@ HF_WEIGHT_FILES = {
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8-sig") as handle:
         data = json.load(handle)
     if not isinstance(data, dict):
         raise ValueError(f"manifest must be a JSON object: {path}")
@@ -135,7 +135,7 @@ def verify_entry(entry: dict[str, Any], allow_download: bool) -> dict[str, Any]:
     kind = str(entry["kind"])
     model_id = str(entry["id"])
     target = Path(str(entry["target"]))
-    required = bool(entry.get("required", True))
+    required = bool(entry["required"])
     verified = False
     local_path = target
 
