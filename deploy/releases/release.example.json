@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "release_id": "2026-07-03-local-example",
+  "git_commit": "0000000000000000000000000000000000000000",
+  "branch": "main",
+  "image": {
+    "ascend": "momentseek-mvp:ascend-20260703-example",
+    "cuda": "momentseek-mvp:cuda-20260703-example"
+  },
+  "frontend": {
+    "build_command": "npm run build",
+    "dist_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "mounted_to": "backend/app/static"
+  },
+  "models": {
+    "manifest": "deploy/models/ascend-prod.models.json",
+    "mount": "/app/models",
+    "lock": "models/models.lock.json"
+  },
+  "runtime": {
+    "mount": "/app/runtime",
+    "migration": "none"
+  },
+  "env_profile": "staging.ascend",
+  "verification": {
+    "backend_tests": "required",
+    "frontend_build": "required",
+    "health": "required",
+    "smoke_search": "required",
+    "resource_check": "required"
+  }
+}

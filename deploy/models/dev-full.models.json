@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "name": "dev-full",
+  "allow_download": true,
+  "models": [
+    {
+      "name": "visual_openclip_b32",
+      "kind": "huggingface",
+      "id": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K",
+      "target": "models/hf-cache",
+      "required": true
+    },
+    {
+      "name": "face_buffalo_l",
+      "kind": "insightface",
+      "id": "buffalo_l",
+      "target": "models/insightface",
+      "required": true
+    },
+    {
+      "name": "whisper_base",
+      "kind": "whisper",
+      "id": "base",
+      "target": "models/whisper",
+      "required": true
+    },
+    {
+      "name": "text_semantic_minilm",
+      "kind": "huggingface",
+      "id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+      "target": "models/text-embeddings",
+      "required": true
+    },
+    {
+      "name": "rapidocr_ppocrv4",
+      "kind": "rapidocr",
+      "id": "PP-OCRv4",
+      "target": "models/rapidocr",
+      "required": true
+    }
+  ]
+}

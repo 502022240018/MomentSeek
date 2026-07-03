@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "name": "ascend-prod",
+  "allow_download": false,
+  "models": [
+    {
+      "name": "visual_siglip2_so400m_384",
+      "kind": "huggingface",
+      "id": "google/siglip2-so400m-patch14-384",
+      "target": "/app/models/hf-cache",
+      "required": true
+    },
+    {
+      "name": "face_buffalo_l",
+      "kind": "directory",
+      "id": "buffalo_l",
+      "target": "/app/models/insightface/models/buffalo_l",
+      "required": true
+    },
+    {
+      "name": "whisper_small",
+      "kind": "directory",
+      "id": "small",
+      "target": "/app/models/whisper",
+      "required": true
+    },
+    {
+      "name": "text_semantic_minilm",
+      "kind": "huggingface",
+      "id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+      "target": "/app/models/text-embeddings",
+      "required": true
+    },
+    {
+      "name": "rapidocr_ppocrv4",
+      "kind": "directory",
+      "id": "PP-OCRv4",
+      "target": "/app/models/rapidocr",
+      "required": true
+    }
+  ]
+}
