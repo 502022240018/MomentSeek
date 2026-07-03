@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.db import Catalog
+from app.deployment import build_deployment_info
 from app.media import export_preview_clip, probe_video
 from app.schemas import HealthResponse, IndexRequest, VideoRenameRequest
 from app.search import SearchEngine
@@ -125,6 +126,8 @@ def health() -> dict:
     return {
         "status": "ok",
         "version": __version__,
+        "app_version": __version__,
+        **build_deployment_info(settings),
         "npu_enabled": settings.npu_enabled,
         "npu_device_id": settings.npu_device_id if settings.npu_enabled else None,
         "cuda_enabled": settings.cuda_enabled,

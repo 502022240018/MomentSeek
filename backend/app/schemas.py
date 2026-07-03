@@ -99,6 +99,12 @@ class VideoRenameRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
+    app_version: str | None = None
+    env_profile: str | None = None
+    release_id: str | None = None
+    git_commit: str | None = None
+    image_tag: str | None = None
+    model_manifest: str | None = None
     npu_enabled: bool
     npu_device_id: int | None
     cuda_enabled: bool = False
