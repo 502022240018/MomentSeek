@@ -110,7 +110,7 @@ def hf_snapshot_exists(target: Path, model_id: str) -> bool:
     return False
 
 
-def verify_non_hf_target(kind: str, target: Path) -> bool:
+def verify_non_hf_target(kind: str, target: Path, model_id: str) -> bool:
     if kind == "directory":
         return has_non_empty_file_with_suffix(
             target, {".onnx", ".pt", ".bin", ".safetensors"}
@@ -118,7 +118,7 @@ def verify_non_hf_target(kind: str, target: Path) -> bool:
     if kind == "insightface":
         return has_non_empty_file_with_suffix(target, {".onnx"})
     if kind == "whisper":
-        return has_non_empty_file_with_suffix(target, {".pt", ".bin", ".safetensors"})
+        return is_non_empty_file(target / f"{model_id}.pt")
     if kind == "rapidocr":
         return has_non_empty_file_with_suffix(target, {".onnx", ".bin"})
     raise ValueError(f"unsupported model kind: {kind}")
@@ -145,7 +145,7 @@ def verify_entry(entry: dict[str, Any], allow_download: bool) -> dict[str, Any]:
             local_path = download_hf_model(target, model_id)
             verified = hf_snapshot_has_assets(local_path)
     elif kind in {"directory", "insightface", "whisper", "rapidocr"}:
-        verified = verify_non_hf_target(kind, target)
+        verified = verify_non_hf_target(kind, target, model_id)
     else:
         raise ValueError(f"unsupported model kind for {name}: {kind}")
 

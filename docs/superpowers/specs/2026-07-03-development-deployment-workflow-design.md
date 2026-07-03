@@ -133,7 +133,7 @@ scripts/verify_models.py
 `dev-full.models.json` 面向开发者，允许自动下载，目标是完整功能可用：
 
 ```text
-visual: 小型 OpenCLIP 或可选 SigLIP2
+visual: 开发默认 ChineseCLIP ViT-B/16，Ascend 可选 SigLIP2
 face: InsightFace buffalo_l
 asr: Whisper base 或 small
 ocr: RapidOCR PP-OCRv4 mobile
@@ -165,9 +165,9 @@ lock 文件记录：
   "models": [
     {
       "name": "visual",
-      "id": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K",
+      "id": "OFA-Sys/chinese-clip-vit-base-patch16",
       "source": "huggingface",
-      "local_path": "models/openclip-vit-b32",
+      "local_path": "models/hf-cache",
       "revision": "snapshot-or-version",
       "size_bytes": 0,
       "verified": true

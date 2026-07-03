@@ -19,7 +19,7 @@
     },
     {
       "name": "whisper_small",
-      "kind": "directory",
+      "kind": "whisper",
       "id": "small",
       "target": "/app/models/whisper",
       "required": true

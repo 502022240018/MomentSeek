@@ -22,7 +22,7 @@ deploy/env/dev.cpu.example
 deploy/env/dev.cuda.example
 ```
 
-`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。开发 profile 允许显式下载可由校验脚本处理的模型条目；staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载。
+`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。开发 profile 的 visual runtime 默认是 `VISUAL_MODEL=chinese-clip-vit-b16`，manifest 对应 Hugging Face 模型 `OFA-Sys/chinese-clip-vit-base-patch16`。开发 profile 允许显式下载可由校验脚本处理的模型条目；staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载。
 
 ## Windows 快速启动
 
@@ -124,7 +124,7 @@ dev.cpu / dev.cuda -> deploy/models/dev-full.models.json
 models/
 ```
 
-本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。其他模型条目应先按对应库的要求准备安装和缓存。
+本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。Whisper 条目必须在目标目录中存在与 `ASR_MODEL` 同名的 `.pt` 文件，例如 `models/whisper/base.pt`。其他模型条目应先按对应库的要求准备安装和缓存。
 
 ## 启动后端
 

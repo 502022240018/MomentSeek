@@ -332,7 +332,7 @@ MODEL_IDLE_POLICY=process_exit
 INDEXER_MODE=subprocess
 CLIP_MODEL=ViT-B-32
 CLIP_PRETRAINED=openai
-VISUAL_MODEL=openclip-vit-b32
+VISUAL_MODEL=chinese-clip-vit-b16
 VISUAL_HF_CACHE_DIR=models/hf-cache
 VISUAL_SAMPLE_FPS=1.0
 VISUAL_SEGMENT_SECONDS=5.0
@@ -372,7 +372,7 @@ MODEL_IDLE_POLICY=process_exit
 INDEXER_MODE=subprocess
 CLIP_MODEL=ViT-B-32
 CLIP_PRETRAINED=openai
-VISUAL_MODEL=openclip-vit-b32
+VISUAL_MODEL=chinese-clip-vit-b16
 VISUAL_HF_CACHE_DIR=models/hf-cache
 VISUAL_SAMPLE_FPS=2.0
 VISUAL_SEGMENT_SECONDS=5.0
@@ -458,9 +458,9 @@ Create `deploy/models/dev-full.models.json`:
   "allow_download": true,
   "models": [
     {
-      "name": "visual_openclip_b32",
+      "name": "visual_chinese_clip_vit_b16",
       "kind": "huggingface",
-      "id": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K",
+      "id": "OFA-Sys/chinese-clip-vit-base-patch16",
       "target": "models/hf-cache",
       "required": true
     },
@@ -522,7 +522,7 @@ Create `deploy/models/ascend-prod.models.json`:
     },
     {
       "name": "whisper_small",
-      "kind": "directory",
+      "kind": "whisper",
       "id": "small",
       "target": "/app/models/whisper",
       "required": true

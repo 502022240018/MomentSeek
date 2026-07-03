@@ -4,9 +4,9 @@
   "allow_download": true,
   "models": [
     {
-      "name": "visual_openclip_b32",
+      "name": "visual_chinese_clip_vit_b16",
       "kind": "huggingface",
-      "id": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K",
+      "id": "OFA-Sys/chinese-clip-vit-base-patch16",
       "target": "models/hf-cache",
       "required": true
     },
