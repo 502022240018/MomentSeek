@@ -18,7 +18,7 @@ def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
         env_profile="staging.ascend",
         release_manifest_path=tmp_path / "release.json",
         npu_enabled=True,
-        npu_device_id=2,
+        npu_device_id=0,
         ascend_visible_devices="2",
         ascend_rt_visible_devices="2",
         visual_model="siglip2-so400m-384",
@@ -44,7 +44,7 @@ def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
     assert environment["ENV_PROFILE"] == "staging.ascend"
     assert environment["RELEASE_MANIFEST_PATH"] == str((tmp_path / "release.json").resolve())
     assert environment["NPU_ENABLED"] == "true"
-    assert environment["NPU_DEVICE_ID"] == "2"
+    assert environment["NPU_DEVICE_ID"] == "0"
     assert environment["ASCEND_VISIBLE_DEVICES"] == "2"
     assert environment["ASCEND_RT_VISIBLE_DEVICES"] == "2"
     assert environment["VISUAL_MODEL"] == "siglip2-so400m-384"
@@ -72,7 +72,7 @@ def test_health_endpoint_serializes_release_manifest_metadata(monkeypatch, tmp_p
         env_profile="staging.ascend",
         release_manifest_path=manifest,
         npu_enabled=True,
-        npu_device_id=2,
+        npu_device_id=0,
     )
     monkeypatch.setattr(main, "settings", settings)
 
@@ -88,4 +88,4 @@ def test_health_endpoint_serializes_release_manifest_metadata(monkeypatch, tmp_p
     assert body["image_tag"] == "momentseek-mvp:ascend-abc123"
     assert body["model_manifest"] == "deploy/models/ascend-prod.models.json"
     assert body["npu_enabled"] is True
-    assert body["npu_device_id"] == 2
+    assert body["npu_device_id"] == 0

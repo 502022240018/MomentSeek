@@ -9,7 +9,7 @@ services:
     environment:
       NPU_ENABLED: "true"
     devices:
-      - "/dev/davinci${HOST_NPU_DEVICE_ID:-7}:/dev/davinci${HOST_NPU_DEVICE_ID:-7}"
+      - "/dev/davinci${HOST_NPU_DEVICE_ID:?set HOST_NPU_DEVICE_ID to an approved host NPU id}:/dev/davinci${HOST_NPU_DEVICE_ID:?set HOST_NPU_DEVICE_ID to an approved host NPU id}"
       - "/dev/davinci_manager:/dev/davinci_manager"
       - "/dev/devmm_svm:/dev/devmm_svm"
       - "/dev/hisi_hdc:/dev/hisi_hdc"

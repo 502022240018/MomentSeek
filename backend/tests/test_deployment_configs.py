@@ -26,6 +26,8 @@ def test_ascend_compose_separates_host_card_from_container_npu_id():
 
     assert "HOST_NPU_DEVICE_ID" in compose
     assert "${NPU_DEVICE_ID" not in compose
+    assert "HOST_NPU_DEVICE_ID:-" not in compose
+    assert "HOST_NPU_DEVICE_ID:?" in compose
     assert "ASCEND_RT_VISIBLE_DEVICES:" not in compose
     assert staging["HOST_NPU_DEVICE_ID"] == staging["ASCEND_VISIBLE_DEVICES"]
     assert staging["HOST_NPU_DEVICE_ID"] == staging["ASCEND_RT_VISIBLE_DEVICES"]
@@ -59,3 +61,30 @@ def test_docker_cpu_docs_use_dev_cpu_port():
 def test_bootstrap_writes_dev_lock_to_runtime():
     assert "--lock runtime/dev-models.lock.json" in _read("scripts/bootstrap_dev.sh")
     assert '"runtime/dev-models.lock.json"' in _read("scripts/bootstrap_dev.ps1")
+
+
+def test_root_env_example_is_safe_dev_cpu_profile():
+    root_env = _parse_env(".env.example")
+    dev_cpu = _parse_env("deploy/env/dev.cpu.example")
+
+    assert root_env["ENV_PROFILE"] == "dev.cpu"
+    assert root_env["APP_PORT"] == dev_cpu["APP_PORT"]
+    assert root_env["APP_PUBLIC_URL"] == dev_cpu["APP_PUBLIC_URL"]
+    assert root_env["APP_DATA_DIR"] == "runtime"
+    assert root_env["APP_MODEL_DIR"] == "models"
+    assert root_env["NPU_ENABLED"] == "false"
+    assert "NPU_DEVICE_ID" not in root_env
+    assert "HOST_NPU_DEVICE_ID" not in root_env
+
+
+def test_resource_scripts_use_host_npu_device_id_not_container_npu_id():
+    check_resource = _read("scripts/check_resource.sh")
+    verify_release = _read("scripts/verify_model_release.sh")
+
+    assert "load_env_file" in check_resource
+    assert "${APP_PORT:-8000}" in check_resource
+    assert "load_env_file" in verify_release
+    assert "HOST_NPU_DEVICE_ID" in verify_release
+    assert "${NPU_DEVICE_ID" not in verify_release
+    assert "HOST_NPU_DEVICE_ID:-" not in verify_release
+    assert "ASCEND_VISIBLE_DEVICES:-" not in verify_release

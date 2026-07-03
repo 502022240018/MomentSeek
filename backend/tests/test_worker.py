@@ -20,7 +20,7 @@ def test_worker_environment_propagates_indexing_profile_settings(tmp_path):
         env_profile="staging.ascend",
         release_manifest_path=tmp_path / "release.json",
         npu_enabled=True,
-        npu_device_id=2,
+        npu_device_id=0,
         cuda_enabled=False,
         ascend_visible_devices="2",
         ascend_rt_visible_devices="2",
@@ -39,7 +39,7 @@ def test_worker_environment_propagates_indexing_profile_settings(tmp_path):
     assert environment["ENV_PROFILE"] == "staging.ascend"
     assert environment["RELEASE_MANIFEST_PATH"] == str((tmp_path / "release.json").resolve())
     assert environment["NPU_ENABLED"] == "true"
-    assert environment["NPU_DEVICE_ID"] == "2"
+    assert environment["NPU_DEVICE_ID"] == "0"
     assert environment["ASCEND_VISIBLE_DEVICES"] == "2"
     assert environment["ASCEND_RT_VISIBLE_DEVICES"] == "2"
     assert environment["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
