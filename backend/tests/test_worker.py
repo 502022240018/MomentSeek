@@ -1,5 +1,5 @@
 from app.settings import Settings
-from app.worker import worker_environment
+from app.worker import subprocess_environment, worker_environment
 
 
 def test_worker_environment_uses_absolute_runtime_paths(tmp_path):
@@ -12,6 +12,33 @@ def test_worker_environment_uses_absolute_runtime_paths(tmp_path):
     assert environment["PYTHONIOENCODING"] == "utf-8"
     assert environment["NPU_ENABLED"] == "false"
     assert "NPU_DEVICE_ID" not in environment
+
+
+def test_subprocess_environment_strips_inherited_npu_vars_when_disabled(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        npu_enabled=False,
+    )
+    base_environment = {
+        "KEEP_ME": "yes",
+        "NPU_DEVICE_ID": "7",
+        "ASCEND_VISIBLE_DEVICES": "7",
+        "ASCEND_RT_VISIBLE_DEVICES": "7",
+        "ASCEND_DEVICE_ID": "7",
+        "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+    }
+
+    environment = subprocess_environment(settings, base_environment)
+
+    assert environment["KEEP_ME"] == "yes"
+    assert environment["NPU_ENABLED"] == "false"
+    assert "NPU_DEVICE_ID" not in environment
+    assert "ASCEND_VISIBLE_DEVICES" not in environment
+    assert "ASCEND_RT_VISIBLE_DEVICES" not in environment
+    assert "ASCEND_DEVICE_ID" not in environment
+    assert "TORCH_DEVICE_BACKEND_AUTOLOAD" not in environment
 
 
 def test_worker_environment_propagates_indexing_profile_settings(tmp_path):

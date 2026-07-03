@@ -23,7 +23,7 @@ from app.media import export_preview_clip, probe_video
 from app.schemas import HealthResponse, IndexRequest, VideoRenameRequest
 from app.search import SearchEngine
 from app.settings import get_settings
-from app.worker import launch_job, worker_environment
+from app.worker import launch_job, subprocess_environment
 
 
 settings = get_settings()
@@ -47,7 +47,7 @@ def _spawn_indexer_daemon():
     return subprocess.Popen(
         [sys.executable, "-m", "app.indexer_daemon"],
         cwd=str(backend_dir),
-        env={**os.environ.copy(), **worker_environment(settings)},
+        env=subprocess_environment(settings),
         start_new_session=True,
         stdout=log_path.open("a", encoding="utf-8"),
         stderr=subprocess.STDOUT,

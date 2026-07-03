@@ -51,6 +51,39 @@ def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
     assert environment["VISUAL_HF_CACHE_DIR"] == str((tmp_path / "models" / "hf-cache").resolve())
 
 
+def test_spawn_indexer_daemon_strips_inherited_npu_environment_when_disabled(monkeypatch, tmp_path):
+    import app.main as main
+
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        indexer_mode="daemon",
+        npu_enabled=False,
+    )
+    monkeypatch.setattr(main, "settings", settings)
+    monkeypatch.setenv("NPU_DEVICE_ID", "7")
+    monkeypatch.setenv("ASCEND_VISIBLE_DEVICES", "7")
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "7")
+    captured = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured.update(kwargs)
+        kwargs["stdout"].close()
+        return object()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    main._spawn_indexer_daemon()
+
+    environment = captured["env"]
+    assert environment["NPU_ENABLED"] == "false"
+    assert "NPU_DEVICE_ID" not in environment
+    assert "ASCEND_VISIBLE_DEVICES" not in environment
+    assert "ASCEND_RT_VISIBLE_DEVICES" not in environment
+
+
 def test_health_endpoint_serializes_release_manifest_metadata(monkeypatch, tmp_path):
     import app.main as main
 

@@ -15,6 +15,15 @@ from app.settings import Settings
 from app.settings import get_settings
 
 
+NPU_ENV_KEYS = {
+    "NPU_DEVICE_ID",
+    "ASCEND_DEVICE_ID",
+    "ASCEND_VISIBLE_DEVICES",
+    "ASCEND_RT_VISIBLE_DEVICES",
+    "TORCH_DEVICE_BACKEND_AUTOLOAD",
+}
+
+
 @contextmanager
 def exclusive_worker_lock(path: Path, poll_seconds: float = 1.0):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,10 +94,7 @@ def execute_job(job_id: str) -> None:
                     stage=stage,
                     progress=round(index / max(1, len(stages)), 3),
                 )
-                environment = os.environ.copy()
-                environment.update(worker_environment(settings))
-                if settings.npu_enabled and "ASCEND_RT_VISIBLE_DEVICES" not in environment:
-                    environment["ASCEND_RT_VISIBLE_DEVICES"] = str(settings.npu_device_id)
+                environment = subprocess_environment(settings)
                 process = subprocess.run(
                     [sys.executable, "-m", "app.stage_runner", stage, job_id],
                     cwd=str(Path(__file__).resolve().parents[1]),
@@ -137,7 +143,7 @@ def launch_job(job_id: str) -> int:
     process = subprocess.Popen(
         [sys.executable, "-m", "app.worker", job_id],
         cwd=str(backend_dir),
-        env={**os.environ.copy(), **worker_environment(settings)},
+        env=subprocess_environment(settings),
         start_new_session=True,
         stdout=log_path.open("a", encoding="utf-8"),
         stderr=subprocess.STDOUT,
@@ -155,7 +161,7 @@ def worker_environment(settings: Settings) -> dict[str, str]:
         value = getattr(settings, name)
         if value is None:
             continue
-        if name == "npu_device_id" and not settings.npu_enabled:
+        if not settings.npu_enabled and name.upper() in NPU_ENV_KEYS:
             continue
         env_name = name.upper()
         if isinstance(value, bool):
@@ -167,6 +173,17 @@ def worker_environment(settings: Settings) -> dict[str, str]:
                 environment[env_name] = str(settings.resolve_path(value))
         else:
             environment[env_name] = str(value)
+    return environment
+
+
+def subprocess_environment(settings: Settings, base_environment: dict[str, str] | None = None) -> dict[str, str]:
+    environment = dict(os.environ if base_environment is None else base_environment)
+    if not settings.npu_enabled:
+        for key in NPU_ENV_KEYS:
+            environment.pop(key, None)
+    environment.update(worker_environment(settings))
+    if settings.npu_enabled and "ASCEND_RT_VISIBLE_DEVICES" not in environment:
+        environment["ASCEND_RT_VISIBLE_DEVICES"] = str(settings.npu_device_id)
     return environment
 
 
