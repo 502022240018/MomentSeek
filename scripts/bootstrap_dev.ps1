@@ -57,7 +57,7 @@ $VerifyArgs = @(
     "--manifest",
     $ManifestPath,
     "--lock",
-    "models/models.lock.json"
+    "runtime/dev-models.lock.json"
 )
 
 if ($DownloadModels) {

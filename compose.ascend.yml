@@ -8,13 +8,10 @@ services:
     image: momentseek-mvp:ascend
     environment:
       NPU_ENABLED: "true"
-      NPU_DEVICE_ID: "${NPU_DEVICE_ID:-7}"
-      ASCEND_RT_VISIBLE_DEVICES: "${NPU_DEVICE_ID:-7}"
     devices:
-      - "/dev/davinci${NPU_DEVICE_ID:-7}:/dev/davinci${NPU_DEVICE_ID:-7}"
+      - "/dev/davinci${HOST_NPU_DEVICE_ID:-7}:/dev/davinci${HOST_NPU_DEVICE_ID:-7}"
       - "/dev/davinci_manager:/dev/davinci_manager"
       - "/dev/devmm_svm:/dev/devmm_svm"
       - "/dev/hisi_hdc:/dev/hisi_hdc"
     volumes:
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
-

@@ -16,8 +16,8 @@ services:
       APP_MODEL_DIR: /app/models
       NPU_ENABLED: "false"
     volumes:
-      - ./runtime:/app/runtime
-      - ./models:/app/models
+      - "${HOST_RUNTIME_DIR:-./runtime}:/app/runtime"
+      - "${HOST_MODEL_DIR:-./models}:/app/models"
     cpus: 24
     mem_limit: 48g
     pids_limit: 4096

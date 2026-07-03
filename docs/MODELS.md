@@ -53,7 +53,7 @@ Ascend 标准宿主机：/opt/momentseek/models
 当前服务器宿主机：/mnt/mog2/wyl/comfyui-wxy/video-retrieval-mvp/models
 ```
 
-开发 profile 的 `APP_MODEL_DIR=models`。Ascend profile 的 `APP_MODEL_DIR=/app/models`，由容器挂载映射到宿主机模型目录。
+开发 profile 的 `APP_MODEL_DIR=models`。Ascend profile 的 `APP_MODEL_DIR=/app/models`，由 Compose 通过 `HOST_MODEL_DIR=/opt/momentseek/models` 挂载到宿主机模型目录。
 
 ## Model Manifest
 

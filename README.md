@@ -65,10 +65,12 @@ docker compose -f compose.yml -f compose.server.yml up -d --build
 
 ```bash
 ./scripts/check_resource.sh
-NPU_DEVICE_ID=7 docker compose -f compose.yml -f compose.server.yml -f compose.ascend.yml up -d --build
+cp deploy/env/staging.ascend.example .env
+# 编辑 .env：HOST_NPU_DEVICE_ID/ASCEND_VISIBLE_DEVICES/ASCEND_RT_VISIBLE_DEVICES 使用已获批的宿主物理卡号，NPU_DEVICE_ID 保持容器内逻辑 0。
+docker compose -f compose.yml -f compose.server.yml -f compose.ascend.yml up -d --build
 ```
 
-默认访问地址是 `http://SERVER_IP:8300`。除这个入口外，容器不向宿主机暴露数据库或内部端口。
+使用 `deploy/env/dev.cpu.example` 时默认访问地址是 `http://SERVER_IP:8000`；Ascend profile 当前示例端口是 `18300`。除 Web/API 入口外，容器不向宿主机暴露数据库或内部端口。
 
 更完整的 GitHub 迁移、clone 后部署、运行时数据迁移和共享服务器资源检查流程见 [DEPLOY.md](DEPLOY.md) 和 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 

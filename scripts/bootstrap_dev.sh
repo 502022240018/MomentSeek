@@ -59,7 +59,7 @@ fi
 verify_args=(
   scripts/verify_models.py
   --manifest "$manifest_path"
-  --lock models/models.lock.json
+  --lock runtime/dev-models.lock.json
 )
 
 if [[ "$download_arg" == "--download" ]]; then
