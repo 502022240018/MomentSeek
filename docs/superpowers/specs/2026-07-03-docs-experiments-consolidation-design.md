@@ -23,6 +23,7 @@ docs/
   ISSUES_AND_ROADMAP.md
   OPERATIONS.md
   VALIDATION.md
+  LESSONS_LEARNED.md
 
   experiments/
     README.md
@@ -173,6 +174,38 @@ Must include:
 - Documentation verification commands.
 - Rule: no completion claim without fresh verification output.
 
+### `docs/LESSONS_LEARNED.md`
+
+Operational lessons, tool pitfalls, and incident learnings that future sessions should inherit before touching code or servers.
+
+Must include:
+
+- PowerShell/Windows shell pitfalls observed during project work.
+- Encoding issues, especially UTF-8 handling for Chinese docs.
+- Windows path/glob differences that affect `rg`, `git`, and PowerShell commands.
+- Git workflow gotchas, such as untracked docs not appearing in `git diff`.
+- Shared-server incident lessons, including why broad process killing is forbidden and how accidental impact on other users can happen.
+- Any repeated mistake that should become a durable rule for future Codex sessions.
+
+Should not include:
+
+- Passwords, private keys, tokens, or sensitive process details.
+- Full raw logs unless they are short and already sanitized.
+- Long status updates that belong in `CURRENT.md`.
+
+Recommended entry shape:
+
+```text
+Date:
+Category: PowerShell / Git / Server / Deployment / Search / Other
+Symptom:
+Root Cause:
+Impact:
+Lesson:
+Rule Going Forward:
+Related Docs:
+```
+
 ### `docs/experiments/README.md`
 
 Index of experiment summaries.
@@ -191,7 +224,7 @@ New-session bootstrap only.
 Must include:
 
 - `README.md`: points to `docs/README.md` and explains that long-term knowledge lives in the fixed docs.
-- `SESSION_BOOTSTRAP.md`: concise prompt for new Codex windows to read `docs/README.md`, `docs/CURRENT.md`, `docs/ISSUES_AND_ROADMAP.md`, `docs/RETRIEVAL_CHANNELS.md`, `docs/OPERATIONS.md`, and `docs/VALIDATION.md`.
+- `SESSION_BOOTSTRAP.md`: concise prompt for new Codex windows to read `docs/README.md`, `docs/CURRENT.md`, `docs/ISSUES_AND_ROADMAP.md`, `docs/RETRIEVAL_CHANNELS.md`, `docs/OPERATIONS.md`, `docs/VALIDATION.md`, and `docs/LESSONS_LEARNED.md`.
 
 Should not include:
 
@@ -222,6 +255,7 @@ Archived files are not authoritative and should start with a short archive notic
 | `docs/current_retrieval_channels.md` | Rename or rewrite into `docs/RETRIEVAL_CHANNELS.md` |
 | `docs/server-operations.md` | Rewrite into `docs/OPERATIONS.md` |
 | `docs/validation.md` | Rewrite into `docs/VALIDATION.md` |
+| Existing operational pitfalls in handoff/chat context | Seed into `docs/LESSONS_LEARNED.md`, including PowerShell encoding/glob issues, untracked-file diff behavior, and shared-server process-kill incident lessons |
 | `docs/visual-clip-910b-eval.md` | Move/rewrite into `docs/experiments/visual/2026-07-01-clip-910b.md` |
 | `docs/index-benchmark-siglip2-31min.md` | Move/rewrite into `docs/experiments/visual/2026-07-03-siglip2-31min-index.md` |
 | `docs/handoff/CURRENT_STATUS.md` | Fold into `docs/CURRENT.md`; archive or replace with pointer |
@@ -267,6 +301,7 @@ Retrieval channel protocol/index format changed -> docs/RETRIEVAL_CHANNELS.md
 Problem or future optimization discovered -> docs/ISSUES_AND_ROADMAP.md
 Server/public access/deployment operation changed -> docs/OPERATIONS.md
 Validation command or acceptance rule changed -> docs/VALIDATION.md
+Repeated tool pitfall or operational lesson discovered -> docs/LESSONS_LEARNED.md
 Experiment conclusion created -> docs/experiments/<area>/<date>-<topic>.md
 Evaluation dataset/schema/run method changed -> eval/<area>/README.md or adjacent eval files
 New Codex bootstrap changed -> docs/handoff/SESSION_BOOTSTRAP.md
