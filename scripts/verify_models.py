@@ -31,6 +31,9 @@ def load_json(path: Path) -> dict[str, Any]:
 
 
 def validate_manifest(manifest: dict[str, Any], path: Path) -> list[dict[str, Any]]:
+    if "allow_download" in manifest and not isinstance(manifest["allow_download"], bool):
+        raise ValueError(f"manifest allow_download must be a boolean: {path}")
+
     models = manifest.get("models")
     if not isinstance(models, list) or not models:
         raise ValueError(f"manifest must contain a non-empty models list: {path}")
@@ -48,17 +51,30 @@ def validate_manifest(manifest: dict[str, Any], path: Path) -> list[dict[str, An
             raise ValueError(
                 f"manifest models[{index}] missing required field(s): {', '.join(missing)}"
             )
+        if "required" in item and not isinstance(item["required"], bool):
+            raise ValueError(f"manifest models[{index}] required must be a boolean")
         entries.append(item)
     return entries
 
 
-def has_any_file(target: Path) -> bool:
-    return target.is_dir() and any(path.is_file() for path in target.rglob("*"))
+def is_non_empty_file(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
 
 
-def has_file_with_suffix(target: Path, suffixes: set[str]) -> bool:
+def is_valid_json_file(path: Path) -> bool:
+    if not is_non_empty_file(path):
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return True
+
+
+def has_non_empty_file_with_suffix(target: Path, suffixes: set[str]) -> bool:
     return target.is_dir() and any(
-        path.is_file() and path.suffix.lower() in suffixes
+        is_non_empty_file(path) and path.suffix.lower() in suffixes
         for path in target.rglob("*")
     )
 
@@ -72,12 +88,12 @@ def hf_snapshot_has_assets(snapshot: Path) -> bool:
     if not snapshot.is_dir():
         return False
 
-    has_config = any((snapshot / name).is_file() for name in HF_CONFIG_FILES)
+    has_config = any(is_valid_json_file(snapshot / name) for name in HF_CONFIG_FILES)
     if not has_config:
         return False
 
     return any(
-        path.is_file()
+        is_non_empty_file(path)
         and (path.name in HF_WEIGHT_FILES or path.suffix.lower() in {".bin", ".safetensors"})
         for path in snapshot.rglob("*")
     )
@@ -95,20 +111,21 @@ def hf_snapshot_exists(target: Path, model_id: str) -> bool:
 
 def verify_non_hf_target(kind: str, target: Path) -> bool:
     if kind == "directory":
-        return has_any_file(target)
+        return has_non_empty_file_with_suffix(
+            target, {".onnx", ".pt", ".bin", ".safetensors", ".json"}
+        )
     if kind == "insightface":
-        return has_file_with_suffix(target, {".onnx"})
+        return has_non_empty_file_with_suffix(target, {".onnx"})
     if kind == "whisper":
-        return has_file_with_suffix(target, {".pt", ".bin", ".safetensors"})
+        return has_non_empty_file_with_suffix(target, {".pt", ".bin", ".safetensors"})
     if kind == "rapidocr":
-        return has_file_with_suffix(target, {".onnx", ".bin", ".txt"})
+        return has_non_empty_file_with_suffix(target, {".onnx", ".bin"})
     raise ValueError(f"unsupported model kind: {kind}")
 
 
 def download_hf_model(target: Path, model_id: str) -> Path:
     from huggingface_hub import snapshot_download
 
-    target.mkdir(parents=True, exist_ok=True)
     return Path(snapshot_download(repo_id=model_id, cache_dir=str(target)))
 
 
@@ -164,7 +181,7 @@ def main() -> int:
         manifest_path = Path(args.manifest)
         manifest = load_json(manifest_path)
         model_entries = validate_manifest(manifest, manifest_path)
-        allow_download = bool(manifest.get("allow_download", False)) and args.download
+        allow_download = manifest.get("allow_download", False) is True and args.download
         entries = [verify_entry(item, allow_download) for item in model_entries]
         write_lock(Path(args.lock), manifest, entries)
     except (FileNotFoundError, ValueError) as error:
