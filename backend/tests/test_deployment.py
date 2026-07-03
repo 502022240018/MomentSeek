@@ -4,8 +4,25 @@ from app.deployment import build_deployment_info, load_release_manifest
 from app.settings import Settings
 
 
-def test_build_deployment_info_prefers_explicit_settings(tmp_path):
+DEPLOYMENT_ENV_VARS = (
+    "ENV_PROFILE",
+    "RELEASE_ID",
+    "GIT_COMMIT",
+    "IMAGE_TAG",
+    "MODEL_MANIFEST",
+    "RELEASE_MANIFEST_PATH",
+)
+
+
+def _clear_deployment_env(monkeypatch):
+    for name in DEPLOYMENT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_build_deployment_info_prefers_explicit_settings(tmp_path, monkeypatch):
+    _clear_deployment_env(monkeypatch)
     settings = Settings(
+        _env_file=None,
         app_data_dir=tmp_path / "runtime",
         app_model_dir=tmp_path / "models",
         env_profile="dev.cuda",
@@ -41,7 +58,8 @@ def test_load_release_manifest_reads_json(tmp_path):
     assert data["env_profile"] == "staging.ascend"
 
 
-def test_build_deployment_info_uses_release_manifest_fallbacks(tmp_path):
+def test_build_deployment_info_uses_release_manifest_fallbacks(tmp_path, monkeypatch):
+    _clear_deployment_env(monkeypatch)
     manifest = tmp_path / "release.json"
     manifest.write_text(json.dumps({
         "release_id": "2026-07-03-prod123",
@@ -53,7 +71,7 @@ def test_build_deployment_info_uses_release_manifest_fallbacks(tmp_path):
             "cuda": "momentseek:cuda-prod123",
         },
     }), encoding="utf-8")
-    settings = Settings(release_manifest_path=manifest)
+    settings = Settings(_env_file=None, release_manifest_path=manifest)
 
     info = build_deployment_info(settings)
 
@@ -74,7 +92,8 @@ def test_load_release_manifest_ignores_malformed_or_non_object_json(tmp_path):
     assert load_release_manifest(non_object) == {}
 
 
-def test_build_deployment_info_sanitizes_numeric_manifest_values(tmp_path):
+def test_build_deployment_info_sanitizes_numeric_manifest_values(tmp_path, monkeypatch):
+    _clear_deployment_env(monkeypatch)
     manifest = tmp_path / "release.json"
     manifest.write_text(json.dumps({
         "release_id": 20260703,
@@ -83,7 +102,7 @@ def test_build_deployment_info_sanitizes_numeric_manifest_values(tmp_path):
         "models": {"manifest": 789},
         "image": {"cuda": 456},
     }), encoding="utf-8")
-    settings = Settings(release_manifest_path=manifest)
+    settings = Settings(_env_file=None, release_manifest_path=manifest)
 
     info = build_deployment_info(settings)
 
