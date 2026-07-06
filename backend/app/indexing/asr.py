@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from app.indexing.common import atomic_save_json
-from app.indexing.text_semantic import build_text_semantic_index, resolve_text_embedding_device
+from app.indexing.common import atomic_save_npz
+from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
 from app.media import extract_audio, parse_timecode
 
 
@@ -153,7 +153,7 @@ def build_asr_index(
 ) -> dict:
     effective_model = model_name
     semantic_result: dict | None = None
-    semantic_target = Path(semantic_output_path) if semantic_output_path else Path(output_path).with_name("asr_semantic.npz")
+    semantic_target = Path(semantic_output_path) if semantic_output_path else None
     if sidecar_path:
         chunks = load_sidecar(sidecar_path)
         used_engine = "sidecar"
@@ -163,9 +163,18 @@ def build_asr_index(
         except subprocess.CalledProcessError:
             chunks = []
             used_engine = "no_audio"
-            atomic_save_json(output_path, {"engine": used_engine, "model": model_name, "language": language, "chunks": chunks})
-            semantic_target.unlink(missing_ok=True)
-            return {"chunks": 0, "engine": used_engine, "warning": "no audio stream found"}
+            _save_asr_npz(output_path, chunks, np.empty((0, 0), dtype=np.float16), np.empty((0,), dtype=np.int32))
+            if semantic_target is not None:
+                semantic_target.unlink(missing_ok=True)
+            return {
+                "chunks": 0,
+                "engine": used_engine,
+                "model": effective_model,
+                "language": language,
+                "decode_status": "empty",
+                "semantic_status": "empty",
+                "warning": "no audio stream found",
+            }
         # Chinese transcription quality: prefer FunASR/Paraformer when available
         # (far better on Mandarin than small Whisper); otherwise fall back to the
         # requested Whisper model — never silently downgrade to tiny.
@@ -182,16 +191,20 @@ def build_asr_index(
         else:
             chunks = _whisper(str(audio_path), model_name, device, model_dir, language)
             used_engine = "whisper"
-    atomic_save_json(output_path, {"engine": used_engine, "model": effective_model, "language": language, "chunks": chunks})
-
     if not semantic_enabled:
-        semantic_target.unlink(missing_ok=True)
+        if semantic_target is not None:
+            semantic_target.unlink(missing_ok=True)
+        semantic_result = {
+            "embeddings": np.empty((0, 0), dtype=np.float16),
+            "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
+            "semantic_chunks": 0,
+            "semantic_status": "disabled",
+        }
     else:
         try:
             resolved_device = resolve_text_embedding_device(semantic_device, cuda_enabled=False)
-            semantic_result = build_text_semantic_index(
+            semantic_result = build_text_semantic_arrays(
                 chunks=chunks,
-                output_path=semantic_target,
                 model_name=semantic_model,
                 model_dir=semantic_model_dir or str(Path(model_dir).parent / "text-embeddings"),
                 device=resolved_device,
@@ -201,16 +214,58 @@ def build_asr_index(
         except Exception as exc:
             # Keep ASR itself usable even if the optional semantic model is not
             # installed or unavailable on the current server. Search will fall
-            # back to lexical matching when asr_semantic.npz is absent.
-            semantic_target.unlink(missing_ok=True)
+            # back to lexical matching when semantic arrays are empty.
+            if semantic_target is not None:
+                semantic_target.unlink(missing_ok=True)
             semantic_result = {
+                "embeddings": np.empty((0, 0), dtype=np.float16),
+                "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
                 "semantic_chunks": 0,
                 "semantic_model": semantic_model,
                 "semantic_status": "unavailable",
                 "semantic_error": str(exc),
             }
 
-    result = {"chunks": len(chunks), "engine": used_engine, "model": effective_model, "language": language}
+    _save_asr_npz(
+        output_path,
+        chunks,
+        np.asarray(semantic_result["embeddings"], dtype=np.float16) if semantic_result is not None else np.empty((0, 0), dtype=np.float16),
+        np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32) if semantic_result is not None else np.empty((0,), dtype=np.int32),
+    )
+    result = {
+        "chunks": len(chunks),
+        "engine": used_engine,
+        "model": effective_model,
+        "language": language,
+        "schema_version": 3,
+        "decode_status": "complete" if chunks else "empty",
+    }
     if semantic_result is not None:
-        result.update(semantic_result)
+        result.update({
+            key: value for key, value in semantic_result.items()
+            if key not in {"embeddings", "embedding_chunk_indices"}
+        })
     return result
+
+
+def _save_asr_npz(
+    output_path: str | Path,
+    chunks: list[dict],
+    embeddings: np.ndarray,
+    embedding_chunk_indices: np.ndarray,
+) -> None:
+    chunk_times_ms = np.asarray([
+        [
+            int(round(float(chunk.get("start_time", chunk.get("start", 0))) * 1000)),
+            int(round(float(chunk.get("end_time", chunk.get("end", 0))) * 1000)),
+        ]
+        for chunk in chunks
+    ], dtype=np.int32).reshape((-1, 2))
+    texts = np.asarray([str(chunk.get("text", "")).strip() for chunk in chunks], dtype="U")
+    atomic_save_npz(
+        output_path,
+        chunk_times_ms=chunk_times_ms,
+        texts=texts,
+        embeddings=np.asarray(embeddings, dtype=np.float16),
+        embedding_chunk_indices=np.asarray(embedding_chunk_indices, dtype=np.int32),
+    )

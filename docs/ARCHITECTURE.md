@@ -23,7 +23,7 @@ runtime/
   clips/{video_id}/
 ```
 
-当前 MVP 把索引保存在本地 `.npz` 和 `.json` 文件中。后续如果扩展到多机或百万级片段，可以在保持 API 概念不变的前提下，把存储层替换为 pgvector、Milvus、Qdrant 等系统。
+当前 MVP 把索引保存在本地 `index_manifest.json` 和通道 `.npz` 文件中。后续如果扩展到多机或百万级片段，可以在保持 API 概念不变的前提下，把存储层替换为 pgvector、Milvus、Qdrant 等系统。
 
 ## 数据流
 
@@ -40,12 +40,13 @@ runtime/
 
 ```text
 visual -> 抽帧 -> SigLIP2/CLIP embeddings -> visual.npz
-face   -> 抽帧 -> InsightFace/ArcFace tracks -> faces.npz
-asr    -> 音频 -> Whisper chunks -> asr.json + 可选 asr_semantic.npz
-ocr    -> 抽帧 -> RapidOCR chunks -> ocr.json + 可选 ocr_semantic.npz
+face   -> 抽帧 -> InsightFace/ArcFace tracks -> face.npz
+asr    -> 音频 -> Whisper/FunASR chunks + 可选文本语义向量 -> asr.npz
+ocr    -> 抽帧 -> RapidOCR boxes + 可选文本语义向量 -> ocr.npz
 ```
 
 搜索时，各通道先独立产生 candidates，然后按时间重叠或邻近关系合并为最终可播放片段。
+通道索引协议和数组 schema 见 `docs/RETRIEVAL_CHANNELS.md`。
 
 ## 模型生命周期
 
@@ -77,6 +78,8 @@ backend/app/indexer_daemon.py
 | `backend/app/stage_runner.py` | 各通道索引子进程入口 |
 | `backend/app/search.py` | visual / face / ASR / OCR 召回和结果融合 |
 | `backend/app/media.py` | 视频探测、抽帧、抽音频、缩略图、clip |
+| `backend/app/indexing/manifest.py` | v3 index manifest 读写和版本校验 |
+| `backend/app/indexing/pipeline_manifest.py` | 将索引阶段结果写入通道 manifest |
 | `backend/app/indexing/visual.py` | visual encoder 和 visual 索引构建 |
 | `backend/app/indexing/faces.py` | face encoder 和人脸 track 索引构建 |
 | `backend/app/indexing/asr.py` | Whisper / FunASR / 字幕 ASR 索引构建 |

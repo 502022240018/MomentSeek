@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -9,6 +8,7 @@ import numpy as np
 
 from app.db import Catalog
 from app.indexing.common import normalize
+from app.indexing.manifest import require_channel_manifest
 from app.settings import Settings
 
 
@@ -36,6 +36,11 @@ class Candidate:
     lexical_score: float | None = None
     semantic_score: float | None = None
     semantic_cosine: float | None = None
+    unit_type: str | None = None
+    unit_id: int | None = None
+    best_ms: int | None = None
+    text: str | None = None
+    features: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -144,103 +149,84 @@ def asr_semantic_confidence(cosine: float) -> float:
     return float(1.0 / (1.0 + np.exp(-10.0 * (cosine - 0.35))))
 
 
-def _top_vectors(data, query: np.ndarray, modality: str, video_id: str, limit: int, threshold: float) -> list[Candidate]:
+def _seconds(ms: int | float) -> float:
+    return float(ms) / 1000.0
+
+
+def _decode_text_array(values: np.ndarray) -> list[str]:
+    return [str(item) for item in values.tolist()]
+
+
+def _semantic_arrays(data) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if "embeddings" not in data.files or "embedding_chunk_indices" not in data.files:
+        return None, None
     embeddings = data["embeddings"]
-    if not len(embeddings):
-        return []
-    scores = embeddings @ normalize(query)
-    candidates = []
-    # Recall everything sorted by score; tag whether each clears the threshold
-    # instead of hard-dropping, so the UI can surface borderline matches marked
-    # as low-confidence rather than silently discarding them.
-    for index in np.argsort(scores)[::-1]:
-        if len(candidates) >= limit:
-            break
-        cosine = float(scores[index])
-        above = cosine >= threshold
-        confidence = face_confidence(cosine) if modality == "face" else cosine
-        thumbnail = str(data["thumbnails"][index]) if "thumbnails" in data.files else ""
-        detail = f"{modality} cosine={cosine:.3f} · confidence={confidence * 100:.1f}%"
-        candidates.append(Candidate(
-            video_id=video_id,
-            start_time=float(data["start_times"][index]),
-            end_time=float(data["end_times"][index]),
-            score=confidence,
-            modality=modality,
-            thumbnail=thumbnail or None,
-            evidence=detail if above else detail + " · 低于阈值",
-            raw_score=cosine,
-            decision="absolute_hit" if above else "weak",
-            above_threshold=above,
-        ))
-    return candidates
+    indices = data["embedding_chunk_indices"].astype(np.int32)
+    if embeddings.ndim != 2 or not len(embeddings) or not len(indices):
+        return None, None
+    return np.asarray(embeddings, dtype=np.float32), indices
 
 
 def _visual_candidates(
-    data, query: np.ndarray, video_id: str, profile: str = "balanced", limit: int = 72
+    data,
+    query: np.ndarray,
+    video_id: str,
+    duration_ms: int,
+    segment_ms: int,
+    profile: str = "balanced",
+    limit: int = 72,
 ) -> list[Candidate]:
-    embeddings = data["embeddings"]
-    if not len(embeddings):
+    required = {"frame_embeddings", "frame_times_ms", "segment_frame_offsets"}
+    if not required.issubset(set(data.files)):
+        raise ValueError("visual v3 索引缺少必要数组，请重跑 visual 索引")
+    frame_embeddings = np.asarray(data["frame_embeddings"], dtype=np.float32)
+    frame_times_ms = data["frame_times_ms"].astype(np.int32)
+    offsets = data["segment_frame_offsets"].astype(np.int32)
+    if frame_embeddings.ndim != 2 or len(frame_embeddings) != len(frame_times_ms):
+        raise ValueError("visual v3 索引数组长度不一致，请重跑 visual 索引")
+    if len(offsets) < 2 or offsets[0] != 0 or offsets[-1] != len(frame_times_ms) or np.any(np.diff(offsets) < 0):
+        raise ValueError("visual v3 segment_frame_offsets 无效，请重跑 visual 索引")
+    if not len(frame_embeddings):
         return []
+
     query = normalize(query)
-    mean_scores = embeddings @ query
-    raw_scores = mean_scores
-    top1_scores: np.ndarray | None = None
-    top3_scores: np.ndarray | None = None
-    best_times: np.ndarray | None = None
+    frame_scores = frame_embeddings @ query
+    segment_ids: list[int] = []
+    raw_scores: list[float] = []
+    top3_scores: list[float] = []
+    mean_scores: list[float] = []
+    best_times_ms: list[int] = []
+    for segment_id in range(len(offsets) - 1):
+        start, end = int(offsets[segment_id]), int(offsets[segment_id + 1])
+        if start == end:
+            continue
+        bucket_scores = frame_scores[start:end]
+        order = np.argsort(bucket_scores)[::-1]
+        top_values = bucket_scores[order]
+        segment_ids.append(segment_id)
+        raw_scores.append(float(top_values[0]))
+        top3_scores.append(float(np.mean(top_values[:min(3, len(top_values))])))
+        mean_scores.append(float(np.mean(bucket_scores)))
+        best_times_ms.append(int(frame_times_ms[start + int(order[0])]))
 
-    # visual.npz schema v2 keeps frame-level CLIP embeddings in addition to the
-    # segment mean. A segment can now be recalled by a short semantic peak
-    # (top1/top3 frame MaxSim) instead of being diluted by averaging every frame in
-    # the 5s bucket. Older indexes do not have these arrays and fall back to the
-    # original segment-mean score.
-    if {"frame_embeddings", "frame_segment_ids", "frame_times"}.issubset(set(data.files)):
-        frame_scores = data["frame_embeddings"] @ query
-        frame_segment_ids = data["frame_segment_ids"]
-        frame_times = data["frame_times"]
-        segment_ids = data["segment_ids"] if "segment_ids" in data.files else np.arange(len(embeddings), dtype=np.int32)
-        top1_values = np.zeros(len(embeddings), dtype=np.float32)
-        top3_values = np.zeros(len(embeddings), dtype=np.float32)
-        best_time_values = np.full(len(embeddings), np.nan, dtype=np.float32)
-        for segment_index, segment_id in enumerate(segment_ids):
-            indices = np.flatnonzero(frame_segment_ids == segment_id)
-            if not len(indices):
-                top1_values[segment_index] = float(mean_scores[segment_index])
-                top3_values[segment_index] = float(mean_scores[segment_index])
-                continue
-            values = frame_scores[indices]
-            local_order = np.argsort(values)[::-1]
-            ordered_values = values[local_order]
-            top1_values[segment_index] = float(ordered_values[0])
-            top3_values[segment_index] = float(np.mean(ordered_values[:min(3, len(ordered_values))]))
-            best_time_values[segment_index] = float(frame_times[indices[local_order[0]]])
-        top1_scores = top1_values
-        top3_scores = top3_values
-        best_times = best_time_values
-        # Recall/rank visual segments by the single best matching frame. Earlier
-        # versions blended top1/top3/segment-mean, but that can dilute short
-        # visual events in a 5s bucket. Keep top3/mean only as diagnostics.
-        raw_scores = top1_scores
-
-    distribution = robust_distribution(raw_scores)
+    if not raw_scores:
+        return []
+    raw_values = np.asarray(raw_scores, dtype=np.float32)
+    distribution = robust_distribution(raw_values)
     z_scores = distribution["z_scores"]
     percentiles = distribution["percentiles"]
     reliable = distribution["reliable"]
-    raw_order = np.argsort(raw_scores)[::-1]
+    raw_order = np.argsort(raw_values)[::-1]
     fallback_counts = {"recall": 3, "balanced": 2, "precision": 1}
     fallback_indices = set(int(index) for index in raw_order[:min(len(raw_order), fallback_counts[profile])])
     candidates = []
     cap = 500 if profile == "recall" else limit
-
-    # Recall every bucket sorted by score (capped), tagging each as above/below the
-    # profile threshold instead of dropping it, so borderline segments stay visible.
-    for index in raw_order:
-        if len(candidates) >= cap:
-            break
-        index = int(index)
-        raw_score = float(raw_scores[index])
-        z_score = float(z_scores[index])
-        percentile = float(percentiles[index])
+    for local_index in raw_order[:cap]:
+        local_index = int(local_index)
+        segment_id = int(segment_ids[local_index])
+        raw_score = float(raw_values[local_index])
+        z_score = float(z_scores[local_index])
+        percentile = float(percentiles[local_index])
         if reliable:
             if z_score >= 2.0 or percentile >= 0.975:
                 decision, above = "strong", True
@@ -255,33 +241,26 @@ def _visual_candidates(
             ranking_score = percentile
             detail = f"visual score={raw_score:.3f} · percentile={percentile * 100:.1f}% · robust_z={z_score:.2f}"
         else:
-            if index in fallback_indices:
+            if local_index in fallback_indices:
                 decision, above = "fallback", True
             else:
                 decision, above = "weak", False
             ranking_score = float(np.clip((raw_score + 1.0) / 2.0, 0, 1))
-            detail = f"visual score={raw_score:.3f} · distribution fallback (n={len(raw_scores)})"
+            detail = f"visual score={raw_score:.3f} · distribution fallback (n={len(raw_values)})"
 
-        visual_top1 = float(top1_scores[index]) if top1_scores is not None else None
-        visual_top3 = float(top3_scores[index]) if top3_scores is not None else None
-        visual_mean = float(mean_scores[index])
-        best_time = float(best_times[index]) if best_times is not None and not np.isnan(best_times[index]) else None
-        if visual_top1 is not None and visual_top3 is not None:
-            detail += (
-                f" · best_frame={best_time:.2f}s" if best_time is not None else ""
-            )
-            detail += f" · top1={visual_top1:.3f} · top3={visual_top3:.3f} · mean={visual_mean:.3f}"
-        else:
-            detail += f" · mean={visual_mean:.3f} · legacy_index"
-
-        thumbnail = str(data["thumbnails"][index]) if "thumbnails" in data.files else ""
+        top3 = float(top3_scores[local_index])
+        mean = float(mean_scores[local_index])
+        best_ms = int(best_times_ms[local_index])
+        detail += f" · best_frame={best_ms / 1000:.2f}s · top1={raw_score:.3f} · top3={top3:.3f} · mean={mean:.3f}"
+        start_ms = segment_id * segment_ms
+        end_ms = min((segment_id + 1) * segment_ms, duration_ms or (segment_id + 1) * segment_ms)
         candidates.append(Candidate(
             video_id=video_id,
-            start_time=float(data["start_times"][index]),
-            end_time=float(data["end_times"][index]),
+            start_time=_seconds(start_ms),
+            end_time=_seconds(end_ms),
             score=ranking_score,
             modality="visual",
-            thumbnail=thumbnail or None,
+            thumbnail=f"visual_{segment_id:06d}.jpg",
             evidence=detail if above else detail + " · 低于阈值",
             raw_score=raw_score,
             robust_z=z_score,
@@ -291,33 +270,62 @@ def _visual_candidates(
             distribution_reliable=reliable,
             distribution_median=distribution["median"],
             distribution_mad=distribution["mad"],
-            best_time=best_time,
-            visual_top1=visual_top1,
-            visual_top3=visual_top3,
-            visual_mean=visual_mean,
+            best_time=_seconds(best_ms),
+            visual_top1=raw_score,
+            visual_top3=top3,
+            visual_mean=mean,
+            unit_type="segment",
+            unit_id=segment_id,
+            best_ms=best_ms,
+            features={
+                "visual_top1": raw_score,
+                "visual_top3": top3,
+                "visual_mean": mean,
+                "percentile": percentile,
+                "robust_z": z_score,
+            },
         ))
     return candidates
 
 
-def _visual_model_key_from_index(data, default_model: str) -> str:
-    from app.indexing.visual import normalize_visual_model
-
-    if "visual_model" in data.files:
-        return normalize_visual_model(str(data["visual_model"][0]))
-    if "model" in data.files:
-        label = str(data["model"][0])
-        lowered = label.lower()
-        if "siglip2" in lowered:
-            return "siglip2-so400m-384"
-        if "chinese" in lowered:
-            return "chinese-clip-vit-b16"
-        if "vit-b-16" in lowered or "vit-b/16" in lowered:
-            return "openclip-vit-b16"
-        if "vit-l-14" in lowered or "vit-l/14" in lowered:
-            return "openclip-vit-l14"
-        if "vit-b-32" in lowered or "vit-b/32" in lowered:
-            return "openclip-vit-b32"
-    return normalize_visual_model(default_model)
+def _face_candidates(data, query: np.ndarray, video_id: str, limit: int, threshold: float = 0.35) -> list[Candidate]:
+    if "embeddings" not in data.files or "track_times_ms" not in data.files:
+        raise ValueError("face v3 索引缺少必要数组，请重跑 face 索引")
+    embeddings = np.asarray(data["embeddings"], dtype=np.float32)
+    times = data["track_times_ms"].astype(np.int32)
+    if embeddings.ndim != 2 or times.shape != (len(embeddings), 3):
+        raise ValueError("face v3 索引数组长度不一致，请重跑 face 索引")
+    if not len(embeddings):
+        return []
+    scores = embeddings @ normalize(query)
+    candidates: list[Candidate] = []
+    for index in np.argsort(scores)[::-1]:
+        if len(candidates) >= limit:
+            break
+        index = int(index)
+        cosine = float(scores[index])
+        above = cosine >= threshold
+        confidence = face_confidence(cosine)
+        start_ms, end_ms, best_ms = [int(value) for value in times[index]]
+        detail = f"face cosine={cosine:.3f} · confidence={confidence * 100:.1f}%"
+        candidates.append(Candidate(
+            video_id=video_id,
+            start_time=_seconds(start_ms),
+            end_time=_seconds(end_ms),
+            score=confidence,
+            modality="face",
+            thumbnail=f"face_{index:06d}.jpg",
+            evidence=detail if above else detail + " · 低于阈值",
+            raw_score=cosine,
+            decision="absolute_hit" if above else "weak",
+            above_threshold=above,
+            best_time=_seconds(best_ms),
+            unit_type="track",
+            unit_id=index,
+            best_ms=best_ms,
+            features={"face_cosine": cosine},
+        ))
+    return candidates
 
 
 def _asr_candidates(
@@ -326,7 +334,8 @@ def _asr_candidates(
     video_id: str,
     limit: int,
     modality: str = "asr",
-    semantic_data=None,
+    semantic_embeddings: np.ndarray | None = None,
+    embedding_chunk_indices: np.ndarray | None = None,
     semantic_query: np.ndarray | None = None,
 ) -> list[Candidate]:
     if not chunks:
@@ -336,21 +345,19 @@ def _asr_candidates(
     semantic_scores = np.zeros(len(chunks), dtype=np.float32)
     semantic_cosines = np.full(len(chunks), np.nan, dtype=np.float32)
     semantic_available = (
-        semantic_data is not None
+        semantic_embeddings is not None
+        and embedding_chunk_indices is not None
         and semantic_query is not None
-        and "embeddings" in semantic_data.files
-        and "chunk_indices" in semantic_data.files
-        and len(semantic_data["embeddings"]) > 0
+        and len(semantic_embeddings) > 0
+        and len(embedding_chunk_indices) > 0
     )
 
     semantic_top_indices: set[int] = set()
     if semantic_available:
-        embeddings = semantic_data["embeddings"]
-        chunk_indices = semantic_data["chunk_indices"].astype(np.int32)
-        cosines = embeddings @ normalize(semantic_query)
+        cosines = semantic_embeddings @ normalize(semantic_query)
         distribution = robust_distribution(cosines)
         percentiles = distribution["percentiles"]
-        for local_index, chunk_index in enumerate(chunk_indices):
+        for local_index, chunk_index in enumerate(embedding_chunk_indices):
             if 0 <= int(chunk_index) < len(chunks):
                 cosine = float(cosines[local_index])
                 percentile = float(percentiles[local_index]) if len(percentiles) else 0.0
@@ -395,10 +402,19 @@ def _asr_candidates(
         else:
             metrics.append("semantic=unavailable")
         evidence = f"{detail} · {' · '.join(metrics)}"
+        start_ms = int(chunk.get("start_ms", round(float(chunk.get("start_time", 0)) * 1000)))
+        end_ms = int(chunk.get("end_ms", round(float(chunk.get("end_time", 0)) * 1000)))
+        features = {
+            "lexical_score": lexical,
+            "semantic_score": semantic if semantic_cosine is not None else None,
+            "semantic_cosine": semantic_cosine,
+        }
+        if "score" in chunk:
+            features[f"{modality}_score"] = float(chunk["score"])
         candidates.append(Candidate(
             video_id=video_id,
-            start_time=float(chunk.get("start_time", 0)),
-            end_time=float(chunk.get("end_time", 0)),
+            start_time=_seconds(start_ms),
+            end_time=_seconds(end_ms),
             score=score,
             modality=modality,
             thumbnail=str(chunk.get("thumbnail") or "") or None,
@@ -409,8 +425,112 @@ def _asr_candidates(
             lexical_score=lexical,
             semantic_score=semantic if semantic_cosine is not None else None,
             semantic_cosine=semantic_cosine,
+            unit_type="chunk",
+            unit_id=int(chunk.get("chunk_id", index)),
+            text=detail,
+            features=features,
         ))
     return candidates
+
+
+def _asr_chunks_from_npz(data) -> list[dict]:
+    if "chunk_times_ms" not in data.files or "texts" not in data.files:
+        raise ValueError("asr v3 索引缺少必要数组，请重跑 ASR 索引")
+    times = data["chunk_times_ms"].astype(np.int32)
+    texts = _decode_text_array(data["texts"])
+    if times.shape != (len(texts), 2):
+        raise ValueError("asr v3 chunk_times_ms/texts 长度不一致，请重跑 ASR 索引")
+    return [
+        {
+            "chunk_id": index,
+            "start_ms": int(row[0]),
+            "end_ms": int(row[1]),
+            "text": texts[index],
+        }
+        for index, row in enumerate(times)
+    ]
+
+
+def _ocr_chunks_from_npz(data) -> list[dict]:
+    required = {"chunk_times_ms", "box_chunk_indices", "box_texts", "box_scores", "boxes"}
+    if not required.issubset(set(data.files)):
+        raise ValueError("ocr v3 索引缺少必要数组，请重跑 OCR 索引")
+    times = data["chunk_times_ms"].astype(np.int32)
+    box_chunk_indices = data["box_chunk_indices"].astype(np.int32)
+    box_texts = _decode_text_array(data["box_texts"])
+    box_scores = np.asarray(data["box_scores"], dtype=np.float32)
+    if times.ndim != 2 or times.shape[1] != 3:
+        raise ValueError("ocr v3 chunk_times_ms 必须是 [num_chunks, 3]，请重跑 OCR 索引")
+    if not (len(box_chunk_indices) == len(box_texts) == len(box_scores)):
+        raise ValueError("ocr v3 box 数组长度不一致，请重跑 OCR 索引")
+    chunks: list[dict] = []
+    for chunk_id, row in enumerate(times):
+        indices = np.flatnonzero(box_chunk_indices == chunk_id)
+        texts = [box_texts[int(index)] for index in indices if box_texts[int(index)].strip()]
+        scores = box_scores[indices] if len(indices) else np.empty((0,), dtype=np.float32)
+        chunks.append({
+            "chunk_id": chunk_id,
+            "start_ms": int(row[0]),
+            "end_ms": int(row[1]),
+            "frame_ms": int(row[2]),
+            "text": " ".join(texts),
+            "score": float(scores.max()) if len(scores) else 0.0,
+            "thumbnail": f"ocr_{chunk_id:06d}.jpg",
+        })
+    return chunks
+
+
+def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict, Path]:
+    manifest, channel_manifest = require_channel_manifest(index_dir, str(video.get("name") or video["id"]), channel)
+    default_files = {"visual": "visual.npz", "face": "face.npz", "asr": "asr.npz", "ocr": "ocr.npz"}
+    file_name = str(channel_manifest.get("file") or default_files[channel])
+    index_file = index_dir / file_name
+    if not index_file.exists():
+        raise ValueError(f"视频 {video.get('name') or video['id']} 缺少 {channel} v3 索引文件，请重跑该通道")
+    return manifest, channel_manifest, index_file
+
+
+def _round_optional(value: float | None, digits: int) -> float | None:
+    return round(value, digits) if value is not None else None
+
+
+def _serialized_features(features: dict) -> dict:
+    serialized = {}
+    for key, value in features.items():
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, float):
+            serialized[key] = round(value, 4)
+        else:
+            serialized[key] = value
+    return serialized
+
+
+def _serialize_evidence(item: Candidate) -> dict:
+    return {
+        "modality": item.modality,
+        "score": round(item.score, 4),
+        "raw_score": _round_optional(item.raw_score, 4),
+        "robust_z": _round_optional(item.robust_z, 3),
+        "percentile": _round_optional(item.percentile, 4),
+        "decision": item.decision,
+        "distribution_reliable": item.distribution_reliable,
+        "distribution_median": _round_optional(item.distribution_median, 4),
+        "distribution_mad": _round_optional(item.distribution_mad, 4),
+        "best_time": _round_optional(item.best_time, 3),
+        "visual_top1": _round_optional(item.visual_top1, 4),
+        "visual_top3": _round_optional(item.visual_top3, 4),
+        "visual_mean": _round_optional(item.visual_mean, 4),
+        "lexical_score": _round_optional(item.lexical_score, 4),
+        "semantic_score": _round_optional(item.semantic_score, 4),
+        "semantic_cosine": _round_optional(item.semantic_cosine, 4),
+        "unit_type": item.unit_type,
+        "unit_id": item.unit_id,
+        "best_ms": item.best_ms,
+        "text": item.text,
+        "features": _serialized_features(item.features),
+        "detail": item.evidence,
+    }
 
 
 def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_duration: float) -> bool:
@@ -527,69 +647,62 @@ class SearchEngine:
 
         for video in videos:
             index_dir = self.settings.index_dir / video["id"]
-            if wants_visual and (index_dir / "visual.npz").exists():
-                with np.load(index_dir / "visual.npz", allow_pickle=False) as data:
-                    visual_model = _visual_model_key_from_index(data, self.settings.visual_model)
+            indexed_modalities = set(video.get("indexed_modalities") or [])
+            if wants_visual and "visual" in indexed_modalities:
+                manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "visual")
+                with np.load(index_file, allow_pickle=False) as data:
+                    visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
                     if visual_model not in visual_queries:
                         visual_queries[visual_model] = self._clip(visual_model).encode_query(text, image_path, alpha)
                     visual_query = visual_queries[visual_model]
-                    candidates.extend(_visual_candidates(data, visual_query, video["id"], visual_profile, limit * 3))
-            if face_query is not None and (index_dir / "faces.npz").exists():
-                with np.load(index_dir / "faces.npz", allow_pickle=False) as data:
-                    candidates.extend(_top_vectors(data, face_query, "face", video["id"], limit * 3, 0.35))
-            if "asr" in modalities and text and (index_dir / "asr.json").exists():
-                payload = json.loads((index_dir / "asr.json").read_text(encoding="utf-8"))
-                semantic_data = None
-                semantic_query = None
-                semantic_path = index_dir / "asr_semantic.npz"
-                if semantic_path.exists():
-                    semantic_data = np.load(semantic_path, allow_pickle=False)
-                    try:
-                        model_name = str(semantic_data["model"][0]) if "model" in semantic_data.files else self.settings.asr_semantic_model
+                    candidates.extend(_visual_candidates(
+                        data,
+                        visual_query,
+                        video["id"],
+                        int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
+                        int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
+                        visual_profile,
+                        limit * 3,
+                    ))
+            if face_query is not None and "face" in indexed_modalities:
+                _manifest, _channel_manifest, index_file = _channel_manifest_for(video, index_dir, "face")
+                with np.load(index_file, allow_pickle=False) as data:
+                    candidates.extend(_face_candidates(data, face_query, video["id"], limit * 3, 0.35))
+            if "asr" in modalities and text and "asr" in indexed_modalities:
+                _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "asr")
+                with np.load(index_file, allow_pickle=False) as data:
+                    semantic_embeddings, embedding_chunk_indices = _semantic_arrays(data)
+                    semantic_query = None
+                    if semantic_embeddings is not None:
+                        model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
                         semantic_query = self._encode_asr_query(text, model_name)
-                    except Exception:
-                        semantic_data.close()
-                        semantic_data = None
-                        semantic_query = None
-                try:
                     candidates.extend(_asr_candidates(
-                        payload.get("chunks", []),
+                        _asr_chunks_from_npz(data),
                         text,
                         video["id"],
                         limit * 3,
-                        semantic_data=semantic_data,
+                        semantic_embeddings=semantic_embeddings,
+                        embedding_chunk_indices=embedding_chunk_indices,
                         semantic_query=semantic_query,
                     ))
-                finally:
-                    if semantic_data is not None:
-                        semantic_data.close()
-            if "ocr" in modalities and text and (index_dir / "ocr.json").exists():
-                payload = json.loads((index_dir / "ocr.json").read_text(encoding="utf-8"))
-                semantic_data = None
-                semantic_query = None
-                semantic_path = index_dir / "ocr_semantic.npz"
-                if semantic_path.exists():
-                    semantic_data = np.load(semantic_path, allow_pickle=False)
-                    try:
-                        model_name = str(semantic_data["model"][0]) if "model" in semantic_data.files else self.settings.asr_semantic_model
+            if "ocr" in modalities and text and "ocr" in indexed_modalities:
+                _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
+                with np.load(index_file, allow_pickle=False) as data:
+                    semantic_embeddings, embedding_chunk_indices = _semantic_arrays(data)
+                    semantic_query = None
+                    if semantic_embeddings is not None:
+                        model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
                         semantic_query = self._encode_asr_query(text, model_name)
-                    except Exception:
-                        semantic_data.close()
-                        semantic_data = None
-                        semantic_query = None
-                try:
                     candidates.extend(_asr_candidates(
-                        payload.get("chunks", []),
+                        _ocr_chunks_from_npz(data),
                         text,
                         video["id"],
                         limit * 3,
                         modality="ocr",
-                        semantic_data=semantic_data,
+                        semantic_embeddings=semantic_embeddings,
+                        embedding_chunk_indices=embedding_chunk_indices,
                         semantic_query=semantic_query,
                     ))
-                finally:
-                    if semantic_data is not None:
-                        semantic_data.close()
 
         names = {video["id"]: video["name"] for video in videos}
         # Each modality score is calibrated to a comparable [0,1] scale, so these
@@ -622,25 +735,7 @@ class SearchEngine:
                 clip_url=f"/api/videos/{video_id}/clip?start={min(item.start_time for item in group):.3f}&end={max(item.end_time for item in group):.3f}",
                 decision=decision,
                 above_threshold=group_above,
-                evidence=[{
-                    "modality": item.modality,
-                    "score": round(item.score, 4),
-                    "raw_score": round(item.raw_score, 4) if item.raw_score is not None else None,
-                    "robust_z": round(item.robust_z, 3) if item.robust_z is not None else None,
-                    "percentile": round(item.percentile, 4) if item.percentile is not None else None,
-                    "decision": item.decision,
-                    "distribution_reliable": item.distribution_reliable,
-                    "distribution_median": round(item.distribution_median, 4) if item.distribution_median is not None else None,
-                    "distribution_mad": round(item.distribution_mad, 4) if item.distribution_mad is not None else None,
-                    "best_time": round(item.best_time, 3) if item.best_time is not None else None,
-                    "visual_top1": round(item.visual_top1, 4) if item.visual_top1 is not None else None,
-                    "visual_top3": round(item.visual_top3, 4) if item.visual_top3 is not None else None,
-                    "visual_mean": round(item.visual_mean, 4) if item.visual_mean is not None else None,
-                    "lexical_score": round(item.lexical_score, 4) if item.lexical_score is not None else None,
-                    "semantic_score": round(item.semantic_score, 4) if item.semantic_score is not None else None,
-                    "semantic_cosine": round(item.semantic_cosine, 4) if item.semantic_cosine is not None else None,
-                    "detail": item.evidence,
-                } for item in group],
+                evidence=[_serialize_evidence(item) for item in group],
             ))
         # Above-threshold results first (each block sorted by score), so the UI can
         # draw a single divider where matches start dropping below threshold.

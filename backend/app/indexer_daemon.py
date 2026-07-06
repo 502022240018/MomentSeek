@@ -18,6 +18,7 @@ import time
 import traceback
 
 from app.db import Catalog
+from app.indexing.pipeline_manifest import write_stage_manifest
 from app.model_pool import ModelPool
 from app.settings import Settings, get_settings
 
@@ -47,7 +48,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
                 model_cache_dir=model_cache_dir,
             ),
         )
-        return build_visual_index(
+        result = build_visual_index(
             video_path=video_path,
             output_path=str(video_index_dir / "visual.npz"),
             thumbnail_dir=str(thumbnail_dir),
@@ -64,16 +65,19 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             model_cache_dir=model_cache_dir,
             decode_height=settings.visual_decode_height,
             prefer_ffmpeg=settings.frame_reader == "ffmpeg",
+            duration_seconds=float(video.get("duration") or 0),
         )
+        write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
+        return result
     if stage == "face":
         from app.indexing.faces import FaceEncoder, build_face_index
 
         root = str(settings.app_model_dir / "insightface")
         key = f"face:{settings.face_model}:{settings.face_provider}:{settings.npu_device_id}"
         encoder = pool.get(key, lambda: FaceEncoder(settings.face_model, settings.face_provider, settings.npu_device_id, root))
-        return build_face_index(
+        result = build_face_index(
             video_path=video_path,
-            output_path=str(video_index_dir / "faces.npz"),
+            output_path=str(video_index_dir / "face.npz"),
             thumbnail_dir=str(thumbnail_dir),
             model_name=settings.face_model,
             sample_fps=float(options.get("face_sample_fps", settings.face_sample_fps)),
@@ -81,16 +85,20 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             device_id=settings.npu_device_id,
             model_root=root,
             encoder=encoder,
+            decode_height=settings.face_decode_height,
+            prefer_ffmpeg=settings.frame_reader == "ffmpeg",
         )
+        write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
+        return result
     if stage == "asr":
         from app.indexing.asr import build_asr_index, resolve_asr_device
 
         sidecar_path = options.get("sidecar_path")
         if sidecar_path:
             sidecar_path = str(settings.resolve_path(sidecar_path))
-        return build_asr_index(
+        result = build_asr_index(
             video_path=video_path,
-            output_path=str(video_index_dir / "asr.json"),
+            output_path=str(video_index_dir / "asr.npz"),
             working_dir=str(working_dir),
             engine=settings.asr_engine,
             model_name=str(options.get("asr_model", settings.asr_model)),
@@ -100,22 +108,23 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             sidecar_path=sidecar_path,
             funasr_model=settings.asr_zh_model,
             semantic_enabled=settings.asr_semantic_enabled,
-            semantic_output_path=str(video_index_dir / "asr_semantic.npz"),
             semantic_model=settings.asr_semantic_model,
             semantic_device=settings.asr_semantic_device,
             semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
             semantic_batch_size=settings.asr_semantic_batch_size,
             semantic_local_files_only=settings.asr_semantic_local_files_only,
         )
+        write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
+        return result
     if stage == "ocr":
         from app.indexing.ocr import build_ocr_index
 
         device = settings.ocr_device
         if device == "auto":
             device = "npu" if settings.npu_enabled else "cpu"
-        return build_ocr_index(
+        result = build_ocr_index(
             video_path=video_path,
-            output_path=str(video_index_dir / "ocr.json"),
+            output_path=str(video_index_dir / "ocr.npz"),
             thumbnail_dir=str(thumbnail_dir),
             working_dir=str(working_dir),
             sample_fps=float(options.get("ocr_sample_fps", settings.ocr_sample_fps)),
@@ -131,13 +140,14 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             npu_self_test=settings.ocr_npu_self_test,
             prefer_ffmpeg=settings.frame_reader == "ffmpeg",
             semantic_enabled=settings.ocr_semantic_enabled,
-            semantic_output_path=str(video_index_dir / "ocr_semantic.npz"),
             semantic_model=settings.asr_semantic_model,
             semantic_device=settings.asr_semantic_device,
             semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
             semantic_batch_size=settings.asr_semantic_batch_size,
             semantic_local_files_only=settings.asr_semantic_local_files_only,
         )
+        write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
+        return result
     raise ValueError(f"未知索引阶段: {stage}")
 
 

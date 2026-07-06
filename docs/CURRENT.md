@@ -1,6 +1,6 @@
 # MomentSeek 当前状态
 
-更新时间：2026-07-03
+更新时间：2026-07-06
 
 ## 项目位置
 
@@ -69,11 +69,17 @@ ocr_version = PP-OCRv4
 ocr_semantic_enabled = true
 ```
 
-当前服务器 4 个视频的 visual 索引已重跑为：
+当前代码的索引格式已切换到 schema v3：
 
 ```text
-siglip2-so400m-384
+runtime/indexes/{video_id}/index_manifest.json
+runtime/indexes/{video_id}/visual.npz
+runtime/indexes/{video_id}/face.npz
+runtime/indexes/{video_id}/asr.npz
+runtime/indexes/{video_id}/ocr.npz
 ```
+
+v3 不兼容旧索引。部署新代码后，旧的 visual v2、`faces.npz`、`asr.json`、`ocr.json` 需要重跑对应通道索引；新查询层只读取 v3 manifest 和 v3 npz。
 
 当前 visual 召回逻辑：
 
@@ -105,7 +111,7 @@ Quick tunnel 域名不是固定的。前端出现 `failed to fetch` 时，先检
 ## 当前注意事项
 
 - 多人开发与可复制部署方案已设计，第一阶段新增 dev.cpu/dev.cuda/staging.ascend/prod.ascend profile 和 manifest。
-- 部分视频没有 OCR 索引。
+- 当前 metadata/schema 正在切到 v3；部署到服务器后必须安排重跑索引。
 - ASR/OCR semantic 索引是可选增强；缺失时会退回 lexical。
 - Visual MaxSim 提高短瞬间召回，但多视频搜索时可能增加误召，见 `docs/ISSUES_AND_ROADMAP.md` 的 `RQ-001`。
 - 首次搜索加载 SigLIP2 可能较慢。

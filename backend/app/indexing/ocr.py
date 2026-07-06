@@ -6,8 +6,8 @@ from typing import Any
 
 import numpy as np
 
-from app.indexing.common import atomic_save_json
-from app.indexing.text_semantic import build_text_semantic_index, resolve_text_embedding_device
+from app.indexing.common import atomic_save_npz
+from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
 from app.media import read_frames, save_thumbnail
 
 
@@ -182,33 +182,20 @@ def build_ocr_index(
         if not items:
             continue
         hit_frames += 1
-        thumbnail_name = f"ocr_{frame_index:06d}.jpg"
+        chunk_id = len(chunks)
+        thumbnail_name = f"ocr_{chunk_id:06d}.jpg"
         save_thumbnail(frame, thumbnail_dir / thumbnail_name)
         text = " ".join(item["text"] for item in items)
         chunks.append({
             "start_time": round(float(timestamp), 3),
             "end_time": round(float(timestamp + interval), 3),
+            "frame_time": round(float(timestamp), 3),
             "text": text,
             "items": items,
             "thumbnail": thumbnail_name,
             "score": round(max(item["score"] for item in items), 4),
+            "frame_shape": frame.shape[:2],
         })
-
-    payload = {
-        "schema_version": 1,
-        "engine": "rapidocr",
-        "device": device,
-        "providers": providers,
-        "ocr_version": ocr_version,
-        "det_lang": det_lang,
-        "rec_lang": rec_lang,
-        "model_type": model_type,
-        "sample_fps": sample_fps,
-        "decode_height": decode_height,
-        "min_confidence": min_confidence,
-        "chunks": chunks,
-    }
-    atomic_save_json(output_path, payload)
 
     result = {
         "engine": "rapidocr",
@@ -223,22 +210,95 @@ def build_ocr_index(
         "chunks": len(chunks),
         "ocr_elapsed_seconds": round(ocr_elapsed, 3),
         "total_elapsed_seconds": round(time.perf_counter() - started, 3),
+        "schema_version": 3,
+        "decode_status": "complete" if decoded_frames else "empty",
     }
-    if semantic_enabled and semantic_output_path is not None:
+    semantic_result: dict
+    if not semantic_enabled:
+        if semantic_output_path is not None:
+            Path(semantic_output_path).unlink(missing_ok=True)
+        semantic_result = {
+            "embeddings": np.empty((0, 0), dtype=np.float16),
+            "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
+            "semantic_chunks": 0,
+            "semantic_status": "disabled",
+        }
+    else:
         try:
             resolved_device = resolve_text_embedding_device(semantic_device)
-            semantic_result = build_text_semantic_index(
+            semantic_result = build_text_semantic_arrays(
                 chunks=chunks,
-                output_path=semantic_output_path,
                 model_name=semantic_model,
                 model_dir=semantic_model_dir,
                 device=resolved_device,
                 batch_size=semantic_batch_size,
                 local_files_only=semantic_local_files_only,
             )
-            result.update({f"semantic_{key}": value for key, value in semantic_result.items()})
         except Exception as exc:
-            Path(semantic_output_path).unlink(missing_ok=True)
-            result["semantic_status"] = "unavailable"
-            result["semantic_error"] = str(exc)
+            if semantic_output_path is not None:
+                Path(semantic_output_path).unlink(missing_ok=True)
+            semantic_result = {
+                "embeddings": np.empty((0, 0), dtype=np.float16),
+                "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
+                "semantic_chunks": 0,
+                "semantic_model": semantic_model,
+                "semantic_status": "unavailable",
+                "semantic_error": str(exc),
+            }
+    _save_ocr_npz(
+        output_path,
+        chunks,
+        np.asarray(semantic_result["embeddings"], dtype=np.float16),
+        np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32),
+    )
+    result.update({
+        key: value for key, value in semantic_result.items()
+        if key not in {"embeddings", "embedding_chunk_indices"}
+    })
     return result
+
+
+def _normalized_box(box, frame_shape: tuple[int, int]) -> np.ndarray:
+    height, width = frame_shape
+    values = np.asarray(box if box is not None else np.zeros((4, 2)), dtype=np.float32)
+    if values.shape != (4, 2):
+        values = np.zeros((4, 2), dtype=np.float32)
+    scale = np.asarray([max(width, 1), max(height, 1)], dtype=np.float32)
+    return np.clip(values / scale, 0.0, 1.0)
+
+
+def _save_ocr_npz(
+    output_path: str | Path,
+    chunks: list[dict],
+    embeddings: np.ndarray,
+    embedding_chunk_indices: np.ndarray,
+) -> None:
+    chunk_times_ms = np.asarray([
+        [
+            int(round(float(chunk.get("start_time", 0)) * 1000)),
+            int(round(float(chunk.get("end_time", 0)) * 1000)),
+            int(round(float(chunk.get("frame_time", chunk.get("start_time", 0))) * 1000)),
+        ]
+        for chunk in chunks
+    ], dtype=np.int32).reshape((-1, 3))
+    box_chunk_indices: list[int] = []
+    box_texts: list[str] = []
+    box_scores: list[float] = []
+    boxes: list[np.ndarray] = []
+    for chunk_id, chunk in enumerate(chunks):
+        frame_shape = tuple(chunk.get("frame_shape") or (1, 1))
+        for item in chunk.get("items", []):
+            box_chunk_indices.append(chunk_id)
+            box_texts.append(str(item.get("text", "")).strip())
+            box_scores.append(float(item.get("score", 0.0)))
+            boxes.append(_normalized_box(item.get("box"), frame_shape))
+    atomic_save_npz(
+        output_path,
+        chunk_times_ms=chunk_times_ms,
+        embeddings=np.asarray(embeddings, dtype=np.float16),
+        embedding_chunk_indices=np.asarray(embedding_chunk_indices, dtype=np.int32),
+        box_chunk_indices=np.asarray(box_chunk_indices, dtype=np.int32),
+        box_texts=np.asarray(box_texts, dtype="U"),
+        box_scores=np.asarray(box_scores, dtype=np.float32),
+        boxes=np.stack(boxes).astype(np.float32) if boxes else np.empty((0, 4, 2), dtype=np.float32),
+    )

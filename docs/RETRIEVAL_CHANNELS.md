@@ -1,15 +1,28 @@
 # 检索通道协议
 
-本文档是 MomentSeek visual / face / ASR / OCR 通道的权威协议说明。
+本文档是 MomentSeek visual / face / ASR / OCR 通道的权威协议说明。索引格式当前为 **schema v3**。
 
 ## 总览
 
+每个视频的索引目录固定为：
+
+```text
+runtime/indexes/{video_id}/
+  index_manifest.json
+  visual.npz
+  face.npz
+  asr.npz
+  ocr.npz
+```
+
+`index_manifest.json` 存小元信息，`.npz` 只存检索所需数组。v3 不兼容旧索引；如果只有旧的 `faces.npz`、`asr.json`、`ocr.json` 或 visual v2 文件，必须重跑对应通道索引。
+
 | 通道 | 索引频率 | 模型 / 表征 | 存储文件 | 召回粒度 |
 |---|---:|---|---|---|
-| `visual` | 5fps，5s bucket | SigLIP2 So400m 384，1152-d float32 | `visual.npz` | 5s bucket，按最佳帧 MaxSim 排序 |
-| `face` | 当前服务器 1fps | InsightFace `buffalo_l`，ArcFace 512-d float32 | `faces.npz` | 人脸 track |
-| `asr` | ASR 模型 chunk | Whisper small + 可选 MiniLM 384-d semantic embedding | `asr.json`, `asr_semantic.npz` | ASR chunk |
-| `ocr` | 0.05fps，约每 20s 一帧 | RapidOCR PP-OCRv4 + 可选 MiniLM 384-d semantic embedding | `ocr.json`, `ocr_semantic.npz` | OCR chunk |
+| `visual` | 默认 5fps，5s bucket | SigLIP2/CLIP image-text embedding | `visual.npz` | 5s bucket，按 bucket 内最佳帧 MaxSim 排序 |
+| `face` | 默认 1fps | InsightFace `buffalo_l`，ArcFace identity embedding | `face.npz` | 人脸 track |
+| `asr` | ASR 模型 chunk | Whisper/FunASR 文本 + 可选 MiniLM semantic embedding | `asr.npz` | ASR chunk |
+| `ocr` | 默认 0.05fps，约每 20s 一帧 | RapidOCR PP-OCRv4 文本框 + 可选 MiniLM semantic embedding | `ocr.npz` | OCR sampled-frame chunk |
 
 不同向量空间不能混用：
 
@@ -17,65 +30,74 @@
 - Face ArcFace 是身份空间。
 - ASR/OCR semantic 是 MiniLM 文本空间。
 
+## Manifest
+
+`index_manifest.json` 示例：
+
+```json
+{
+  "schema_version": 3,
+  "video_id": "video-1",
+  "duration_ms": 120000,
+  "segment_ms": 5000,
+  "channels": {
+    "visual": {
+      "file": "visual.npz",
+      "model_key": "siglip2-so400m-384",
+      "embedding_space": "siglip2-image-text",
+      "sample_fps": 5.0,
+      "decode_status": "complete"
+    }
+  }
+}
+```
+
+Manifest 只保存少量元信息，不保存每帧/每 chunk 重复字段。`embedding_dim` 和 `embedding_dtype` 从数组 shape/dtype 或模型注册表推断，不在 manifest 中重复存储。
+
 ## Visual
 
-当前模型：
+当前默认模型：
 
 ```text
 siglip2-so400m-384
 ```
 
-索引流程：
-
-```text
-video -> 5fps 抽帧 -> decode height 256 -> SigLIP2 frame embeddings
--> 按 5s bucket 分组
--> 同时保存帧级 embedding 和 segment mean embedding
-```
-
-`visual.npz` schema v2：
+`visual.npz` v3：
 
 | 字段 | 类型 / shape | 含义 |
 |---|---|---|
-| `schema_version` | `[1] int16` | 当前为 2 |
-| `segment_ids` | `[segments] int32` | 5s bucket id |
-| `embeddings` | `[segments, 1152] float32` | segment mean embedding |
-| `start_times` | `[segments] float32` | bucket 起始时间 |
-| `end_times` | `[segments] float32` | bucket 结束时间 |
-| `thumbnails` | `[segments] str` | 代表缩略图 |
-| `frame_embeddings` | `[frames, 1152] float32` | 帧级 embedding |
-| `frame_times` | `[frames] float32` | 帧时间戳 |
-| `frame_segment_ids` | `[frames] int32` | 帧所属 bucket |
-| `model` | `str` | 模型显示名 |
-| `visual_model` | `str` | 模型 key |
-| `model_backend` | `str` | 当前通常为 `hf` |
-| `model_id` | `str` | Hugging Face 或本地模型 id |
+| `frame_embeddings` | `[num_frames, dim] float16` | 帧级视觉向量 |
+| `frame_times_ms` | `[num_frames] int32` | 每个帧向量对应的视频时间戳 |
+| `segment_frame_offsets` | `[segments_total + 1] int32` | 每个 5s bucket 在 `frame_embeddings` 中的半开区间 `[start, end)` |
 
-当前召回逻辑：
+`segment_frame_offsets` 覆盖完整视频 timeline。某个 bucket 没有成功解码帧时，offset start/end 相同；这允许部分解码失败或空 bucket 不破坏数组对齐。
+
+召回逻辑：
 
 ```text
-query text/image -> SigLIP2 query embedding
+query text/image -> visual query embedding
 -> 与 frame_embeddings 做 cosine
--> 每个 5s bucket 取 top1 frame similarity
+-> 每个 bucket 取 top1 frame similarity
 -> raw_score = visual_top1
 -> 返回 5s bucket
 ```
 
-返回 evidence 字段：
+Visual evidence 主要字段：
 
 ```text
 raw_score
 visual_top1
 visual_top3
 visual_mean
-best_time
+best_time / best_ms
 percentile
 robust_z
-distribution_median
-distribution_mad
+unit_type = "segment"
+unit_id = segment_id
+features
 ```
 
-已知质量风险：per-video percentile 能帮助找到每个视频内部最突出的片段，但在大量无关视频参与搜索时，可能把无关视频的“本视频内部最佳片段”排得过高。见 `docs/ISSUES_AND_ROADMAP.md` 的 `RQ-001`。
+已知质量风险：per-video percentile 能帮助找到每个视频内部最突出的片段，但在大量无关视频参与搜索时，可能把无关视频的“本视频内部最佳片段”排得过高。见 `docs/ISSUES_AND_ROADMAP.md` 的检索效果优化问题池。
 
 ## Face
 
@@ -83,28 +105,21 @@ distribution_mad
 
 ```text
 InsightFace buffalo_l
-ArcFace 512-d float32
+ArcFace identity embedding
 ```
 
-索引流程：
-
-```text
-video -> 抽帧 -> 人脸检测 -> ArcFace embeddings
--> embedding cosine + bbox IoU 做简单 track
--> 聚合 track embedding
--> 保存最佳人脸 crop
-```
-
-`faces.npz` 字段：
+`face.npz` v3：
 
 | 字段 | 类型 / shape | 含义 |
 |---|---|---|
-| `embeddings` | `[tracks, 512] float32` | 每条 track 的平均身份向量 |
-| `start_times` | `[tracks] float32` | track 起始时间 |
-| `end_times` | `[tracks] float32` | track 结束时间 |
-| `thumbnails` | `[tracks] str` | 最佳人脸 crop |
-| `qualities` | `[tracks] float32` | 人脸质量 |
-| `model` | `str` | 模型名 |
+| `embeddings` | `[num_tracks, 512] float32` | 每条人脸 track 的平均身份向量 |
+| `track_times_ms` | `[num_tracks, 3] int32` | `[start_ms, end_ms, best_shot_ms]` |
+
+Track id 就是数组行号。缩略图固定为：
+
+```text
+runtime/thumbnails/{video_id}/face_{track_id:06d}.jpg
+```
 
 查询来源：
 
@@ -119,42 +134,34 @@ video -> 抽帧 -> 人脸检测 -> ArcFace embeddings
 cosine >= 0.35
 ```
 
-face confidence 在 `search.py::face_confidence` 中用 logistic 函数校准。
+Face evidence 主要字段：
+
+```text
+raw_score
+best_time / best_ms
+unit_type = "track"
+unit_id = track_id
+features.face_cosine
+```
 
 ## ASR
 
-当前服务器引擎：
+当前服务器常用引擎：
 
 ```text
 Whisper small
 ```
 
-`asr.json`：
-
-```json
-{
-  "engine": "whisper",
-  "model": "small",
-  "language": "en",
-  "chunks": [
-    {
-      "start_time": 12.34,
-      "end_time": 18.9,
-      "text": "..."
-    }
-  ]
-}
-```
-
-可选 `asr_semantic.npz`：
+`asr.npz` v3：
 
 | 字段 | 类型 / shape | 含义 |
 |---|---|---|
-| `schema_version` | `[1] int16` | 当前为 1 |
-| `embeddings` | `[chunks, 384] float32` | MiniLM 文本向量 |
-| `chunk_indices` | `[chunks] int32` | 对应 `asr.json` 的 chunk index |
-| `model` | `str` | semantic 模型名 |
-| `device` | `str` | semantic 设备 |
+| `chunk_times_ms` | `[num_chunks, 2] int32` | `[start_ms, end_ms]` |
+| `texts` | `[num_chunks] str` | ASR chunk 文本 |
+| `embeddings` | `[num_semantic_chunks, 384] float16` | 可选 MiniLM semantic embedding；不可用时为空数组 |
+| `embedding_chunk_indices` | `[num_semantic_chunks] int32` | 每条 semantic embedding 对应的 `texts` 行号 |
+
+ASR semantic 是可选能力。语义模型不可用时仍保留 `chunk_times_ms/texts`，搜索自动退回 lexical。
 
 召回逻辑：
 
@@ -164,12 +171,16 @@ query text -> lexical score
 combined_score = max(lexical_score, 0.65 * semantic_score + 0.35 * lexical_score)
 ```
 
-返回 evidence 字段：
+ASR evidence 主要字段：
 
 ```text
 lexical_score
 semantic_score
 semantic_cosine
+text
+unit_type = "chunk"
+unit_id = chunk_id
+features
 ```
 
 ## OCR
@@ -177,39 +188,31 @@ semantic_cosine
 当前引擎：
 
 ```text
-RapidOCR / PP-OCRv4 English mobile
+RapidOCR / PP-OCRv4
 sample_fps = 0.05
 decode_height = 720
 min_confidence = 0.5
 ```
 
-`ocr.json`：
+OCR 的 chunk 是一次 OCR sampled frame/time window；文本与 score 在 box 级保存，chunk 文本在搜索时由该 chunk 的 boxes 拼接得到。
 
-```json
-{
-  "schema_version": 1,
-  "engine": "rapidocr",
-  "sample_fps": 0.05,
-  "chunks": [
-    {
-      "start_time": 40.0,
-      "end_time": 60.0,
-      "text": "...",
-      "items": [
-        {
-          "text": "...",
-          "score": 0.9231,
-          "box": [[0, 0], [1, 0], [1, 1], [0, 1]]
-        }
-      ],
-      "thumbnail": "ocr_000002.jpg",
-      "score": 0.9231
-    }
-  ]
-}
+`ocr.npz` v3：
+
+| 字段 | 类型 / shape | 含义 |
+|---|---|---|
+| `chunk_times_ms` | `[num_chunks, 3] int32` | `[start_ms, end_ms, frame_ms]` |
+| `embeddings` | `[num_semantic_chunks, 384] float16` | 可选 MiniLM semantic embedding；不可用时为空数组 |
+| `embedding_chunk_indices` | `[num_semantic_chunks] int32` | 每条 semantic embedding 对应的 chunk 行号 |
+| `box_chunk_indices` | `[num_boxes] int32` | 每个 OCR box 属于哪个 chunk |
+| `box_texts` | `[num_boxes] str` | OCR box 文本 |
+| `box_scores` | `[num_boxes] float32` | OCR box 置信度 |
+| `boxes` | `[num_boxes, 4, 2] float32` | 归一化到 `[0, 1]` 的四点框 |
+
+缩略图固定为：
+
+```text
+runtime/thumbnails/{video_id}/ocr_{chunk_id:06d}.jpg
 ```
-
-可选 `ocr_semantic.npz` 使用和 ASR semantic 类似的 schema。
 
 OCR 检索复用 ASR 的 lexical + semantic candidate 逻辑，返回 OCR chunk。
 
@@ -241,4 +244,14 @@ clip_url
 decision
 above_threshold
 evidence[]
+```
+
+`evidence[]` 保留旧的展示字段，并新增统一定位字段：
+
+```text
+unit_type
+unit_id
+best_ms
+text
+features
 ```

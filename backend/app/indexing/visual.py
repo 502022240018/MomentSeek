@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -468,6 +468,7 @@ def build_visual_index(
     model_cache_dir: str | Path | None = None,
     decode_height: int = 0,
     prefer_ffmpeg: bool = True,
+    duration_seconds: float | int | None = None,
 ) -> dict:
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
@@ -480,71 +481,74 @@ def build_visual_index(
             model_cache_dir=model_cache_dir,
         )
     device = encoder.device
-    buckets: dict[int, list[np.ndarray]] = defaultdict(list)
-    times: dict[int, list[float]] = defaultdict(list)
     thumbnails: dict[int, str] = {}
     frame_embeddings: list[np.ndarray] = []
-    frame_times: list[float] = []
-    frame_segment_ids: list[int] = []
+    frame_times_ms: list[int] = []
     pending_frames: list[np.ndarray] = []
-    pending_meta: list[tuple[int, float]] = []
+    pending_meta: list[tuple[int, int]] = []
     thumbnail_dir = Path(thumbnail_dir)
     total_frames = 0
+    segment_ms = max(1, int(round(float(segment_seconds) * 1000)))
 
     def flush() -> None:
         nonlocal pending_frames, pending_meta
         if not pending_frames:
             return
         vectors = encoder.encode_frames(pending_frames)
-        for (bucket, timestamp), vector in zip(pending_meta, vectors):
-            buckets[bucket].append(vector)
-            times[bucket].append(timestamp)
-            frame_embeddings.append(vector)
-            frame_times.append(timestamp)
-            frame_segment_ids.append(bucket)
+        for (_bucket, timestamp_ms), vector in zip(pending_meta, vectors):
+            frame_embeddings.append(normalize(vector))
+            frame_times_ms.append(timestamp_ms)
         pending_frames, pending_meta = [], []
 
     for timestamp, frame in read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg):
-        bucket = int(timestamp // segment_seconds)
+        timestamp_ms = int(round(float(timestamp) * 1000))
+        bucket = timestamp_ms // segment_ms
         if bucket not in thumbnails:
             thumbnail = thumbnail_dir / f"visual_{bucket:06d}.jpg"
             save_thumbnail(frame, thumbnail)
             thumbnails[bucket] = thumbnail.name
         pending_frames.append(frame)
-        pending_meta.append((bucket, timestamp))
+        pending_meta.append((bucket, timestamp_ms))
         total_frames += 1
         if len(pending_frames) >= batch_size:
             flush()
     flush()
-    if not buckets:
+    if not frame_embeddings:
         raise RuntimeError("未从视频抽取到画面")
 
-    bucket_ids = sorted(buckets)
-    embeddings = np.stack([normalize(np.mean(buckets[bucket], axis=0)) for bucket in bucket_ids])
-    starts = np.asarray([bucket * segment_seconds for bucket in bucket_ids], dtype=np.float32)
-    ends = np.asarray([max(times[bucket]) + 1 / sample_fps for bucket in bucket_ids], dtype=np.float32)
-    thumbnail_names = np.asarray([thumbnails[bucket] for bucket in bucket_ids], dtype="U128")
+    frame_times_ms_array = np.asarray(frame_times_ms, dtype=np.int32)
+    embeddings = np.stack(frame_embeddings).astype(np.float32)
+    order = np.argsort(frame_times_ms_array)
+    frame_times_ms_array = frame_times_ms_array[order]
+    embeddings = embeddings[order]
+    frame_segment_ids = frame_times_ms_array // segment_ms
+    inferred_duration_ms = int(frame_times_ms_array.max()) + max(1, int(round(1000 / sample_fps)))
+    duration_ms = int(round(float(duration_seconds or 0) * 1000))
+    if duration_ms <= 0:
+        duration_ms = inferred_duration_ms
+    max_bucket = int(frame_segment_ids.max()) if len(frame_segment_ids) else 0
+    segments_total = max(1, int(math.ceil(duration_ms / segment_ms)), max_bucket + 1)
+    segment_frame_offsets = np.searchsorted(
+        frame_segment_ids,
+        np.arange(segments_total + 1, dtype=np.int32),
+        side="left",
+    ).astype(np.int32)
+    segments_with_frames = int(len(np.unique(frame_segment_ids)))
+    empty_segments = max(0, segments_total - segments_with_frames)
     atomic_save_npz(
         output_path,
-        schema_version=np.asarray([2], dtype=np.int16),
-        segment_ids=np.asarray(bucket_ids, dtype=np.int32),
-        embeddings=embeddings.astype(np.float32),
-        start_times=starts,
-        end_times=ends,
-        thumbnails=thumbnail_names,
-        frame_embeddings=np.stack(frame_embeddings).astype(np.float32),
-        frame_times=np.asarray(frame_times, dtype=np.float32),
-        frame_segment_ids=np.asarray(frame_segment_ids, dtype=np.int32),
-        model=np.asarray([encoder.model_label]),
-        visual_model=np.asarray([encoder.model_key]),
-        model_backend=np.asarray([encoder.backend]),
-        model_id=np.asarray([encoder.model_id or ""]),
+        frame_embeddings=embeddings.astype(np.float16),
+        frame_times_ms=frame_times_ms_array.astype(np.int32),
+        segment_frame_offsets=segment_frame_offsets,
     )
     return {
-        "segments": len(bucket_ids),
+        "segments_total": segments_total,
+        "segments_with_frames": segments_with_frames,
+        "empty_segments": empty_segments,
         "frames": total_frames,
-        "schema_version": 2,
+        "schema_version": 3,
         "device": device,
         "visual_model": encoder.model_key,
         "model": encoder.model_label,
+        "decode_status": "complete" if empty_segments == 0 else "partial",
     }

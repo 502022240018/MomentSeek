@@ -57,6 +57,7 @@ class Track:
     bbox: np.ndarray
     embeddings: list[np.ndarray] = field(default_factory=list)
     best_quality: float = 0
+    best_time: float = 0
     best_crop: np.ndarray | None = None
 
 
@@ -129,33 +130,38 @@ def build_face_index(
                     max(0, x1 - pad):min(width, x2 + pad),
                 ].copy()
                 track.best_quality = quality
+                track.best_time = timestamp
     finished.extend(active)
 
-    embeddings, starts, ends, thumbnails, qualities = [], [], [], [], []
+    embeddings, track_times_ms = [], []
     thumbnail_dir = Path(thumbnail_dir)
     for track in finished:
         if not track.embeddings:
             continue
-        thumbnail = thumbnail_dir / f"face_{track.number:06d}.jpg"
+        row_index = len(embeddings)
+        thumbnail = thumbnail_dir / f"face_{row_index:06d}.jpg"
         if track.best_crop is not None and track.best_crop.size:
             save_thumbnail(track.best_crop, thumbnail, max_width=240)
         embeddings.append(normalize(np.mean(track.embeddings, axis=0)))
-        starts.append(track.start)
-        ends.append(track.end)
-        thumbnails.append(thumbnail.name if thumbnail.exists() else "")
-        qualities.append(track.best_quality)
+        track_times_ms.append([
+            int(round(track.start * 1000)),
+            int(round(track.end * 1000)),
+            int(round(track.best_time * 1000)),
+        ])
 
     dimension = len(embeddings[0]) if embeddings else 512
     atomic_save_npz(
         output_path,
         embeddings=np.stack(embeddings).astype(np.float32) if embeddings else np.empty((0, dimension), np.float32),
-        start_times=np.asarray(starts, np.float32),
-        end_times=np.asarray(ends, np.float32),
-        thumbnails=np.asarray(thumbnails, dtype="U128"),
-        qualities=np.asarray(qualities, np.float32),
-        model=np.asarray([model_name]),
+        track_times_ms=np.asarray(track_times_ms, dtype=np.int32).reshape((-1, 3)),
     )
-    return {"tracks": len(embeddings), "detections": detections, "provider": encoder.provider}
+    return {
+        "tracks": len(embeddings),
+        "detections": detections,
+        "provider": encoder.provider,
+        "schema_version": 3,
+        "decode_status": "complete" if embeddings else "empty",
+    }
 
 
 def encode_face_reference(

@@ -1,6 +1,8 @@
 import json
 import subprocess
 
+import numpy as np
+
 from app.indexing import asr
 from app.indexing.asr import build_asr_index, load_sidecar
 from app.search import lexical_score
@@ -31,7 +33,7 @@ def test_asr_index_handles_video_without_audio(tmp_path, monkeypatch):
         raise subprocess.CalledProcessError(1, ["ffmpeg"])
 
     monkeypatch.setattr(asr, "extract_audio", no_audio)
-    output_path = tmp_path / "asr.json"
+    output_path = tmp_path / "asr.npz"
     semantic_path = tmp_path / "asr_semantic.npz"
     semantic_path.write_bytes(b"stale")
 
@@ -48,5 +50,10 @@ def test_asr_index_handles_video_without_audio(tmp_path, monkeypatch):
 
     assert result["engine"] == "no_audio"
     assert result["chunks"] == 0
-    assert json.loads(output_path.read_text(encoding="utf-8"))["chunks"] == []
+    assert result["decode_status"] == "empty"
+    with np.load(output_path, allow_pickle=False) as data:
+        assert data["chunk_times_ms"].shape == (0, 2)
+        assert data["texts"].tolist() == []
+        assert data["embeddings"].shape == (0, 0)
+        assert data["embedding_chunk_indices"].tolist() == []
     assert not semantic_path.exists()
