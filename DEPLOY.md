@@ -40,7 +40,7 @@ git status --ignored --short
 Linux/macOS：
 
 ```bash
-git clone git@github.com:YOUR_NAME/momentseek-mvp.git
+git clone https://github.com/502022240018/MomentSeek.git momentseek-mvp
 cd momentseek-mvp
 [ -f .env ] || cp deploy/env/dev.cpu.example .env
 scripts/bootstrap_dev.sh dev.cpu --download
@@ -51,7 +51,7 @@ scripts/start_frontend.sh
 Windows：
 
 ```powershell
-git clone git@github.com:YOUR_NAME/momentseek-mvp.git
+git clone https://github.com/502022240018/MomentSeek.git momentseek-mvp
 cd momentseek-mvp
 if (-not (Test-Path .env)) { Copy-Item deploy/env/dev.cpu.example .env }
 scripts/bootstrap_dev.ps1 -Profile dev.cpu -DownloadModels
