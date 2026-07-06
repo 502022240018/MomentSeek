@@ -64,7 +64,6 @@ frame_embeddings        [num_frames, dim]
 frame_times_ms          [num_frames]
 segment_frame_offsets   [num_segments + 1]
 segment_times_ms        [num_segments, 2]  可选，镜头或子段真实起止时间
-segment_key_ms          [num_segments]     可选，代表帧或缩略图时间
 ```
 
 字段语义：
@@ -73,7 +72,6 @@ segment_key_ms          [num_segments]     可选，代表帧或缩略图时间
 |---|---|
 | `segment_frame_offsets` | 检索加速结构，表示每个 segment 对应 `frame_embeddings` 的半开行区间 |
 | `segment_times_ms` | 时间语义结构，表示每个 segment 在原视频里的真实起止时间 |
-| `segment_key_ms` | 展示辅助结构，表示缩略图或代表帧时间 |
 
 `segment_frame_offsets` 和 `segment_times_ms` 不重复。固定 5s 时 `segment_times_ms` 可以由 `segment_ms` 推导；镜头级分段时 segment 长度不固定，必须显式保存。
 
@@ -127,7 +125,7 @@ shot detection -> raw shots -> normalize shots -> split long shots -> assign fra
 2. 过短 shot 可并入相邻 shot 或保留但设置最小时长保护。
 3. 过长 shot 按最大时长继续切成子段，避免返回几十秒长片段。
 4. 每个 segment 至少应尽量包含一帧 embedding；没有帧的 segment 可跳过或保留空 offset，取决于实现复杂度。
-5. 缩略图仍命名为 `visual_{segment_id:06d}.jpg`，但取 `segment_key_ms` 附近的代表帧。
+5. 缩略图仍命名为 `visual_{segment_id:06d}.jpg`，第一版可取 segment 内第一帧或中点附近帧。后续如果要优化 shot card 或缩略图代表性，再单独增加 `segment_key_ms`。
 
 第一版推荐默认参数：
 
@@ -159,7 +157,7 @@ backend/app/settings.py
 - 新增或内聚一个 shot detection helper，输出 `[(start_ms, end_ms)]`。
 - `build_visual_index()` 支持 `segment_strategy`。
 - 固定分段继续走旧逻辑。
-- shot 分段写出 `segment_times_ms` 和可选 `segment_key_ms`。
+- shot 分段写出 `segment_times_ms`。第一版不实现 `segment_key_ms`。
 - manifest 写入 visual 的 `segment_strategy`、`min_segment_ms`、`max_segment_ms` 等可选字段。
 - API request 可以先只在后端支持，前端暂不暴露；后续再加 UI 控件。
 
