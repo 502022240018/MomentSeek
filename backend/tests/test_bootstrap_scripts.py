@@ -40,10 +40,28 @@ def _fake_tool_path(tmp_path: Path) -> str:
     return str(bin_dir)
 
 
+def _usable_bash() -> str | None:
+    candidates = [
+        shutil.which("bash"),
+        r"C:\Program Files\Git\bin\bash.exe",
+    ]
+    for candidate in candidates:
+        if not candidate or not Path(candidate).exists():
+            continue
+        result = subprocess.run(
+            [candidate, "-lc", "exit 0"],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return candidate
+    return None
+
+
 def test_bash_bootstrap_rejects_ascend_profiles_before_touching_env(tmp_path):
-    bash = shutil.which("bash") or r"C:\Program Files\Git\bin\bash.exe"
-    if not Path(bash).exists():
-        pytest.skip("bash is not available")
+    bash = _usable_bash()
+    if bash is None:
+        pytest.skip("usable bash is not available")
     root, script = _prepare_bootstrap_fixture(tmp_path, "bootstrap_dev.sh")
     env = os.environ.copy()
     env["PATH"] = _fake_tool_path(tmp_path) + os.pathsep + env.get("PATH", "")

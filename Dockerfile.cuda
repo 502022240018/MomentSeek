@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+FROM node:20-alpine AS frontend-build
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM python:3.11-slim
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+ARG APT_MIRROR=
+ARG APT_SECURITY_MIRROR=
+RUN set -eux; \
+    echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries; \
+    if [ -n "$APT_MIRROR" ]; then \
+        sed -i "s|http://deb.debian.org/debian|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    if [ -n "$APT_SECURITY_MIRROR" ]; then \
+        sed -i "s|http://deb.debian.org/debian-security|$APT_SECURITY_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    apt-get update \
+    && apt-get install -y --no-install-recommends --fix-missing ffmpeg libgl1 libglib2.0-0 gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app/backend
+COPY backend/requirements*.txt ./
+ARG PIP_INDEX_URL=
+ARG PIP_EXTRA_INDEX_URL=
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -eux; \
+    pip_args="--default-timeout=120 --retries=10"; \
+    if [ -n "$PIP_INDEX_URL" ]; then pip_args="$pip_args -i $PIP_INDEX_URL"; fi; \
+    if [ -n "$PIP_EXTRA_INDEX_URL" ]; then pip_args="$pip_args --extra-index-url $PIP_EXTRA_INDEX_URL"; fi; \
+    pip install $pip_args -r requirements-cuda.txt
+COPY backend/ ./
+COPY --from=frontend-build /src/frontend/dist ./app/static
+RUN mkdir -p /app/runtime /app/models
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -32,6 +32,7 @@ frontend/          React + TypeScript Playground
 runtime/           上传视频、SQLite 元数据、索引与缩略图（不进 Git）
 models/            SigLIP2/CLIP、InsightFace、ASR、OCR 权重（不进 Git）
 compose.yml        CPU/无卡部署
+compose.cuda.yml   本地 NVIDIA/CUDA GPU 覆盖配置
 compose.ascend.yml 昇腾单卡隔离覆盖配置
 ```
 
@@ -71,6 +72,15 @@ CPU 模式（不会访问任何 NPU）：
 cp deploy/env/dev.cpu.example .env
 docker compose -f compose.yml up -d --build
 ```
+
+本地 NVIDIA/CUDA GPU 模式：
+
+```bash
+cp deploy/env/dev.cuda.example .env
+docker compose -f compose.yml -f compose.cuda.yml up -d --build
+```
+
+如果要把服务器 runtime 迁到本地并接管当前 Cloudflare quick tunnel，先按 [docs/LOCAL_GPU_MIGRATION.md](docs/LOCAL_GPU_MIGRATION.md) 同步 `runtime-server/` 和必要模型，再把 `.env` 的 `APP_PORT` / `APP_PUBLIC_URL` 改到当前本地 tunnel 入口。
 
 当前 ARM64 昇腾服务器可先使用兼容运行时、但不映射 NPU：
 

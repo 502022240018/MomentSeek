@@ -54,6 +54,45 @@ def test_compose_runtime_and_model_mounts_are_host_configurable():
     assert prod["HOST_MODEL_DIR"] == "/opt/momentseek/models"
 
 
+def test_cuda_docker_profile_mounts_migrated_runtime_and_enables_gpu():
+    compose = _read("compose.cuda.yml")
+    dockerfile = _read("Dockerfile.cuda")
+    dev_cuda = _parse_env("deploy/env/dev.cuda.example")
+    gitignore = _read(".gitignore")
+    migration_doc = _read("docs/LOCAL_GPU_MIGRATION.md")
+
+    assert "dockerfile: Dockerfile.cuda" in compose
+    assert "APT_MIRROR:" in compose
+    assert "APT_SECURITY_MIRROR:" in compose
+    assert "ARG APT_MIRROR" in dockerfile
+    assert "Acquire::Retries" in dockerfile
+    assert "PIP_INDEX_URL:" in compose
+    assert "ARG PIP_INDEX_URL" in dockerfile
+    assert "--mount=type=cache,target=/root/.cache/pip" in dockerfile
+    assert "--default-timeout=120" in dockerfile
+    assert 'cpus: "${APP_CPUS:-12}"' in compose
+    assert 'mem_limit: "${APP_MEMORY_LIMIT:-12g}"' in compose
+    assert "NPU_ENABLED: \"false\"" in compose
+    assert "CUDA_ENABLED: \"true\"" in compose
+    assert "APP_DATA_DIR: /app/runtime" in compose
+    assert "${HOST_RUNTIME_DIR:-./runtime-server}:/app/runtime" in compose
+    assert "capabilities: [gpu]" in compose
+    assert "requirements-cuda.txt" in dockerfile
+    assert dev_cuda["ENV_PROFILE"] == "dev.cuda"
+    assert dev_cuda["CUDA_ENABLED"] == "true"
+    assert dev_cuda["NPU_ENABLED"] == "false"
+    assert dev_cuda["APP_CPUS"] == "12"
+    assert dev_cuda["APP_MEMORY_LIMIT"] == "12g"
+    assert dev_cuda["VISUAL_MODEL"] == "siglip2-so400m-384"
+    assert dev_cuda["VISUAL_HF_CACHE_DIR"] == "/app/runtime/hf_cache"
+    assert "VISUAL_HF_CACHE_DIR: \"${VISUAL_HF_CACHE_DIR:-/app/runtime/hf_cache}\"" in compose
+    assert dev_cuda["HOST_RUNTIME_DIR"] == "./runtime-server"
+    assert dev_cuda["HOST_MODEL_DIR"] == "./models"
+    assert "runtime-server/" in gitignore
+    assert "runtime-server" in migration_doc
+    assert "compose.cuda.yml" in migration_doc
+
+
 def test_docker_cpu_docs_use_dev_cpu_port():
     dev_cpu = _parse_env("deploy/env/dev.cpu.example")
     expected_health = f"http://127.0.0.1:{dev_cpu['APP_PORT']}/api/health"

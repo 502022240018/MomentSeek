@@ -8,14 +8,15 @@
 
 1. `docs/CURRENT.md`：当前项目、服务器、模型和部署状态。
 2. `docs/DEVELOPMENT.md`：本地开发 profile、启动脚本、模型下载和 smoke check。
-3. `docs/MODELS.md`：模型清单、缓存目录、lock 和线上禁止运行时下载规则。
-4. `docs/DEPLOYMENT.md`：staging/prod/new-server 的可复制部署流程。
-5. `docs/ISSUES_AND_ROADMAP.md`：当前问题池和后续优化路线。
-6. `docs/RETRIEVAL_CHANNELS.md`：visual / face / ASR / OCR 的索引与召回协议。
-7. `docs/ARCHITECTURE.md`：系统架构、API Surface、模块边界。
-8. `docs/OPERATIONS.md`：共享服务器、公网入口、安全操作规范。
-9. `docs/VALIDATION.md`：验证命令和完成声明规则。
-10. `docs/LESSONS_LEARNED.md`：历史踩坑、事故教训、工具注意事项。
+3. `docs/LOCAL_GPU_MIGRATION.md`：服务器 runtime 迁到本地 Docker GPU 并接管公网入口。
+4. `docs/MODELS.md`：模型清单、缓存目录、lock 和线上禁止运行时下载规则。
+5. `docs/DEPLOYMENT.md`：staging/prod/new-server 的可复制部署流程。
+6. `docs/ISSUES_AND_ROADMAP.md`：当前问题池和后续优化路线。
+7. `docs/RETRIEVAL_CHANNELS.md`：visual / face / ASR / OCR 的索引与召回协议。
+8. `docs/ARCHITECTURE.md`：系统架构、API Surface、模块边界。
+9. `docs/OPERATIONS.md`：共享服务器、公网入口、安全操作规范。
+10. `docs/VALIDATION.md`：验证命令和完成声明规则。
+11. `docs/LESSONS_LEARNED.md`：历史踩坑、事故教训、工具注意事项。
 
 实验结论看 `docs/experiments/README.md`。
 可复现实验资产、manifest、query、schema 看 `eval/README.md` 和对应 `eval/<area>/README.md`。
@@ -27,6 +28,7 @@
 ```text
 系统当前状态变化 -> docs/CURRENT.md
 开发启动流程变化 -> docs/DEVELOPMENT.md
+服务器 runtime 迁移到本地 GPU -> docs/LOCAL_GPU_MIGRATION.md
 部署流程或 release manifest 变化 -> docs/DEPLOYMENT.md
 模型清单、缓存和下载策略变化 -> docs/MODELS.md
 架构或模块边界变化 -> docs/ARCHITECTURE.md
@@ -49,6 +51,7 @@ API 新增/删除/语义变化 -> docs/ARCHITECTURE.md 的 API Surface 章节
 |---|---|
 | `CURRENT.md` | 最新事实状态快照 |
 | `DEVELOPMENT.md` | 本地开发环境、profile、启动脚本和 smoke check |
+| `LOCAL_GPU_MIGRATION.md` | 服务器 runtime 迁到本地 Docker GPU、接管公网入口 |
 | `DEPLOYMENT.md` | release manifest、deployment record、staging/prod/new-server 部署流程 |
 | `MODELS.md` | 模型清单、缓存目录、models lock 和下载策略 |
 | `ARCHITECTURE.md` | 系统拓扑、数据流、模块边界、API Surface |

@@ -2,15 +2,19 @@ ENV_PROFILE=dev.cuda
 APP_PORT=8000
 APP_DATA_DIR=runtime
 APP_MODEL_DIR=models
+HOST_RUNTIME_DIR=./runtime-server
+HOST_MODEL_DIR=./models
 APP_PUBLIC_URL=http://127.0.0.1:8000
+APP_CPUS=12
+APP_MEMORY_LIMIT=12g
 NPU_ENABLED=false
 CUDA_ENABLED=true
 MODEL_IDLE_POLICY=process_exit
 INDEXER_MODE=subprocess
 CLIP_MODEL=ViT-B-32
 CLIP_PRETRAINED=openai
-VISUAL_MODEL=chinese-clip-vit-b16
-VISUAL_HF_CACHE_DIR=models/hf-cache
+VISUAL_MODEL=siglip2-so400m-384
+VISUAL_HF_CACHE_DIR=/app/runtime/hf_cache
 VISUAL_SAMPLE_FPS=2.0
 VISUAL_SEGMENT_SECONDS=5.0
 VISUAL_BATCH_SIZE=16
@@ -31,3 +35,10 @@ OCR_VERSION=PP-OCRv4
 OCR_SAMPLE_FPS=0.05
 OCR_SEMANTIC_ENABLED=true
 MODEL_MANIFEST=deploy/models/dev-full.models.json
+
+# Optional: set these when Debian apt downloads are slow or return 502.
+# APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
+# APT_SECURITY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian-security
+
+# Optional: set this when PyPI/files.pythonhosted downloads are slow or time out.
+# PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple

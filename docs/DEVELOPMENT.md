@@ -22,9 +22,11 @@ deploy/env/dev.cpu.example
 deploy/env/dev.cuda.example
 ```
 
-`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。开发 profile 的 visual runtime 默认是 `VISUAL_MODEL=chinese-clip-vit-b16`，manifest 对应 Hugging Face 模型 `OFA-Sys/chinese-clip-vit-base-patch16`。开发 profile 的必需校验项是 Hugging Face visual / semantic 模型；Face、Whisper、RapidOCR 在 bootstrap 阶段不阻塞，首次使用对应通道时仍要由库或本地缓存准备。staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载，也不能用 `scripts/bootstrap_dev.*` 准备环境。
+`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。`dev.cpu` 默认使用 `VISUAL_MODEL=chinese-clip-vit-b16`，用于 clean clone 最小验证；`dev.cuda` 默认使用 `VISUAL_MODEL=siglip2-so400m-384`，用于本地 GPU 演示或读取当前服务器迁移来的 SigLIP2 v3 索引。开发 profile 的必需校验项是 Hugging Face visual / semantic 模型；Face、Whisper、RapidOCR 在 bootstrap 阶段不阻塞，首次使用对应通道时仍要由库或本地缓存准备。staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载，也不能用 `scripts/bootstrap_dev.*` 准备环境。
 
 `scripts/bootstrap_dev.*` 只接受 `dev.cpu` 和 `dev.cuda`。它们安装的是本地开发依赖，不安装 CANN/torch_npu，也不负责准备 Ascend staging/prod。`dev.cuda` 只表示运行配置允许 CUDA；如果需要 GPU 加速，先准备匹配本机驱动的 CUDA/PyTorch 环境，并用 `python -c "import torch; print(torch.cuda.is_available())"` 验证。
+
+Docker GPU 演示或服务器 runtime 本地接管见 `docs/LOCAL_GPU_MIGRATION.md`。该流程把服务器数据同步到 `runtime-server/`，避免覆盖本地开发用 `runtime/`。
 
 ## Windows 快速启动
 

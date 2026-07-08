@@ -119,3 +119,73 @@
 相关文档：
   docs/README.md
 ```
+
+## 2026-07-07 本地 CUDA visual 设备字符串
+
+```text
+类别：Docker / CUDA / PyTorch
+现象：
+  本地 Docker GPU 后端 health 和 ASR 正常，但 visual 搜索返回：
+    Expected a torch.device with a specified index or an integer, but got:cuda
+根因：
+  visual 通道的 resolve_device 在 CUDA 可用时返回 "cuda"，
+  后续 torch.cuda.set_device(device) 需要 "cuda:0" 或整数设备号。
+影响：
+  SigLIP2 visual query encoder 无法在本地 CUDA 后端初始化，visual 搜索失败。
+经验：
+  NPU 的 "npu:0" 和 CUDA 的 "cuda:0" 都要显式带设备编号；
+  不要把 torch 的通用 device 字符串和 set_device 接口要求混为一谈。
+以后规则：
+  本地 CUDA profile 修改后至少验证：
+    1. /api/health
+    2. /api/videos
+    3. ASR 搜索
+    4. visual 搜索
+  visual 设备选择逻辑必须有单元测试覆盖。
+相关文档：
+  docs/LOCAL_GPU_MIGRATION.md
+```
+
+## 2026-07-07 Cloudflare quick tunnel 临时域名
+
+```text
+类别：公网入口
+现象：
+  旧 trycloudflare 域名 DNS 解析失败，前端无法访问。
+根因：
+  Cloudflare quick tunnel 是临时地址；进程退出或时间变化后，旧域名可能失效。
+影响：
+  这类失败不是后端 502，也不是 Docker API 崩溃，而是公网入口已经不存在。
+经验：
+  先检查本地 /api/health，再检查 cloudflared 进程和日志。
+以后规则：
+  quick tunnel 只适合自己和少数同学临时测试；
+  失效后用 runtime/tools/cloudflared.exe 重新创建，并把新地址写入 docs/CURRENT.md。
+相关文档：
+  docs/OPERATIONS.md
+  docs/LOCAL_GPU_MIGRATION.md
+```
+
+## 2026-07-07 ASR auto 语言与翻译型输出
+
+```text
+类别：ASR / indexing quality
+现象：
+  某些旧 ASR 索引里，中文台词被记录成等价英文文本，导致用户看到“原视频中文、索引英文”的错位。
+根因：
+  旧索引没有记录 Whisper task、requested_language、detected_language 等证据；
+  如果 ASR 调用链曾使用 translate 或旧路径产生翻译文本，后续无法从 manifest 追溯。
+影响：
+  中文 query 可能仍能被 multilingual embedding 找到一部分结果，但 lexical 匹配、证据展示和用户信任都会变差。
+经验：
+  ASR 文本语言异常时，先看 index_manifest.json 的 task/requested_language/detected_language；
+  再抽样打开 asr.npz 的 texts，而不是只看搜索结果。
+以后规则：
+  Whisper 必须显式 task="transcribe"；
+  asr_engine=auto 且 asr_language=auto 时应走 Whisper 自动识别，不能先走中文 FunASR；
+  ASR manifest 必须记录 task、requested_language、detected_language、postprocess_stats、text_profile；
+  发现旧索引疑似翻译输出时，优先 ASR-only 重跑，不要直接重跑全部通道。
+相关文档：
+  docs/RETRIEVAL_CHANNELS.md
+  docs/experiments/asr/2026-07-07-asr-postprocess-tuning.md
+```

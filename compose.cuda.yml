@@ -1,0 +1,36 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+      args:
+        APT_MIRROR: "${APT_MIRROR:-}"
+        APT_SECURITY_MIRROR: "${APT_SECURITY_MIRROR:-}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-}"
+        PIP_EXTRA_INDEX_URL: "${PIP_EXTRA_INDEX_URL:-}"
+    image: momentseek-mvp:cuda
+    cpus: "${APP_CPUS:-12}"
+    mem_limit: "${APP_MEMORY_LIMIT:-12g}"
+    environment:
+      ENV_PROFILE: "${ENV_PROFILE:-dev.cuda}"
+      APP_DATA_DIR: /app/runtime
+      APP_MODEL_DIR: /app/models
+      APP_PUBLIC_URL: "${APP_PUBLIC_URL:-http://127.0.0.1:8000}"
+      NPU_ENABLED: "false"
+      CUDA_ENABLED: "true"
+      MODEL_IDLE_POLICY: "${MODEL_IDLE_POLICY:-process_exit}"
+      VISUAL_MODEL: "${VISUAL_MODEL:-siglip2-so400m-384}"
+      VISUAL_HF_CACHE_DIR: "${VISUAL_HF_CACHE_DIR:-/app/runtime/hf_cache}"
+      ASR_SEMANTIC_DEVICE: "${ASR_SEMANTIC_DEVICE:-cpu}"
+      FACE_PROVIDER: "${FACE_PROVIDER:-cpu}"
+      OCR_DEVICE: "${OCR_DEVICE:-cpu}"
+    volumes:
+      - "${HOST_RUNTIME_DIR:-./runtime-server}:/app/runtime"
+      - "${HOST_MODEL_DIR:-./models}:/app/models"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

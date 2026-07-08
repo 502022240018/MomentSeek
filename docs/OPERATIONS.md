@@ -66,15 +66,29 @@ ssh root@110.126.0.52 "npu-smi info"
 当前短期方案可能是：
 
 ```text
-Cloudflare quick tunnel -> PC 127.0.0.1:18301 -> drama-server 127.0.0.1:18300
+Cloudflare quick tunnel -> PC 127.0.0.1:18301 -> local Docker backend
 ```
 
 前端 `failed to fetch` 时按顺序检查：
 
-1. 服务器后端 `127.0.0.1:18300` 是否健康。
-2. PC 本地 SSH 转发 `127.0.0.1:18301` 是否还在。
+1. PC 本地后端 `127.0.0.1:18301/api/health` 是否健康。
+2. Docker 容器 `momentseek-mvp-app` 是否 healthy。
 3. cloudflared 进程是否还在。
 4. 当前 trycloudflare 域名是否已经失效。
+
+本地接管时常用检查：
+
+```powershell
+docker ps --filter name=momentseek-mvp-app
+curl.exe http://127.0.0.1:18301/api/health
+Get-CimInstance Win32_Process -Filter "name='cloudflared.exe'" | Select-Object ProcessId,CommandLine
+```
+
+重新创建 quick tunnel：
+
+```powershell
+.\runtime\tools\cloudflared.exe tunnel --url http://127.0.0.1:18301 --no-autoupdate
+```
 
 当前项目只面向自己和少数同学测试，暂时继续使用临时公网方案。稳定公网入口记录在 `docs/ISSUES_AND_ROADMAP.md`。
 

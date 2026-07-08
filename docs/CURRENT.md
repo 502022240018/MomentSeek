@@ -1,6 +1,6 @@
 # MomentSeek 当前状态
 
-更新时间：2026-07-06
+更新时间：2026-07-07
 
 ## 项目位置
 
@@ -22,11 +22,49 @@ MomentSeek 是一个多模态视频检索 MVP，当前有四条检索通道：
 
 详细通道协议见 `docs/RETRIEVAL_CHANNELS.md`。
 
-## 服务器状态
+## 当前运行入口
+
+当前公网展示已从共享服务器 NPU 切到本机 Docker GPU 后端：
+
+```text
+Cloudflare quick tunnel
+-> PC 127.0.0.1:18301
+-> local Docker container momentseek-mvp-app:8000
+```
+
+当前本地容器配置摘要：
+
+```text
+容器：momentseek-mvp-app
+端口：宿主机 18301 -> 容器 8000
+runtime：./runtime-server -> /app/runtime
+CUDA_ENABLED=true
+NPU_ENABLED=false
+VISUAL_HF_CACHE_DIR=/app/runtime/hf_cache
+```
+
+2026-07-07 验证结果：
+
+```text
+本地 /api/health：status=ok, env_profile=dev.cuda, cuda_enabled=true
+本地 /api/videos：8 个视频
+本地 ASR 搜索“新疆美食”：返回命中
+本地 visual 搜索“烤包子”：返回命中
+公网 /api/health：status=ok
+公网 /api/videos：8 个视频
+```
+
+当前 quick tunnel 地址是临时地址，失效后需要重新启动 cloudflared：
+
+```text
+https://entertainment-grocery-independently-generators.trycloudflare.com
+```
+
+## 共享服务器状态
 
 ```text
 服务器：root@110.126.0.52
-当前容器：momentseek-current-app
+当前容器：momentseek-current-app（已停止，仅保留容器和 runtime，不删除）
 端口：宿主机 18300 -> 容器 8000
 runtime：/mnt/mog2/wyl/comfyui-wxy/momentseek-current/app/runtime
 代码：/mnt/mog2/wyl/comfyui-wxy/momentseek-current/app/backend
@@ -35,17 +73,19 @@ runtime：/mnt/mog2/wyl/comfyui-wxy/momentseek-current/app/runtime
 
 服务器是共享环境。任何 kill、restart、docker 操作前必须看 `docs/OPERATIONS.md`，不要影响 ComfyUI、VLLM 或其他人的任务。
 
-最近一次只读检查结果：
+最近一次停服前检查和停服后结果：
 
 ```text
-momentseek-current-app：Up, healthy, 0.0.0.0:18300->8000/tcp
-/api/health：status=ok, npu_enabled=true, npu_device_id=0, model_idle_policy=process_exit
-NPU 2：有 uvicorn 进程，占用符合 MomentSeek API 预期
+停服前 /api/jobs：active_count=0
+执行：docker stop momentseek-current-app
+momentseek-current-app：Exited (0)
+服务器 18300 /api/health：不可访问
+NPU 2：No running processes found
 ```
 
 ## 当前模型和索引状态
 
-当前服务器配置摘要：
+当前已迁移到本地的索引配置摘要：
 
 ```text
 visual_model = siglip2-so400m-384
@@ -86,23 +126,25 @@ v3 不兼容旧索引。部署新代码后，旧的 visual v2、`faces.npz`、`a
 ```text
 query -> SigLIP2 query embedding
 -> 与 frame_embeddings 做 cosine
--> 每个 5s bucket 取最大相似帧 top1
+-> 每个 visual segment 取最大相似帧 top1
 -> raw_score = visual_top1
--> 返回 5s bucket
+-> Candidate.score = visual_rank_score = clip((raw_score + 1) / 2, 0, 1)
+-> percentile / robust_z 只用于视频内判定和 evidence 诊断
+-> 返回固定 bucket 或 shot-aware segment
 ```
 
 ## 公网访问
 
-当前短期公网访问可能使用 Cloudflare quick tunnel，并通过用户 PC 中转：
+当前短期公网访问使用 Cloudflare quick tunnel，并通过用户 PC 中转：
 
 ```text
-Cloudflare quick tunnel -> PC 127.0.0.1:18301 -> drama-server 127.0.0.1:18300
+Cloudflare quick tunnel -> PC 127.0.0.1:18301 -> local Docker backend
 ```
 
 Quick tunnel 域名不是固定的。前端出现 `failed to fetch` 时，先检查：
 
-1. 服务器后端 `127.0.0.1:18300` 是否健康。
-2. PC 本地 SSH 转发 `127.0.0.1:18301` 是否还在。
+1. PC 本地后端 `127.0.0.1:18301/api/health` 是否健康。
+2. Docker 容器 `momentseek-mvp-app` 是否 healthy。
 3. cloudflared 是否还在。
 4. 当前 trycloudflare 域名是否过期。
 
@@ -115,4 +157,4 @@ Quick tunnel 域名不是固定的。前端出现 `failed to fetch` 时，先检
 - ASR/OCR semantic 索引是可选增强；缺失时会退回 lexical。
 - Visual MaxSim 提高短瞬间召回，但多视频搜索时可能增加误召，见 `docs/ISSUES_AND_ROADMAP.md` 的 `RQ-001`。
 - 首次搜索加载 SigLIP2 可能较慢。
-- NPU 2 是共享资源，服务器操作必须遵循 `docs/OPERATIONS.md`。
+- NPU 2 是共享资源，当前 MomentSeek 已释放；如未来要恢复服务器后端，必须遵循 `docs/OPERATIONS.md`。
