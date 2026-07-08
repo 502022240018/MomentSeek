@@ -66,6 +66,11 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             decode_height=settings.visual_decode_height,
             prefer_ffmpeg=settings.frame_reader == "ffmpeg",
             duration_seconds=float(video.get("duration") or 0),
+            segment_strategy=str(options.get("visual_segment_strategy", settings.visual_segment_strategy)),
+            min_segment_seconds=float(options.get("visual_min_segment_seconds", settings.visual_min_segment_seconds)),
+            max_segment_seconds=float(options.get("visual_max_segment_seconds", settings.visual_max_segment_seconds)),
+            shot_detector=str(options.get("visual_shot_detector", settings.visual_shot_detector)),
+            shot_detector_threshold=float(options.get("visual_shot_threshold", settings.visual_shot_threshold)),
         )
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result

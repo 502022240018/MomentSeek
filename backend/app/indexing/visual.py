@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from app.indexing.common import atomic_save_npz, normalize
-from app.media import read_frames, save_thumbnail
+from app.media import probe_video, read_frames, save_thumbnail
 
 
 def resolve_device(npu_enabled: bool, npu_device_id: int, cuda_enabled: bool = False) -> str:
@@ -19,7 +19,7 @@ def resolve_device(npu_enabled: bool, npu_device_id: int, cuda_enabled: bool = F
         import torch
 
         if torch.cuda.is_available():
-            return "cuda"
+            return "cuda:0"
     if not npu_enabled:
         return "cpu"
     try:
@@ -99,6 +99,24 @@ VISUAL_MODEL_ALIASES = {
     "vit-l/14": "openclip-vit-l14",
 }
 
+SHOT_DETECTORS = {"simple", "pyscenedetect_content", "pyscenedetect_adaptive"}
+SHOT_DETECTOR_ALIASES = {
+    "content": "pyscenedetect_content",
+    "pyscene_content": "pyscenedetect_content",
+    "pyscenedetect": "pyscenedetect_content",
+    "adaptive": "pyscenedetect_adaptive",
+    "pyscene_adaptive": "pyscenedetect_adaptive",
+}
+
+
+def normalize_shot_detector(value: str | None) -> str:
+    raw = (value or "simple").strip().lower()
+    normalized = SHOT_DETECTOR_ALIASES.get(raw, raw)
+    if normalized not in SHOT_DETECTORS:
+        allowed = ", ".join(sorted(SHOT_DETECTORS))
+        raise ValueError(f"Unknown shot_detector={value!r}. Allowed: {allowed}")
+    return normalized
+
 
 def normalize_visual_model(value: str | None) -> str:
     raw = (value or DEFAULT_VISUAL_MODEL).strip()
@@ -122,6 +140,189 @@ def visual_model_from_legacy(model_name: str | None, pretrained: str | None) -> 
 
 def visual_model_config(value: str | None) -> VisualModelConfig:
     return VISUAL_MODEL_REGISTRY[normalize_visual_model(value)]
+
+
+def _split_long_segments(segments: list[tuple[int, int]], min_segment_ms: int, max_segment_ms: int) -> list[tuple[int, int]]:
+    if max_segment_ms <= 0:
+        return segments
+    result: list[tuple[int, int]] = []
+    for start_ms, end_ms in segments:
+        cursor = start_ms
+        while end_ms - cursor > max_segment_ms:
+            if end_ms - (cursor + max_segment_ms) < min_segment_ms:
+                break
+            result.append((cursor, cursor + max_segment_ms))
+            cursor += max_segment_ms
+        if end_ms > cursor:
+            result.append((cursor, end_ms))
+    return result
+
+
+def _normalize_segments(
+    segments: list[tuple[int, int]],
+    duration_ms: int,
+    min_segment_ms: int,
+    max_segment_ms: int,
+) -> list[tuple[int, int]]:
+    cleaned: list[tuple[int, int]] = []
+    cursor = 0
+    for raw_start, raw_end in sorted(segments):
+        start_ms = max(0, min(duration_ms, int(raw_start)))
+        end_ms = max(0, min(duration_ms, int(raw_end)))
+        if end_ms <= start_ms:
+            continue
+        if start_ms > cursor:
+            cleaned.append((cursor, start_ms))
+        start_ms = max(start_ms, cursor)
+        if end_ms > start_ms:
+            cleaned.append((start_ms, end_ms))
+            cursor = end_ms
+    if duration_ms > cursor:
+        cleaned.append((cursor, duration_ms))
+    if not cleaned:
+        return []
+
+    merged: list[tuple[int, int]] = []
+    for start_ms, end_ms in cleaned:
+        if end_ms - start_ms < min_segment_ms and merged:
+            previous_start, _previous_end = merged[-1]
+            merged[-1] = (previous_start, end_ms)
+        else:
+            merged.append((start_ms, end_ms))
+    if len(merged) > 1 and merged[0][1] - merged[0][0] < min_segment_ms:
+        first_start, _first_end = merged[0]
+        _second_start, second_end = merged[1]
+        merged[1] = (first_start, second_end)
+        merged.pop(0)
+    return _split_long_segments(merged, min_segment_ms, max_segment_ms)
+
+
+def detect_shot_segments(
+    video_path: str,
+    duration_seconds: float,
+    sample_fps: float = 2.0,
+    threshold: float = 0.45,
+    min_segment_seconds: float = 0.8,
+    max_segment_seconds: float = 8.0,
+    decode_height: int = 0,
+    prefer_ffmpeg: bool = True,
+) -> list[tuple[int, int]]:
+    """Detect coarse shot boundaries using sampled-frame grayscale differences.
+
+    This intentionally keeps the first implementation dependency-light. It is a
+    fallback-friendly detector: callers can drop back to fixed windows whenever it
+    returns no usable segments or raises.
+    """
+    duration_ms = max(0, int(round(float(duration_seconds or 0) * 1000)))
+    if duration_ms <= 0:
+        return []
+    min_segment_ms = max(1, int(round(float(min_segment_seconds) * 1000)))
+    max_segment_ms = max(min_segment_ms, int(round(float(max_segment_seconds) * 1000)))
+    boundaries = [0]
+    previous_gray = None
+    last_boundary_ms = 0
+    for timestamp, frame in read_frames(
+        video_path,
+        max(0.2, float(sample_fps)),
+        out_height=decode_height,
+        prefer_ffmpeg=prefer_ffmpeg,
+    ):
+        timestamp_ms = int(round(float(timestamp) * 1000))
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if previous_gray is not None:
+            if gray.shape != previous_gray.shape:
+                gray = cv2.resize(gray, (previous_gray.shape[1], previous_gray.shape[0]))
+            difference = float(np.mean(cv2.absdiff(gray, previous_gray)) / 255.0)
+            if difference >= threshold and timestamp_ms - last_boundary_ms >= min_segment_ms:
+                boundaries.append(min(duration_ms, max(0, timestamp_ms)))
+                last_boundary_ms = timestamp_ms
+        previous_gray = gray
+    boundaries.append(duration_ms)
+    raw_segments = [
+        (boundaries[index], boundaries[index + 1])
+        for index in range(len(boundaries) - 1)
+        if boundaries[index + 1] > boundaries[index]
+    ]
+    return _normalize_segments(raw_segments, duration_ms, min_segment_ms, max_segment_ms)
+
+
+def _timecode_to_ms(value: Any) -> int:
+    seconds = getattr(value, "seconds", None)
+    if seconds is None:
+        seconds = value.get_seconds()
+    return int(round(float(seconds) * 1000))
+
+
+def detect_pyscenedetect_segments(
+    video_path: str,
+    duration_seconds: float,
+    detector: str = "pyscenedetect_content",
+    threshold: float = 0.20,
+    min_segment_seconds: float = 0.8,
+    max_segment_seconds: float = 8.0,
+) -> list[tuple[int, int]]:
+    """Detect shot boundaries with PySceneDetect, then normalize to app segments."""
+    detector = normalize_shot_detector(detector)
+    if detector == "simple":
+        return detect_shot_segments(
+            video_path,
+            duration_seconds=duration_seconds,
+            threshold=threshold,
+            min_segment_seconds=min_segment_seconds,
+            max_segment_seconds=max_segment_seconds,
+        )
+
+    from scenedetect import SceneManager, open_video
+    from scenedetect.detectors import AdaptiveDetector, ContentDetector
+
+    duration_ms = max(0, int(round(float(duration_seconds or 0) * 1000)))
+    if duration_ms <= 0:
+        return []
+    min_segment_ms = max(1, int(round(float(min_segment_seconds) * 1000)))
+    max_segment_ms = max(min_segment_ms, int(round(float(max_segment_seconds) * 1000)))
+    fps = max(1.0, float(probe_video(video_path).fps or 0))
+    min_scene_len = max(1, int(round(float(min_segment_seconds) * fps)))
+    normalized_threshold = max(0.01, min(1.0, float(threshold)))
+
+    if detector == "pyscenedetect_adaptive":
+        scene_detector = AdaptiveDetector(
+            adaptive_threshold=max(0.1, normalized_threshold * 15.0),
+            min_scene_len=min_scene_len,
+            min_content_val=15.0,
+        )
+    else:
+        scene_detector = ContentDetector(
+            threshold=max(1.0, normalized_threshold * 135.0),
+            min_scene_len=min_scene_len,
+        )
+
+    video = open_video(video_path)
+    manager = SceneManager()
+    manager.add_detector(scene_detector)
+    manager.detect_scenes(video=video, show_progress=False)
+    raw_segments = [
+        (_timecode_to_ms(start), _timecode_to_ms(end))
+        for start, end in manager.get_scene_list()
+    ]
+    return _normalize_segments(raw_segments, duration_ms, min_segment_ms, max_segment_ms)
+
+
+def _fixed_segments(duration_ms: int, segment_ms: int, max_bucket: int) -> list[tuple[int, int]]:
+    segments_total = max(1, int(math.ceil(duration_ms / segment_ms)) if duration_ms > 0 else 1, max_bucket + 1)
+    end_limit = duration_ms if duration_ms > 0 else segments_total * segment_ms
+    return [
+        (segment_id * segment_ms, min((segment_id + 1) * segment_ms, end_limit))
+        for segment_id in range(segments_total)
+    ]
+
+
+def _segment_id_for_timestamp(timestamp_ms: int, segment_times_ms: np.ndarray) -> int:
+    starts = segment_times_ms[:, 0]
+    index = int(np.searchsorted(starts, timestamp_ms, side="right") - 1)
+    index = max(0, min(index, len(segment_times_ms) - 1))
+    if timestamp_ms > int(segment_times_ms[index, 1]) and index < len(segment_times_ms) - 1:
+        index += 1
+    return index
 
 
 def _hf_cached_snapshot_path(model_cache_dir: str | Path | None, model_id: str) -> Path | None:
@@ -469,6 +670,11 @@ def build_visual_index(
     decode_height: int = 0,
     prefer_ffmpeg: bool = True,
     duration_seconds: float | int | None = None,
+    segment_strategy: str = "fixed",
+    min_segment_seconds: float = 0.8,
+    max_segment_seconds: float = 8.0,
+    shot_detector: str = "simple",
+    shot_detector_threshold: float = 0.20,
 ) -> dict:
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
@@ -489,6 +695,49 @@ def build_visual_index(
     thumbnail_dir = Path(thumbnail_dir)
     total_frames = 0
     segment_ms = max(1, int(round(float(segment_seconds) * 1000)))
+    requested_strategy = (segment_strategy or "fixed").strip().lower()
+    if requested_strategy not in {"fixed", "shot"}:
+        requested_strategy = "fixed"
+    try:
+        requested_detector = normalize_shot_detector(shot_detector)
+    except ValueError:
+        requested_detector = "simple"
+    duration_ms = int(round(float(duration_seconds or 0) * 1000))
+    explicit_segment_times: np.ndarray | None = None
+    active_strategy = "fixed"
+    active_detector = requested_detector
+    segment_time_source = "inferred_from_segment_ms"
+    if requested_strategy == "shot" and duration_ms > 0:
+        min_segment_ms = max(1, int(round(float(min_segment_seconds) * 1000)))
+        max_segment_ms = max(min_segment_ms, int(round(float(max_segment_seconds) * 1000)))
+        try:
+            if requested_detector == "simple":
+                shot_segments = detect_shot_segments(
+                    video_path,
+                    duration_seconds=float(duration_seconds or 0),
+                    threshold=shot_detector_threshold,
+                    min_segment_seconds=min_segment_seconds,
+                    max_segment_seconds=max_segment_seconds,
+                    decode_height=decode_height,
+                    prefer_ffmpeg=prefer_ffmpeg,
+                )
+            else:
+                shot_segments = detect_pyscenedetect_segments(
+                    video_path,
+                    duration_seconds=float(duration_seconds or 0),
+                    detector=requested_detector,
+                    threshold=shot_detector_threshold,
+                    min_segment_seconds=min_segment_seconds,
+                    max_segment_seconds=max_segment_seconds,
+                )
+        except Exception:
+            shot_segments = []
+        normalized = _normalize_segments(shot_segments, duration_ms, min_segment_ms, max_segment_ms)
+        if normalized:
+            explicit_segment_times = np.asarray(normalized, dtype=np.int32)
+            active_strategy = "shot"
+            active_detector = requested_detector
+            segment_time_source = "explicit"
 
     def flush() -> None:
         nonlocal pending_frames, pending_meta
@@ -500,15 +749,20 @@ def build_visual_index(
             frame_times_ms.append(timestamp_ms)
         pending_frames, pending_meta = [], []
 
+    frame_segment_ids: list[int] = []
     for timestamp, frame in read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg):
         timestamp_ms = int(round(float(timestamp) * 1000))
-        bucket = timestamp_ms // segment_ms
+        if explicit_segment_times is not None:
+            bucket = _segment_id_for_timestamp(timestamp_ms, explicit_segment_times)
+        else:
+            bucket = timestamp_ms // segment_ms
         if bucket not in thumbnails:
             thumbnail = thumbnail_dir / f"visual_{bucket:06d}.jpg"
             save_thumbnail(frame, thumbnail)
             thumbnails[bucket] = thumbnail.name
         pending_frames.append(frame)
         pending_meta.append((bucket, timestamp_ms))
+        frame_segment_ids.append(int(bucket))
         total_frames += 1
         if len(pending_frames) >= batch_size:
             flush()
@@ -517,30 +771,35 @@ def build_visual_index(
         raise RuntimeError("未从视频抽取到画面")
 
     frame_times_ms_array = np.asarray(frame_times_ms, dtype=np.int32)
+    frame_segment_ids_array = np.asarray(frame_segment_ids, dtype=np.int32)
     embeddings = np.stack(frame_embeddings).astype(np.float32)
     order = np.argsort(frame_times_ms_array)
     frame_times_ms_array = frame_times_ms_array[order]
+    frame_segment_ids_array = frame_segment_ids_array[order]
     embeddings = embeddings[order]
-    frame_segment_ids = frame_times_ms_array // segment_ms
     inferred_duration_ms = int(frame_times_ms_array.max()) + max(1, int(round(1000 / sample_fps)))
-    duration_ms = int(round(float(duration_seconds or 0) * 1000))
     if duration_ms <= 0:
         duration_ms = inferred_duration_ms
-    max_bucket = int(frame_segment_ids.max()) if len(frame_segment_ids) else 0
-    segments_total = max(1, int(math.ceil(duration_ms / segment_ms)), max_bucket + 1)
+    max_bucket = int(frame_segment_ids_array.max()) if len(frame_segment_ids_array) else 0
+    if explicit_segment_times is not None:
+        segments_total = int(len(explicit_segment_times))
+    else:
+        segments_total = len(_fixed_segments(duration_ms, segment_ms, max_bucket))
     segment_frame_offsets = np.searchsorted(
-        frame_segment_ids,
+        frame_segment_ids_array,
         np.arange(segments_total + 1, dtype=np.int32),
         side="left",
     ).astype(np.int32)
-    segments_with_frames = int(len(np.unique(frame_segment_ids)))
+    segments_with_frames = int(len(np.unique(frame_segment_ids_array)))
     empty_segments = max(0, segments_total - segments_with_frames)
-    atomic_save_npz(
-        output_path,
-        frame_embeddings=embeddings.astype(np.float16),
-        frame_times_ms=frame_times_ms_array.astype(np.int32),
-        segment_frame_offsets=segment_frame_offsets,
-    )
+    payload = {
+        "frame_embeddings": embeddings.astype(np.float16),
+        "frame_times_ms": frame_times_ms_array.astype(np.int32),
+        "segment_frame_offsets": segment_frame_offsets,
+    }
+    if explicit_segment_times is not None:
+        payload["segment_times_ms"] = explicit_segment_times.astype(np.int32)
+    atomic_save_npz(output_path, **payload)
     return {
         "segments_total": segments_total,
         "segments_with_frames": segments_with_frames,
@@ -551,4 +810,7 @@ def build_visual_index(
         "visual_model": encoder.model_key,
         "model": encoder.model_label,
         "decode_status": "complete" if empty_segments == 0 else "partial",
+        "segment_strategy": active_strategy,
+        "segment_times": segment_time_source,
+        "shot_detector": active_detector,
     }

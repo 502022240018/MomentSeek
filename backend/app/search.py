@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -9,6 +8,7 @@ import numpy as np
 from app.db import Catalog
 from app.indexing.common import normalize
 from app.indexing.manifest import require_channel_manifest
+from app.indexing.asr_text import normalize_search_text
 from app.settings import Settings
 
 
@@ -66,25 +66,8 @@ class SearchResult:
         return value
 
 
-_CHINESE_VARIANT_FOLD = str.maketrans({
-    "來": "来", "這": "这", "邊": "边", "們": "们", "癡": "痴", "魚": "鱼",
-    "電": "电", "資": "资", "聲": "声", "語": "语", "話": "话", "說": "说",
-    "聽": "听", "見": "见", "個": "个", "時": "时", "過": "过", "兩": "两",
-    "錢": "钱", "買": "买", "賣": "卖", "樓": "楼", "請": "请", "沒": "没",
-    "麼": "么", "麵": "面", "點": "点", "對": "对", "樣": "样", "裡": "里",
-    "裏": "里", "後": "后", "會": "会", "給": "给", "還": "还", "為": "为",
-    "嗎": "吗", "著": "着", "兒": "儿", "間": "间", "場": "场", "開": "开",
-    "關": "关", "門": "门", "車": "车", "長": "长", "當": "当", "從": "从",
-    "愛": "爱", "認": "认", "識": "识", "寫": "写", "讀": "读", "問": "问",
-    "讓": "让", "應": "应", "該": "该", "經": "经", "難": "难", "離": "离",
-    "實": "实", "現": "现", "發": "发", "國": "国", "頭": "头", "歲": "岁",
-    "萬": "万", "與": "与", "誰": "谁", "妳": "你",
-})
-
-
 def normalize_text(text: str) -> str:
-    folded = unicodedata.normalize("NFKC", text).casefold().translate(_CHINESE_VARIANT_FOLD)
-    return "".join(character for character in folded if character.isalnum())
+    return normalize_search_text(text)
 
 
 def lexical_score(query: str, text: str) -> float:
@@ -149,6 +132,11 @@ def asr_semantic_confidence(cosine: float) -> float:
     return float(1.0 / (1.0 + np.exp(-10.0 * (cosine - 0.35))))
 
 
+def visual_confidence(cosine: float) -> float:
+    """Map visual raw cosine to a cross-video ranking score."""
+    return float(np.clip((cosine + 1.0) / 2.0, 0, 1))
+
+
 def _seconds(ms: int | float) -> float:
     return float(ms) / 1000.0
 
@@ -175,6 +163,7 @@ def _visual_candidates(
     segment_ms: int,
     profile: str = "balanced",
     limit: int = 72,
+    segment_strategy: str = "fixed",
 ) -> list[Candidate]:
     required = {"frame_embeddings", "frame_times_ms", "segment_frame_offsets"}
     if not required.issubset(set(data.files)):
@@ -188,6 +177,13 @@ def _visual_candidates(
         raise ValueError("visual v3 segment_frame_offsets 无效，请重跑 visual 索引")
     if not len(frame_embeddings):
         return []
+    segment_times_ms = None
+    if "segment_times_ms" in data.files:
+        segment_times_ms = data["segment_times_ms"].astype(np.int32)
+        if segment_times_ms.shape != (len(offsets) - 1, 2):
+            raise ValueError("visual v3 segment_times_ms 无效，请重跑 visual 索引")
+        if np.any(segment_times_ms[:, 1] < segment_times_ms[:, 0]):
+            raise ValueError("visual v3 segment_times_ms 时间范围无效，请重跑 visual 索引")
 
     query = normalize(query)
     frame_scores = frame_embeddings @ query
@@ -227,6 +223,7 @@ def _visual_candidates(
         raw_score = float(raw_values[local_index])
         z_score = float(z_scores[local_index])
         percentile = float(percentiles[local_index])
+        ranking_score = visual_confidence(raw_score)
         if reliable:
             if z_score >= 2.0 or percentile >= 0.975:
                 decision, above = "strong", True
@@ -238,22 +235,31 @@ def _visual_candidates(
                 decision, above = ("fuzzy", True) if qualifies else ("weak", False)
             else:
                 decision, above = "weak", False
-            ranking_score = percentile
-            detail = f"visual score={raw_score:.3f} · percentile={percentile * 100:.1f}% · robust_z={z_score:.2f}"
+            detail = (
+                f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
+                f" · percentile={percentile * 100:.1f}% · robust_z={z_score:.2f}"
+            )
         else:
             if local_index in fallback_indices:
                 decision, above = "fallback", True
             else:
                 decision, above = "weak", False
-            ranking_score = float(np.clip((raw_score + 1.0) / 2.0, 0, 1))
-            detail = f"visual score={raw_score:.3f} · distribution fallback (n={len(raw_values)})"
+            detail = (
+                f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
+                f" · distribution fallback (n={len(raw_values)})"
+            )
 
         top3 = float(top3_scores[local_index])
         mean = float(mean_scores[local_index])
         best_ms = int(best_times_ms[local_index])
         detail += f" · best_frame={best_ms / 1000:.2f}s · top1={raw_score:.3f} · top3={top3:.3f} · mean={mean:.3f}"
-        start_ms = segment_id * segment_ms
-        end_ms = min((segment_id + 1) * segment_ms, duration_ms or (segment_id + 1) * segment_ms)
+        if segment_times_ms is not None:
+            start_ms, end_ms = [int(value) for value in segment_times_ms[segment_id]]
+            time_source = "explicit"
+        else:
+            start_ms = segment_id * segment_ms
+            end_ms = min((segment_id + 1) * segment_ms, duration_ms or (segment_id + 1) * segment_ms)
+            time_source = "fixed"
         candidates.append(Candidate(
             video_id=video_id,
             start_time=_seconds(start_ms),
@@ -281,8 +287,11 @@ def _visual_candidates(
                 "visual_top1": raw_score,
                 "visual_top3": top3,
                 "visual_mean": mean,
+                "visual_rank_score": ranking_score,
                 "percentile": percentile,
                 "robust_z": z_score,
+                "segment_time_source": time_source,
+                "segment_strategy": segment_strategy,
             },
         ))
     return candidates
@@ -663,6 +672,7 @@ class SearchEngine:
                         int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
                         visual_profile,
                         limit * 3,
+                        str(channel_manifest.get("segment_strategy") or "fixed"),
                     ))
             if face_query is not None and "face" in indexed_modalities:
                 _manifest, _channel_manifest, index_file = _channel_manifest_for(video, index_dir, "face")

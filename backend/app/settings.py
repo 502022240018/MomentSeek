@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     visual_hf_cache_dir: Path = Path("runtime/hf_cache")
     visual_sample_fps: float = 5.0
     visual_segment_seconds: float = 5.0
+    visual_segment_strategy: str = "fixed"
+    visual_min_segment_seconds: float = 0.8
+    visual_max_segment_seconds: float = 8.0
+    visual_shot_detector: str = "simple"
+    visual_shot_threshold: float = 0.20
     visual_batch_size: int = 32
 
     face_model: str = "buffalo_l"

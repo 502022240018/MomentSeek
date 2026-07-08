@@ -4,6 +4,29 @@ import { api, Entity, Job, SearchResult, Video } from "./api";
 import "./styles.css";
 
 type Page = "overview" | "indexes" | "assets" | "entities" | "search";
+type VisualSegmentPresetKey = "fixed" | "general" | "fast-cut" | "talking-head" | "custom";
+type VisualShotDetector = "simple" | "pyscenedetect_content" | "pyscenedetect_adaptive";
+
+const visualShotDetectorLabels: Record<VisualShotDetector, string> = {
+  simple: "Simple 帧差",
+  pyscenedetect_content: "PySceneDetect Content",
+  pyscenedetect_adaptive: "PySceneDetect Adaptive",
+};
+
+const visualSegmentPresets: Record<VisualSegmentPresetKey, {
+  label: string;
+  strategy: "fixed" | "shot";
+  detector: VisualShotDetector;
+  minSeconds: number;
+  maxSeconds: number;
+  threshold: number;
+}> = {
+  fixed: { label: "固定分段", strategy: "fixed", detector: "simple", minSeconds: 0.8, maxSeconds: 8, threshold: 0.2 },
+  general: { label: "通用镜头", strategy: "shot", detector: "simple", minSeconds: 0.8, maxSeconds: 8, threshold: 0.2 },
+  "fast-cut": { label: "广告 / MV", strategy: "shot", detector: "pyscenedetect_adaptive", minSeconds: 0.5, maxSeconds: 6, threshold: 0.16 },
+  "talking-head": { label: "访谈长镜头", strategy: "shot", detector: "pyscenedetect_content", minSeconds: 1.5, maxSeconds: 12, threshold: 0.28 },
+  custom: { label: "自定义", strategy: "shot", detector: "simple", minSeconds: 0.8, maxSeconds: 8, threshold: 0.2 },
+};
 
 const icons: Record<Page, string> = {
   overview: "⌂",
@@ -213,12 +236,27 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
   const [visualModel, setVisualModel] = useState("siglip2-so400m-384");
   const [visualSampleFps, setVisualSampleFps] = useState(5);
   const [visualSegmentSeconds, setVisualSegmentSeconds] = useState(5);
+  const [visualSegmentPreset, setVisualSegmentPreset] = useState<VisualSegmentPresetKey>("fixed");
+  const [visualMinSegmentSeconds, setVisualMinSegmentSeconds] = useState(0.8);
+  const [visualMaxSegmentSeconds, setVisualMaxSegmentSeconds] = useState(8);
+  const [visualShotDetector, setVisualShotDetector] = useState<VisualShotDetector>("simple");
+  const [visualShotThreshold, setVisualShotThreshold] = useState(0.2);
   const [faceSampleFps, setFaceSampleFps] = useState(2);
   const [includeOcr, setIncludeOcr] = useState(false);
   const [ocrSampleFps, setOcrSampleFps] = useState(0.05);
   const [asrModel, setAsrModel] = useState("small");
   const [asrLanguage, setAsrLanguage] = useState("zh");
   const [uploading, setUploading] = useState(false);
+  const useShotSegments = visualSegmentPresets[visualSegmentPreset].strategy === "shot";
+  const applyVisualSegmentPreset = (next: VisualSegmentPresetKey) => {
+    setVisualSegmentPreset(next);
+    if (next === "custom") return;
+    const preset = visualSegmentPresets[next];
+    setVisualMinSegmentSeconds(preset.minSeconds);
+    setVisualMaxSegmentSeconds(preset.maxSeconds);
+    setVisualShotDetector(preset.detector);
+    setVisualShotThreshold(preset.threshold);
+  };
   const upload = async () => {
     if (!videoFile) return setNotice("请先选择视频");
     setUploading(true);
@@ -227,19 +265,30 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
     finally { setUploading(false); }
   };
   const index = async (id: string) => {
+    if (useShotSegments && visualMinSegmentSeconds > visualMaxSegmentSeconds) {
+      return setNotice("镜头最短时长不能大于最长时长");
+    }
     try {
       const selectedModalities = includeOcr ? ["visual", "face", "asr", "ocr"] : ["visual", "face", "asr"];
       await api.indexVideo(id, selectedModalities, {
         visualModel,
         visualSampleFps,
         visualSegmentSeconds,
+        visualSegmentStrategy: useShotSegments ? "shot" : "fixed",
+        visualMinSegmentSeconds: useShotSegments ? visualMinSegmentSeconds : undefined,
+        visualMaxSegmentSeconds: useShotSegments ? visualMaxSegmentSeconds : undefined,
+        visualShotDetector: useShotSegments ? visualShotDetector : undefined,
+        visualShotThreshold: useShotSegments ? visualShotThreshold : undefined,
         faceSampleFps,
         ocrSampleFps: includeOcr ? ocrSampleFps : undefined,
         asrModel,
         asrLanguage,
       });
       await refresh();
-      setNotice(`索引任务已进入队列：Visual ${visualModel} · ${visualSampleFps}fps / ${visualSegmentSeconds}s 段，Face ${faceSampleFps}fps${includeOcr ? `，OCR ${ocrSampleFps}fps` : ""}，ASR ${asrModel}/${asrLanguage}`);
+      const segmentLabel = useShotSegments
+        ? `${visualSegmentPresets[visualSegmentPreset].label} ${visualShotDetectorLabels[visualShotDetector]} ${visualMinSegmentSeconds}-${visualMaxSegmentSeconds}s / 阈值 ${visualShotThreshold}`
+        : `固定 ${visualSegmentSeconds}s`;
+      setNotice(`索引任务已进入队列：Visual ${visualModel} · ${visualSampleFps}fps / ${segmentLabel}，Face ${faceSampleFps}fps${includeOcr ? `，OCR ${ocrSampleFps}fps` : ""}，ASR ${asrModel}/${asrLanguage}`);
     }
     catch (error) { setNotice(error instanceof Error ? error.message : "任务创建失败"); }
   };
@@ -257,7 +306,28 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
     catch (error) { setNotice(error instanceof Error ? error.message : "删除失败"); }
   };
   return <div className="stack-page"><div className="upload-panel panel"><div><span className="panel-label">NEW ASSET</span><h2>添加视频素材</h2><p>上传后可一次建立 Face、Visual 和 ASR 三路索引。</p></div><label className="file-line"><input type="file" accept="video/*" onChange={event => setVideoFile(event.target.files?.[0])} /><span>{videoFile?.name || "选择视频文件"}</span><b>浏览</b></label><label className="file-line secondary"><input type="file" accept=".json,.srt,.vtt" onChange={event => setTranscript(event.target.files?.[0])} /><span>{transcript?.name || "可选：已有字幕 JSON / SRT / VTT"}</span><b>添加</b></label><button className="primary compact" onClick={upload} disabled={uploading}>{uploading ? "正在上传…" : "上传素材"}</button></div>
-    <div className="index-options panel"><div><span className="panel-label">INDEX OPTIONS</span><h2>索引参数</h2><p>Visual 默认 5fps；OCR 需显式勾选，服务器优先走 NPU/CANN，长视频建议先低采样；ASR 默认 small。</p></div><label>Visual model<select value={visualModel} onChange={event => setVisualModel(event.target.value)}><option value="siglip2-so400m-384">SigLIP2 So400m-384 默认</option><option value="chinese-clip-vit-b16">ChineseCLIP ViT-B/16</option><option value="openclip-vit-b32">OpenCLIP ViT-B/32</option><option value="openclip-vit-b16">OpenCLIP ViT-B/16</option><option value="openclip-vit-l14">OpenCLIP ViT-L/14</option></select></label><label>Visual fps<input type="number" min="0.2" max="10" step="0.5" value={visualSampleFps} onChange={event => setVisualSampleFps(Number(event.target.value))} /></label><label>Visual 分段秒数<input type="number" min="1" max="60" step="1" value={visualSegmentSeconds} onChange={event => setVisualSegmentSeconds(Number(event.target.value))} /></label><label>Face fps<input type="number" min="0.2" max="15" step="0.5" value={faceSampleFps} onChange={event => setFaceSampleFps(Number(event.target.value))} /></label><label className="inline-check"><input type="checkbox" checked={includeOcr} onChange={event => setIncludeOcr(event.target.checked)} />包含 OCR</label><label>OCR fps<input type="number" min="0.02" max="5" step="0.05" value={ocrSampleFps} onChange={event => setOcrSampleFps(Number(event.target.value))} /></label><label>ASR 模型<select value={asrModel} onChange={event => setAsrModel(event.target.value)}><option value="base">base 更快</option><option value="small">small 推荐</option><option value="medium">medium 更准更慢</option><option value="large-v3">large-v3 高风险</option></select></label><label>ASR 语言<select value={asrLanguage} onChange={event => setAsrLanguage(event.target.value)}><option value="zh">中文</option><option value="en">English</option><option value="auto">Auto</option></select></label></div>
+    <div className="index-options panel">
+      <div>
+        <span className="panel-label">INDEX OPTIONS</span>
+        <h2>索引参数</h2>
+        <p>Visual 默认 5fps；OCR 需显式勾选，服务器优先走 NPU/CANN，长视频建议先低采样；ASR 默认 small。</p>
+      </div>
+      <label>Visual model<select value={visualModel} onChange={event => setVisualModel(event.target.value)}><option value="siglip2-so400m-384">SigLIP2 So400m-384 默认</option><option value="chinese-clip-vit-b16">ChineseCLIP ViT-B/16</option><option value="openclip-vit-b32">OpenCLIP ViT-B/32</option><option value="openclip-vit-b16">OpenCLIP ViT-B/16</option><option value="openclip-vit-l14">OpenCLIP ViT-L/14</option></select></label>
+      <label>Visual fps<input type="number" min="0.2" max="10" step="0.5" value={visualSampleFps} onChange={event => setVisualSampleFps(Number(event.target.value))} /></label>
+      <label>Visual 分段<select value={visualSegmentPreset} onChange={event => applyVisualSegmentPreset(event.target.value as VisualSegmentPresetKey)}>{(Object.keys(visualSegmentPresets) as VisualSegmentPresetKey[]).map(key => <option key={key} value={key}>{visualSegmentPresets[key].label}</option>)}</select></label>
+      <label>{useShotSegments ? "固定回退秒数" : "Visual 分段秒数"}<input type="number" min="1" max="60" step="1" value={visualSegmentSeconds} onChange={event => setVisualSegmentSeconds(Number(event.target.value))} /></label>
+      {useShotSegments && <>
+        <label>镜头检测器<select value={visualShotDetector} onChange={event => setVisualShotDetector(event.target.value as VisualShotDetector)}>{(Object.keys(visualShotDetectorLabels) as VisualShotDetector[]).map(key => <option key={key} value={key}>{visualShotDetectorLabels[key]}</option>)}</select></label>
+        <label>镜头最短秒数<input type="number" min="0.2" max="30" step="0.1" value={visualMinSegmentSeconds} onChange={event => setVisualMinSegmentSeconds(Number(event.target.value))} /></label>
+        <label>镜头最长秒数<input type="number" min="1" max="60" step="0.5" value={visualMaxSegmentSeconds} onChange={event => setVisualMaxSegmentSeconds(Number(event.target.value))} /></label>
+        <label>切分阈值<input type="number" min="0.05" max="0.6" step="0.01" value={visualShotThreshold} onChange={event => setVisualShotThreshold(Number(event.target.value))} /></label>
+      </>}
+      <label>Face fps<input type="number" min="0.2" max="15" step="0.5" value={faceSampleFps} onChange={event => setFaceSampleFps(Number(event.target.value))} /></label>
+      <label className="inline-check"><input type="checkbox" checked={includeOcr} onChange={event => setIncludeOcr(event.target.checked)} />包含 OCR</label>
+      <label>OCR fps<input type="number" min="0.02" max="5" step="0.05" value={ocrSampleFps} onChange={event => setOcrSampleFps(Number(event.target.value))} /></label>
+      <label>ASR 模型<select value={asrModel} onChange={event => setAsrModel(event.target.value)}><option value="base">base 更快</option><option value="small">small 推荐</option><option value="medium">medium 更准更慢</option><option value="large-v3">large-v3 高风险</option></select></label>
+      <label>ASR 语言<select value={asrLanguage} onChange={event => setAsrLanguage(event.target.value)}><option value="zh">中文</option><option value="en">English</option><option value="auto">Auto</option></select></label>
+    </div>
     <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">LIBRARY</span><h2>视频资产</h2></div><span>{videos.length} items</span></div><div className="asset-list">{videos.map(video => <div className="asset-row" key={video.id}><div className="asset-icon">▶</div><div className="asset-main"><b>{video.name}</b><small>{formatTime(video.duration)} · {video.width}×{video.height} · {video.fps.toFixed(1)} fps</small></div><div className="chips">{video.indexed_modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}</div><span className={`status ${video.status}`}>{statusText(video.status)}</span><div className="asset-actions">{video.status !== "indexing" && <button className="outline" onClick={() => index(video.id)}>{video.indexed_modalities.length ? "重建索引" : "建立索引"}</button>}<button className="outline" onClick={() => rename(video)}>重命名</button><button className="outline danger" disabled={video.status === "indexing"} onClick={() => remove(video)}>删除</button></div></div>)}{!videos.length && <div className="empty-list">还没有视频素材</div>}</div></div>
   </div>;
 }

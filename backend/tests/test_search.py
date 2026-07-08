@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from app.db import Catalog
-from app.search import Candidate, SearchEngine, _groups
+from app.search import Candidate, SearchEngine, _groups, _visual_candidates
 from app.settings import Settings
 
 
@@ -130,6 +130,127 @@ def test_visual_v3_frame_offsets_skip_empty_decode_bucket(tmp_path):
     assert evidence["unit_id"] == 3
     assert evidence["best_ms"] == 16000
     assert evidence["features"]["visual_top1"] == 1.0
+
+
+def test_visual_v3_optional_segment_times_override_fixed_bucket_times(tmp_path):
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    index_dir = _create_video(settings, catalog, duration=20)
+    catalog.update_video("video-1", indexed_modalities=["visual"])
+    _write_manifest(index_dir, "video-1", {
+        "visual": {
+            "file": "visual.npz",
+            "model_key": "siglip2-so400m-384",
+            "embedding_space": "siglip2-image-text",
+            "sample_fps": 5.0,
+            "decode_status": "complete",
+            "segment_strategy": "shot",
+            "segment_times": "explicit",
+        }
+    }, duration_ms=20000)
+    np.savez_compressed(
+        index_dir / "visual.npz",
+        frame_embeddings=np.asarray([
+            [0.40, 0.91],
+            [1.00, 0.00],
+        ], dtype=np.float16),
+        frame_times_ms=np.asarray([2100, 7800], dtype=np.int32),
+        segment_frame_offsets=np.asarray([0, 1, 2], dtype=np.int32),
+        segment_times_ms=np.asarray([[0, 2830], [2830, 9410]], dtype=np.int32),
+    )
+
+    class StubClip:
+        def encode_query(self, text, image_path, alpha):
+            return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    engine = SearchEngine(settings, catalog)
+    engine._clip = lambda model_key=None: StubClip()  # type: ignore[method-assign]
+
+    results = engine.search("close-up", None, ["visual"], ["video-1"], limit=2)
+
+    assert results[0]["start_time"] == 2.83
+    assert results[0]["end_time"] == 9.41
+    evidence = results[0]["evidence"][0]
+    assert evidence["unit_id"] == 1
+    assert evidence["features"]["segment_time_source"] == "explicit"
+    assert evidence["features"]["segment_strategy"] == "shot"
+
+
+def test_visual_v3_rejects_invalid_optional_segment_times(tmp_path):
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    index_dir = _create_video(settings, catalog, duration=20)
+    catalog.update_video("video-1", indexed_modalities=["visual"])
+    _write_manifest(index_dir, "video-1", {
+        "visual": {
+            "file": "visual.npz",
+            "model_key": "siglip2-so400m-384",
+            "embedding_space": "siglip2-image-text",
+            "sample_fps": 5.0,
+            "decode_status": "complete",
+        }
+    }, duration_ms=20000)
+    np.savez_compressed(
+        index_dir / "visual.npz",
+        frame_embeddings=np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float16),
+        frame_times_ms=np.asarray([1000, 6000], dtype=np.int32),
+        segment_frame_offsets=np.asarray([0, 1, 2], dtype=np.int32),
+        segment_times_ms=np.asarray([[0, 4000]], dtype=np.int32),
+    )
+
+    class StubClip:
+        def encode_query(self, text, image_path, alpha):
+            return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    engine = SearchEngine(settings, catalog)
+    engine._clip = lambda model_key=None: StubClip()  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="segment_times_ms"):
+        engine.search("close-up", None, ["visual"], ["video-1"], limit=2)
+
+
+def test_visual_ranking_score_prefers_cross_video_raw_similarity_over_local_percentile():
+    class VisualData:
+        def __init__(self, scores):
+            self._values = {
+                "frame_embeddings": np.asarray(
+                    [[score, np.sqrt(max(0.0, 1.0 - score * score))] for score in scores],
+                    dtype=np.float32,
+                ),
+                "frame_times_ms": np.asarray([index * 5000 + 1000 for index in range(len(scores))], dtype=np.int32),
+                "segment_frame_offsets": np.arange(len(scores) + 1, dtype=np.int32),
+            }
+            self.files = tuple(self._values)
+
+        def __getitem__(self, key):
+            return self._values[key]
+
+    query = np.asarray([1.0, 0.0], dtype=np.float32)
+    relevant = _visual_candidates(
+        VisualData([0.55, 0.50, 0.44, 0.43, 0.42, 0.41, 0.40, 0.39]),
+        query,
+        "relevant-video",
+        duration_ms=40000,
+        segment_ms=5000,
+        profile="balanced",
+        limit=8,
+    )
+    unrelated = _visual_candidates(
+        VisualData([0.20, 0.19, 0.18, 0.17, 0.16, 0.15, 0.14, 0.13]),
+        query,
+        "unrelated-video",
+        duration_ms=40000,
+        segment_ms=5000,
+        profile="balanced",
+        limit=8,
+    )
+
+    relevant_mid = next(item for item in relevant if item.unit_id == 1)
+    unrelated_best = next(item for item in unrelated if item.unit_id == 0)
+
+    assert relevant_mid.raw_score > unrelated_best.raw_score
+    assert relevant_mid.percentile < unrelated_best.percentile
+    assert relevant_mid.score > unrelated_best.score
 
 
 def test_asr_v3_lexical_search_uses_chunk_times_and_texts(tmp_path):

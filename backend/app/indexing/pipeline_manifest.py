@@ -32,13 +32,44 @@ def channel_manifest(
 ) -> dict[str, Any]:
     if stage == "visual":
         model_key = str(result.get("visual_model") or options.get("visual_model") or settings.visual_model)
-        return {
+        payload = {
             "file": "visual.npz",
             "model_key": model_key,
             "embedding_space": visual_embedding_space(model_key),
             "sample_fps": float(options.get("visual_sample_fps", settings.visual_sample_fps)),
             "decode_status": str(result.get("decode_status") or "unknown"),
         }
+        strategy = str(
+            result.get("segment_strategy")
+            or options.get("visual_segment_strategy")
+            or getattr(settings, "visual_segment_strategy", "fixed")
+            or "fixed"
+        )
+        if strategy != "fixed":
+            min_segment_seconds = float(
+                options.get("visual_min_segment_seconds", getattr(settings, "visual_min_segment_seconds", 0.8))
+            )
+            max_segment_seconds = float(
+                options.get("visual_max_segment_seconds", getattr(settings, "visual_max_segment_seconds", 8.0))
+            )
+            shot_threshold = float(
+                options.get("visual_shot_threshold", getattr(settings, "visual_shot_threshold", 0.20))
+            )
+            shot_detector = str(
+                result.get("shot_detector")
+                or options.get("visual_shot_detector")
+                or getattr(settings, "visual_shot_detector", "simple")
+                or "simple"
+            )
+            payload.update({
+                "segment_strategy": strategy,
+                "segment_times": str(result.get("segment_times") or "explicit"),
+                "min_segment_ms": max(1, int(round(min_segment_seconds * 1000))),
+                "max_segment_ms": max(1, int(round(max_segment_seconds * 1000))),
+                "shot_detector": shot_detector,
+                "shot_threshold": shot_threshold,
+            })
+        return payload
     if stage == "face":
         return {
             "file": "face.npz",
@@ -50,15 +81,27 @@ def channel_manifest(
         }
     if stage == "asr":
         semantic_model = settings.asr_semantic_model
+        requested_language = str(
+            result.get("requested_language")
+            or options.get("asr_language")
+            or settings.asr_language
+        )
+        detected_language = str(result.get("detected_language") or "")
         return {
             "file": "asr.npz",
             "engine": str(result.get("engine") or settings.asr_engine),
             "model_key": str(result.get("model") or options.get("asr_model") or settings.asr_model),
-            "language": str(result.get("language") or options.get("asr_language") or settings.asr_language),
+            "language": str(result.get("language") or detected_language or requested_language),
+            "task": str(result.get("task") or "transcribe"),
+            "requested_language": requested_language,
+            "detected_language": detected_language,
             "semantic_model_key": semantic_model,
             "embedding_space": text_embedding_space(semantic_model),
             "decode_status": str(result.get("decode_status") or "unknown"),
             "semantic_status": str(result.get("semantic_status") or ("complete" if settings.asr_semantic_enabled else "disabled")),
+            "postprocess_strategy": str(result.get("postprocess_strategy") or "bucket_bonus"),
+            "postprocess_stats": result.get("postprocess_stats") or {},
+            "text_profile": result.get("text_profile") or {},
         }
     if stage == "ocr":
         semantic_model = settings.asr_semantic_model

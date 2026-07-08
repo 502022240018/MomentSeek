@@ -28,6 +28,11 @@ export type IndexOptions = {
   visualModel?: string;
   visualSampleFps?: number;
   visualSegmentSeconds?: number;
+  visualSegmentStrategy?: "fixed" | "shot";
+  visualMinSegmentSeconds?: number;
+  visualMaxSegmentSeconds?: number;
+  visualShotDetector?: "simple" | "pyscenedetect_content" | "pyscenedetect_adaptive";
+  visualShotThreshold?: number;
   faceSampleFps?: number;
   ocrSampleFps?: number;
   asrModel?: string;
@@ -114,6 +119,11 @@ export const api = {
         visual_model: options.visualModel,
         visual_sample_fps: options.visualSampleFps,
         visual_segment_seconds: options.visualSegmentSeconds,
+        visual_segment_strategy: options.visualSegmentStrategy,
+        visual_min_segment_seconds: options.visualMinSegmentSeconds,
+        visual_max_segment_seconds: options.visualMaxSegmentSeconds,
+        visual_shot_detector: options.visualShotDetector,
+        visual_shot_threshold: options.visualShotThreshold,
         face_sample_fps: options.faceSampleFps,
         ocr_sample_fps: options.ocrSampleFps,
         asr_model: options.asrModel,

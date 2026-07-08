@@ -19,7 +19,7 @@ runtime/indexes/{video_id}/
 
 | 通道 | 索引频率 | 模型 / 表征 | 存储文件 | 召回粒度 |
 |---|---:|---|---|---|
-| `visual` | 默认 5fps，5s bucket | SigLIP2/CLIP image-text embedding | `visual.npz` | 5s bucket，按 bucket 内最佳帧 MaxSim 排序 |
+| `visual` | 默认 5fps，5s bucket；可选 shot-aware segment | SigLIP2/CLIP image-text embedding | `visual.npz` | 默认 5s bucket；可选镜头/子段，按 segment 内最佳帧 MaxSim 排序 |
 | `face` | 默认 1fps | InsightFace `buffalo_l`，ArcFace identity embedding | `face.npz` | 人脸 track |
 | `asr` | ASR 模型 chunk | Whisper/FunASR 文本 + 可选 MiniLM semantic embedding | `asr.npz` | ASR chunk |
 | `ocr` | 默认 0.05fps，约每 20s 一帧 | RapidOCR PP-OCRv4 文本框 + 可选 MiniLM semantic embedding | `ocr.npz` | OCR sampled-frame chunk |
@@ -46,13 +46,21 @@ runtime/indexes/{video_id}/
       "model_key": "siglip2-so400m-384",
       "embedding_space": "siglip2-image-text",
       "sample_fps": 5.0,
-      "decode_status": "complete"
+      "decode_status": "complete",
+      "segment_strategy": "shot",
+      "segment_times": "explicit",
+      "min_segment_ms": 800,
+      "max_segment_ms": 8000,
+      "shot_detector": "pyscenedetect_content",
+      "shot_threshold": 0.2
     }
   }
 }
 ```
 
 Manifest 只保存少量元信息，不保存每帧/每 chunk 重复字段。`embedding_dim` 和 `embedding_dtype` 从数组 shape/dtype 或模型注册表推断，不在 manifest 中重复存储。
+
+`segment_strategy`、`segment_times`、`min_segment_ms`、`max_segment_ms`、`shot_detector` 和 `shot_threshold` 是 visual 的可选字段。旧 v3 visual 索引没有这些字段时，默认视为固定 `segment_ms` 分段。
 
 ## Visual
 
@@ -68,18 +76,40 @@ siglip2-so400m-384
 |---|---|---|
 | `frame_embeddings` | `[num_frames, dim] float16` | 帧级视觉向量 |
 | `frame_times_ms` | `[num_frames] int32` | 每个帧向量对应的视频时间戳 |
-| `segment_frame_offsets` | `[segments_total + 1] int32` | 每个 5s bucket 在 `frame_embeddings` 中的半开区间 `[start, end)` |
+| `segment_frame_offsets` | `[segments_total + 1] int32` | 每个 visual segment 在 `frame_embeddings` 中的半开区间 `[start, end)` |
+| `segment_times_ms` | `[segments_total, 2] int32` | 可选，shot-aware segment 的真实 `[start_ms, end_ms]` |
 
-`segment_frame_offsets` 覆盖完整视频 timeline。某个 bucket 没有成功解码帧时，offset start/end 相同；这允许部分解码失败或空 bucket 不破坏数组对齐。
+`segment_frame_offsets` 覆盖完整视频 timeline。某个 segment 没有成功解码帧时，offset start/end 相同；这允许部分解码失败或空 segment 不破坏数组对齐。
+
+`segment_times_ms` 是 v3 optional shot-aware extension，不是所有 v3 visual 索引的必有字段：
+
+```text
+有 segment_times_ms -> 搜索结果使用显式镜头/子段时间
+无 segment_times_ms -> 搜索结果回退到 segment_id * segment_ms 的固定时间窗口
+```
+
+前端按视频类型提供参数预设，但写入索引任务的仍是这几个明确字段：
+
+| 预设 | `visual_segment_strategy` | 推荐 `visual_shot_detector` | 典型用途 |
+|---|---|---|---|
+| 固定分段 | `fixed` | 不发送 | 旧 v3 兼容、快速基线、检测不稳定素材 |
+| 通用镜头 | `shot` | `simple` | 常规素材、剧情/纪实类混合镜头 |
+| 广告 / MV | `shot` | `pyscenedetect_adaptive` | 快切素材，阈值更敏感，最长段更短 |
+| 访谈长镜头 | `shot` | `pyscenedetect_content` | 长镜头/机位稳定素材，最短段更长，阈值更保守 |
+| 自定义 | `shot` | 用户选择 | 手动设置 detector/min/max/threshold |
+
+`visual_shot_detector` 可选值为 `simple`、`pyscenedetect_content`、`pyscenedetect_adaptive`。后端默认仍是 `simple`；PySceneDetect 仅在 `visual_segment_strategy="shot"` 时参与镜头边界检测，后续索引格式和检索读取逻辑不变。
 
 召回逻辑：
 
 ```text
 query text/image -> visual query embedding
 -> 与 frame_embeddings 做 cosine
--> 每个 bucket 取 top1 frame similarity
+-> 每个 visual segment 取 top1 frame similarity
 -> raw_score = visual_top1
--> 返回 5s bucket
+-> Candidate.score = visual_rank_score = clip((raw_score + 1) / 2, 0, 1)
+-> percentile / robust_z 用于视频内阈值判定和诊断，不作为跨视频排序主分数
+-> 返回显式 segment_times_ms，或旧 v3 固定 segment_ms bucket
 ```
 
 Visual evidence 主要字段：
@@ -89,6 +119,7 @@ raw_score
 visual_top1
 visual_top3
 visual_mean
+visual_rank_score
 best_time / best_ms
 percentile
 robust_z
@@ -97,7 +128,7 @@ unit_id = segment_id
 features
 ```
 
-已知质量风险：per-video percentile 能帮助找到每个视频内部最突出的片段，但在大量无关视频参与搜索时，可能把无关视频的“本视频内部最佳片段”排得过高。见 `docs/ISSUES_AND_ROADMAP.md` 的检索效果优化问题池。
+排序说明：跨视频排序使用 raw visual_top1 的校准值 `visual_rank_score`；per-video percentile 能帮助找到每个视频内部最突出的片段，但只作为阈值判定和诊断 evidence。单帧偶然相似仍可能造成误召，后续见 `docs/ISSUES_AND_ROADMAP.md` 的 RQ-002。
 
 ## Face
 
@@ -145,6 +176,39 @@ features.face_cosine
 ```
 
 ## ASR
+
+2026-07-07 起，新建 ASR v3 索引会先做轻量后处理，再生成 semantic embedding：
+
+```text
+raw ASR chunks
+-> 文本归一化：NFKC、繁体转简体、重复语气词前缀清理
+-> chunk 合并：以 ASR 时间间隔为主，5s bucket 只作为轻量正向信号
+-> 低信息 chunk 标记：保留在 texts/chunk_times_ms，但不写入 semantic embeddings
+-> MiniLM semantic embedding
+```
+
+Whisper 调用固定使用 `task="transcribe"`，避免把原语音翻译成英文。`asr_language=auto` 仍然允许用于多语种素材；当 `asr_engine=auto` 且 `asr_language=auto` 时，索引走 Whisper 自动识别语言，不会先走中文 FunASR。新 manifest 会记录：
+
+```text
+task
+requested_language
+detected_language
+postprocess_strategy
+postprocess_stats
+text_profile
+```
+
+调参脚本：
+
+```text
+scripts/asr_postprocess_report.py
+```
+
+实验结论记录在：
+
+```text
+docs/experiments/asr/2026-07-07-asr-postprocess-tuning.md
+```
 
 当前服务器常用引擎：
 

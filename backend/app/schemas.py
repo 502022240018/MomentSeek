@@ -8,6 +8,11 @@ class IndexRequest(BaseModel):
     visual_model: str | None = None
     visual_sample_fps: float | None = Field(default=None, gt=0, le=10)
     visual_segment_seconds: float | None = Field(default=None, gt=0, le=60)
+    visual_segment_strategy: str | None = None
+    visual_min_segment_seconds: float | None = Field(default=None, gt=0, le=60)
+    visual_max_segment_seconds: float | None = Field(default=None, gt=0, le=60)
+    visual_shot_detector: str | None = None
+    visual_shot_threshold: float | None = Field(default=None, gt=0, le=1)
     face_sample_fps: float | None = Field(default=None, gt=0, le=15)
     ocr_sample_fps: float | None = Field(default=None, gt=0, le=5)
     asr_model: str | None = None
@@ -55,6 +60,36 @@ class IndexRequest(BaseModel):
         }
         if normalized not in allowed:
             raise ValueError("visual_model must be one of: " + ", ".join(sorted(allowed)))
+        return normalized
+
+    @field_validator("visual_segment_strategy")
+    @classmethod
+    def validate_visual_segment_strategy(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        allowed = {"fixed", "shot"}
+        if normalized not in allowed:
+            raise ValueError("visual_segment_strategy 只能是 fixed 或 shot")
+        return normalized
+
+    @field_validator("visual_shot_detector")
+    @classmethod
+    def validate_visual_shot_detector(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        aliases = {
+            "content": "pyscenedetect_content",
+            "pyscene_content": "pyscenedetect_content",
+            "pyscenedetect": "pyscenedetect_content",
+            "adaptive": "pyscenedetect_adaptive",
+            "pyscene_adaptive": "pyscenedetect_adaptive",
+        }
+        normalized = aliases.get(normalized, normalized)
+        allowed = {"simple", "pyscenedetect_content", "pyscenedetect_adaptive"}
+        if normalized not in allowed:
+            raise ValueError("visual_shot_detector must be simple, pyscenedetect_content, or pyscenedetect_adaptive")
         return normalized
 
     @field_validator("asr_model")

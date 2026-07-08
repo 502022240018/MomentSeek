@@ -4,9 +4,12 @@ numpy==1.26.4
 onnx==1.17.0
 scikit-image==0.25.2
 tifffile==2025.6.11
+scenedetect==0.7
 open_clip_torch==3.3.0
 transformers>=4.51.0,<5
 python-multipart==0.0.22
 pydantic-settings==2.12.0
 sentence-transformers==3.3.1
 rapidocr==3.9.0
+opencc-python-reimplemented==0.1.7
+pypinyin==0.54.0
