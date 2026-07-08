@@ -26,6 +26,10 @@ docs/experiments/<area>/<YYYY-MM-DD>-<topic>.md
 |---|---|---|
 | 2026-07-01 | visual | `visual/2026-07-01-clip-910b.md` |
 | 2026-07-03 | visual | `visual/2026-07-03-siglip2-31min-index.md` |
+| 2026-07-07 | asr | `asr/2026-07-07-asr-postprocess-tuning.md` |
+| 2026-07-07 | asr | `asr/2026-07-07-asr-pinyin-fallback-seed.md` |
+| 2026-07-07 | asr | `asr/2026-07-07-whisper-params-abtest.md` |
+| 2026-07-07 | asr | `asr/2026-07-07-asr-full-rebuild-no-prompt.md` |
 
 ## 每份实验总结应包含
 

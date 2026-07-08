@@ -37,18 +37,19 @@ ID:
 
 ```text
 优先级：P1
-状态：open
+状态：done
 范围：visual search ranking
 问题或目标：
   SigLIP2 + 5s bucket MaxSim 提高了局部目标召回，但当搜索范围包含大量无关视频时，无关视频的本视频内部最佳 bucket 可能被排得过高。
 影响：
   例如搜索“绿茵足球场有人在踢球”时，综艺视频片段可能排在真正足球场片段前面。
 证据或上下文：
-  当前 visual candidate 的 raw_score = visual_top1，但 Candidate.score 在分布可靠时使用 per-video percentile。每个视频都有自己的最高 percentile bucket，即使它的绝对相似度不高。
+  已于 2026-07-07 修复：visual candidate 的 raw_score = visual_top1，Candidate.score 改为 raw cosine 的跨视频校准值 visual_rank_score = clip((raw_score + 1) / 2, 0, 1)。per-video percentile / robust_z 继续用于视频内 strong/fuzzy/weak 判定和诊断 evidence，不再作为跨视频排序主分数。
 下一步：
-  做 visual 诊断报告，输出 video_name、start_time、raw_score/visual_top1、visual_top3、visual_mean、percentile、robust_z、distribution_median、distribution_mad、best_time、thumbnail，对比“烤包子”和“绿茵足球场有人在踢球”。
+  继续用真实素材观察“烤包子”和“绿茵足球场有人在踢球”等 query 的排序；如果仍出现单帧偶然相似误召，进入 RQ-002 的 top3/mean 一致性抑制。
 相关文件或实验：
   backend/app/search.py
+  backend/tests/test_search.py::test_visual_ranking_score_prefers_cross_video_raw_similarity_over_local_percentile
   docs/RETRIEVAL_CHANNELS.md
 ```
 
@@ -73,6 +74,23 @@ ID:
 
 ### RQ-003 ASR chunk 后处理
 
+2026-07-07 更新：
+
+```text
+状态：done for first pass / keep monitoring
+已完成：
+  - Whisper 强制 task="transcribe"，manifest 记录 requested/detected language。
+  - ASR raw chunks 写入索引前做文本归一化、短 chunk 合并、低信息 chunk semantic 跳过。
+  - 新增 scripts/asr_postprocess_report.py，可在现有素材上比较 gap_only/bucket_bonus/shot_bonus/conservative/aggressive_short。
+  - 当前默认策略为收紧后的 bucket_bonus。
+后续：
+  - 更多多语种素材上复跑调参报告。
+  - 真实 shot-aware visual segment 稳定后，重新评估 shot_bonus。
+  - 旧 ASR 索引需要 ASR-only 重跑才会应用新后处理。
+相关实验：
+  docs/experiments/asr/2026-07-07-asr-postprocess-tuning.md
+```
+
 ```text
 优先级：P2
 状态：open
@@ -88,6 +106,68 @@ ID:
 相关文件或实验：
   backend/app/indexing/asr.py
   backend/app/search.py
+```
+
+### RQ-003A ASR 错词容错与专有名词召回
+
+```text
+优先级：P2
+状态：investigating
+范围：asr search quality / semantic retrieval / lexical fallback
+问题或目标：
+  当前 ASR 原文里存在较多听错字、同音近音错词、专有名词误识别。
+  MiniLM semantic embedding 可以缓解主题型 query 的召回，但不能可靠恢复被 ASR 听错的人名、地名、片名、书名、品牌名等关键信息。
+影响：
+  用户搜索具体实体词时，semantic embedding 可能不稳定；lexical 搜索也会因为原文错词而漏召回。
+证据或上下文：
+  现有素材里出现过类似“黄拔”“赵正宵”“冰气”等疑似 ASR 错词。
+  embedding 对完整上下文的主题相似度有效，但对短 chunk 或关键名词错误无能为力。
+未来优化方向：
+  1. ASR 模型质量对比：按中文/英文/多语种素材比较 FunASR/Paraformer、Whisper small、Whisper medium 或其他更强转写模型。
+  2. 发音容错索引：为中文 ASR 文本增加 pinyin/近音检索 fallback，补人名、地名、片名、专有名词听错导致的漏召回。
+  3. 实体词保护：对字幕、OCR、文件名、用户标注里出现的实体词建立词表，用于 ASR 后处理提示、纠错候选或搜索扩展。
+  4. 多路融合：ASR semantic 负责主题召回，ASR lexical 负责精确词，pinyin/近音负责错词容错，最终在 evidence 中标明命中来源。
+  5. 评估集：构造一组“正确 query -> 错误 ASR 文本”的样例，单独评估 semantic、lexical、pinyin fallback 的召回贡献。
+下一步：
+  已完成第一版只读候选导出和 pinyin fallback seed eval。下一步从候选 HTML 中人工听查 30-50 条，补 correct_text/manual_label/真实 query，并增加 negative controls 评估误召风险。
+相关文件或实验：
+  backend/app/indexing/asr.py
+  backend/app/indexing/asr_text.py
+  backend/app/search.py
+  docs/experiments/asr/
+  docs/experiments/asr/2026-07-07-asr-pinyin-fallback-seed.md
+  eval/asr/asr_pinyin_seed_eval_20260707.jsonl
+  scripts/asr_error_candidates.py
+  scripts/asr_pinyin_fallback_eval.py
+```
+
+### RQ-003B ASR 重复幻觉过滤与风险标注
+```text
+优先级：P1
+状态：open
+范围：asr search quality / transcript reliability
+问题或目标：
+  删除中文 initial_prompt 并全量重建 ASR 后，prompt 泄漏已消失，但 Whisper 局部重复幻觉仍存在。
+  当前 bucket_bonus 后处理会合并短碎片，但不会主动删除或降权重复幻觉文本。
+影响：
+  用户按 ASR 文本检索时，重复幻觉片段可能被错误召回；播放时也会看到不存在或错位的台词。
+证据或上下文：
+  2026-07-07 本地全量 ASR 重建后：
+  - 书籍纪录片 prompt 泄漏短语计数为 0。
+  - 天c游xi 08:40 左右不再出现旧索引中的连续“我去找他”。
+  - 电视剧昨夜降至04 04:03-04:27 仍出现连续“你跟她说”。
+  - 天c游xi 04:22 左右仍出现“你这些人”短语级重复，并存在连续单字“你” run。
+下一步：
+  1. 保存 Whisper segment 诊断字段：avg_logprob、compression_ratio、no_speech_prob。
+  2. 增加只读报告脚本，统计 chunk 内重复 n-gram、连续单字循环和低置信片段。
+  3. 先对明显低信息重复 chunk 标记 semantic_eligible=False 或检索降权，避免直接误删真实重复台词。
+  4. 用已导出的全文和人工听查样例评估误杀风险，再决定是否在索引阶段过滤。
+相关文件或实验：
+  docs/experiments/asr/2026-07-07-asr-full-rebuild-no-prompt.md
+  runtime-server/analysis/asr_rebuild_20260707_all_summary.json
+  runtime-server/analysis/asr_full_texts_after_rebuild_20260707/
+  backend/app/indexing/asr.py
+  backend/app/indexing/asr_postprocess.py
 ```
 
 ### RQ-004 OCR chunk 质量

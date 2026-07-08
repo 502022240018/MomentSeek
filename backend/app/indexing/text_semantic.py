@@ -164,7 +164,7 @@ def build_text_semantic_arrays(
     indexed = [
         (index, str(chunk.get("text", "")).strip())
         for index, chunk in enumerate(chunks)
-        if str(chunk.get("text", "")).strip()
+        if chunk.get("semantic_eligible", True) and str(chunk.get("text", "")).strip()
     ]
     if not indexed:
         return {
