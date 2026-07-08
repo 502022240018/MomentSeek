@@ -98,9 +98,9 @@ class IndexRequest(BaseModel):
         if value is None:
             return None
         normalized = value.strip().lower()
-        allowed = {"tiny", "base", "small", "medium", "large", "large-v3"}
+        allowed = {"tiny", "base", "small", "medium", "large", "large-v3", "turbo", "large-v3-turbo"}
         if normalized not in allowed:
-            raise ValueError("asr_model 只能是 tiny、base、small、medium、large、large-v3")
+            raise ValueError("asr_model 只能是 tiny、base、small、medium、large、large-v3、turbo、large-v3-turbo")
         return normalized
 
     @field_validator("asr_language")

@@ -11,7 +11,7 @@ staging.ascend：Ascend 服务器预发布验证。
 prod.ascend：Ascend 生产或演示环境。
 ```
 
-dev profile 可以自动下载校验脚本支持的 Hugging Face 模型；staging/prod profile 必须使用预缓存模型、model manifest 和 models lock 复现环境，禁止运行时下载。部署流程以 manifest 为准，不依赖操作者记忆。
+dev profile 可以通过 bootstrap 或 `scripts/verify_models.py --download` 显式下载校验脚本支持的 Hugging Face 模型；服务运行时只读取本地模型。staging/prod profile 必须使用预缓存模型、model manifest 和 models lock 复现环境，禁止运行时下载。部署流程以 manifest 为准，不依赖操作者记忆。
 
 ## 标准目录
 

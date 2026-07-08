@@ -4,6 +4,7 @@ import sys
 import types
 
 import numpy as np
+import pytest
 
 from app.indexing import asr
 from app.indexing.asr import build_asr_index, load_sidecar
@@ -90,6 +91,7 @@ def test_whisper_forces_transcribe_task_and_records_detected_language(tmp_path, 
         device="cpu",
         model_dir=str(tmp_path / "models"),
         language="auto",
+        local_files_only=False,
     )
 
     assert chunks == [{"start_time": 1.0, "end_time": 2.0, "text": "你好"}]
@@ -124,11 +126,35 @@ def test_whisper_zh_language_does_not_pass_initial_prompt(tmp_path, monkeypatch)
         device="cpu",
         model_dir=str(tmp_path / "models"),
         language="zh",
+        local_files_only=False,
     )
 
     assert captured["options"]["task"] == "transcribe"
     assert captured["options"]["language"] == "zh"
     assert "initial_prompt" not in captured["options"]
+
+
+def test_whisper_local_files_only_requires_cached_pt(tmp_path):
+    with pytest.raises(FileNotFoundError, match="本地 Whisper 模型缺失"):
+        asr._whisper(
+            str(tmp_path / "audio.wav"),
+            model_name="small",
+            device="cpu",
+            model_dir=str(tmp_path / "models"),
+            language="zh",
+            local_files_only=True,
+        )
+
+
+def test_funasr_local_files_only_requires_cached_model(tmp_path):
+    with pytest.raises(FileNotFoundError, match="本地 ModelScope/FunASR 模型缺失"):
+        asr._funasr(
+            str(tmp_path / "audio.wav"),
+            "iic/SenseVoiceSmall",
+            "cpu",
+            model_root=tmp_path / "models" / "funasr",
+            local_files_only=True,
+        )
 
 
 def test_auto_engine_with_auto_language_uses_whisper_language_detection(tmp_path, monkeypatch):
@@ -177,6 +203,57 @@ def test_auto_engine_with_auto_language_uses_whisper_language_detection(tmp_path
 
     assert funasr_calls == []
     assert result["engine"] == "whisper"
+    assert result["detected_language"] == "en"
+
+
+def test_faster_whisper_engine_uses_faster_whisper_path(tmp_path, monkeypatch):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fake wav")
+    calls = []
+
+    monkeypatch.setattr(asr, "extract_audio", lambda *_args, **_kwargs: audio_path)
+
+    def fake_faster_whisper(*_args, **_kwargs):
+        calls.append(True)
+        return (
+            [{"start_time": 0.0, "end_time": 1.0, "text": "hello from turbo"}],
+            {"task": "transcribe", "requested_language": "en", "detected_language": "en"},
+        )
+
+    def fail_whisper(*_args, **_kwargs):
+        raise AssertionError("OpenAI Whisper should not be used for faster-whisper engine")
+
+    def fake_semantic_arrays(**kwargs):
+        chunks = kwargs["chunks"]
+        return {
+            "embeddings": np.asarray([[1.0, 0.0] for _ in chunks], dtype=np.float16),
+            "embedding_chunk_indices": np.asarray([0], dtype=np.int32),
+            "semantic_chunks": 1,
+            "semantic_model": "fake-semantic",
+            "semantic_device": "cpu",
+            "semantic_status": "complete",
+        }
+
+    monkeypatch.setattr(asr, "_faster_whisper", fake_faster_whisper, raising=False)
+    monkeypatch.setattr(asr, "_whisper", fail_whisper)
+    monkeypatch.setattr(asr, "build_text_semantic_arrays", fake_semantic_arrays, raising=False)
+
+    result = build_asr_index(
+        video_path=str(tmp_path / "video.mp4"),
+        output_path=str(tmp_path / "asr.npz"),
+        working_dir=str(tmp_path / "work"),
+        engine="faster-whisper",
+        model_name="turbo",
+        device="cpu",
+        model_dir=str(tmp_path / "models" / "whisper"),
+        faster_whisper_model_dir=str(tmp_path / "models" / "faster-whisper"),
+        language="en",
+        semantic_model="fake-semantic",
+    )
+
+    assert calls == [True]
+    assert result["engine"] == "faster-whisper"
+    assert result["model"] == "turbo"
     assert result["detected_language"] == "en"
 
 

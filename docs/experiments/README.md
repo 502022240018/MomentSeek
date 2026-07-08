@@ -30,6 +30,13 @@ docs/experiments/<area>/<YYYY-MM-DD>-<topic>.md
 | 2026-07-07 | asr | `asr/2026-07-07-asr-pinyin-fallback-seed.md` |
 | 2026-07-07 | asr | `asr/2026-07-07-whisper-params-abtest.md` |
 | 2026-07-07 | asr | `asr/2026-07-07-asr-full-rebuild-no-prompt.md` |
+| 2026-07-08 | asr | `asr/2026-07-08-whisper-context-loop-diagnostic.md` |
+| 2026-07-08 | asr | `asr/2026-07-08-asr-short-window-eval.md` |
+| 2026-07-08 | asr | `asr/2026-07-08-asr-short-window-extra-videos.md` |
+| 2026-07-08 | asr | `asr/2026-07-08-asr-window-ab-truth-eval.md` |
+| 2026-07-08 | asr | `asr/2026-07-08-asr-model-vad-speed-eval.md` |
+| 2026-07-08 | asr | `asr/2026-07-08-sensevoice-faster-whisper-medium-turbo.md` |
+| 2026-07-08 | asr | `asr/2026-07-08-asr-best3-metric-retest.md` |
 
 ## 每份实验总结应包含
 

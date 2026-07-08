@@ -324,6 +324,40 @@ def test_asr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
     assert results[0]["evidence"][0]["unit_id"] == 0
 
 
+def test_asr_search_falls_back_to_lexical_when_semantic_query_model_missing(tmp_path):
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    index_dir = _create_video(settings, catalog, name="interview.mp4")
+    catalog.update_video("video-1", indexed_modalities=["asr"])
+    _write_manifest(index_dir, "video-1", {
+        "asr": {
+            "file": "asr.npz",
+            "engine": "funasr",
+            "model_key": "iic/SenseVoiceSmall",
+            "language": "zh",
+            "semantic_model_key": "missing-semantic",
+            "embedding_space": "minilm-text-semantic",
+            "decode_status": "complete",
+            "semantic_status": "complete",
+        }
+    })
+    np.savez_compressed(
+        index_dir / "asr.npz",
+        chunk_times_ms=np.asarray([[10000, 13000]], dtype=np.int32),
+        texts=np.asarray(["电影投资需要长期判断"]),
+        embeddings=np.asarray([[1.0, 0.0]], dtype=np.float16),
+        embedding_chunk_indices=np.asarray([0], dtype=np.int32),
+    )
+    engine = SearchEngine(settings, catalog)
+    engine._encode_asr_query = lambda *_args: (_ for _ in ()).throw(FileNotFoundError("missing semantic"))  # type: ignore[method-assign]
+
+    results = engine.search("电影投资", None, ["asr"], ["video-1"])
+
+    assert results
+    assert results[0]["decision"] == "lexical_hit"
+    assert results[0]["evidence"][0]["semantic_score"] is None
+
+
 def test_ocr_v3_search_groups_box_text_by_chunk(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)

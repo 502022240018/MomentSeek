@@ -10,6 +10,26 @@ from app.indexing.common import atomic_save_npz, normalize
 from app.media import read_frames, save_thumbnail
 
 
+def _has_non_empty_onnx(path: Path) -> bool:
+    return path.is_dir() and any(item.is_file() and item.stat().st_size > 0 and item.suffix.lower() == ".onnx" for item in path.rglob("*"))
+
+
+def _resolve_insightface_root(root: str | None, model_name: str) -> Path:
+    root_path = Path(root or "~/.insightface").expanduser()
+    canonical_model_dir = root_path / "models" / model_name
+    if _has_non_empty_onnx(canonical_model_dir):
+        return root_path
+
+    models_parent_dir = root_path / model_name
+    if _has_non_empty_onnx(models_parent_dir) and root_path.name == "models":
+        return root_path.parent
+
+    if _has_non_empty_onnx(root_path) and root_path.name == model_name and root_path.parent.name == "models":
+        return root_path.parent.parent
+
+    raise FileNotFoundError(f"本地 InsightFace 模型缺失: expected {canonical_model_dir}")
+
+
 def _iou(first: np.ndarray, second: np.ndarray) -> float:
     x1, y1 = np.maximum(first[:2], second[:2])
     x2, y2 = np.minimum(first[2:], second[2:])
@@ -21,6 +41,7 @@ def _iou(first: np.ndarray, second: np.ndarray) -> float:
 
 class FaceEncoder:
     def __init__(self, model_name: str, provider: str = "cpu", device_id: int = 0, root: str | None = None):
+        face_root = _resolve_insightface_root(root, model_name)
         import onnxruntime as ort
         from insightface.app import FaceAnalysis
 
@@ -31,7 +52,7 @@ class FaceEncoder:
         else:
             providers = ["CPUExecutionProvider"]
             ctx_id = -1
-        self.app = FaceAnalysis(name=model_name, providers=providers, root=root or "~/.insightface")
+        self.app = FaceAnalysis(name=model_name, providers=providers, root=str(face_root))
         self.app.prepare(ctx_id=ctx_id, det_size=(640, 640))
         self.provider = provider if provider == "cann" and "CANNExecutionProvider" in available else "cpu"
 

@@ -25,6 +25,34 @@
       "required": false
     },
     {
+      "name": "funasr_sensevoice_small",
+      "kind": "directory",
+      "id": "iic/SenseVoiceSmall",
+      "target": "models/funasr/iic/SenseVoiceSmall",
+      "required": false
+    },
+    {
+      "name": "funasr_fsmn_vad",
+      "kind": "directory",
+      "id": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+      "target": "models/funasr/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+      "required": false
+    },
+    {
+      "name": "funasr_ct_punc",
+      "kind": "directory",
+      "id": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+      "target": "models/funasr/iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+      "required": false
+    },
+    {
+      "name": "faster_whisper_turbo",
+      "kind": "directory",
+      "id": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+      "target": "models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo",
+      "required": false
+    },
+    {
       "name": "text_semantic_minilm",
       "kind": "huggingface",
       "id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",

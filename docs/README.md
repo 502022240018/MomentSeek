@@ -9,7 +9,7 @@
 1. `docs/CURRENT.md`：当前项目、服务器、模型和部署状态。
 2. `docs/DEVELOPMENT.md`：本地开发 profile、启动脚本、模型下载和 smoke check。
 3. `docs/LOCAL_GPU_MIGRATION.md`：服务器 runtime 迁到本地 Docker GPU 并接管公网入口。
-4. `docs/MODELS.md`：模型清单、缓存目录、lock 和线上禁止运行时下载规则。
+4. `docs/MODELS.md`：模型清单、缓存目录、lock 和运行时禁止隐式下载规则。
 5. `docs/DEPLOYMENT.md`：staging/prod/new-server 的可复制部署流程。
 6. `docs/ISSUES_AND_ROADMAP.md`：当前问题池和后续优化路线。
 7. `docs/RETRIEVAL_CHANNELS.md`：visual / face / ASR / OCR 的索引与召回协议。

@@ -89,7 +89,7 @@ rsync -a --info=progress2 -e ssh root@110.126.0.52:/mnt/mog2/wyl/comfyui-wxy/mom
 
 服务器当前可用的 SigLIP2 缓存在 `/app/runtime/hf_cache`，所以同步 runtime 时要包含 `hf_cache/`。本地 CUDA profile 默认 `VISUAL_HF_CACHE_DIR=/app/runtime/hf_cache`，容器会从 `/app/runtime/hf_cache` 读取它。
 
-如果不同步 `runtime-server/hf_cache`，容器首次 visual 查询会尝试从 Hugging Face 下载 SigLIP2。ASR/OCR 语义检索使用 MiniLM，通常可继续从 `models/text-embeddings` 或运行时下载读取。
+如果不同步 `runtime-server/hf_cache`，容器首次 visual 查询会因为缺少本地 SigLIP2 text encoder 而失败；不要依赖运行时从 Hugging Face 下载。ASR/OCR 语义检索使用 MiniLM，也需要提前放在 `models/text-embeddings` 或 `/app/models/text-embeddings` 对应缓存中。
 
 ## 启动本地 Docker GPU 后端
 

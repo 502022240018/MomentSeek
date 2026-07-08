@@ -80,6 +80,16 @@ def _run_npu_self_test(ocr) -> None:
         raise RuntimeError(f"OCR NPU 自检失败：CANN Provider 已加载，但合成文字未被正确识别，output={text!r}")
 
 
+def _has_local_rapidocr_assets(model_root: str | Path) -> bool:
+    root = Path(model_root).expanduser()
+    if not root.is_dir():
+        return False
+    return any(
+        path.is_file() and path.stat().st_size > 0 and path.suffix.lower() in {".onnx", ".bin"}
+        for path in root.rglob("*")
+    )
+
+
 def _load_ocr(
     device: str,
     device_id: int,
@@ -90,12 +100,14 @@ def _load_ocr(
     model_type: str = "mobile",
     npu_self_test: bool = True,
 ):
+    if not _has_local_rapidocr_assets(model_root):
+        raise FileNotFoundError(f"本地 RapidOCR 模型缺失: {model_root}")
+
     try:
         from rapidocr import RapidOCR
     except ImportError as exc:
         raise RuntimeError("OCR 依赖 rapidocr 未安装；请安装 rapidocr 后重试") from exc
 
-    Path(model_root).mkdir(parents=True, exist_ok=True)
     ocr = RapidOCR(params=_rapidocr_params(device, device_id, model_root, ocr_version, det_lang, rec_lang, model_type))
     providers = _session_providers(ocr)
     if device == "npu":

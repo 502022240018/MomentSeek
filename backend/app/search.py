@@ -685,7 +685,10 @@ class SearchEngine:
                     semantic_query = None
                     if semantic_embeddings is not None:
                         model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
-                        semantic_query = self._encode_asr_query(text, model_name)
+                        try:
+                            semantic_query = self._encode_asr_query(text, model_name)
+                        except Exception:
+                            semantic_query = None
                     candidates.extend(_asr_candidates(
                         _asr_chunks_from_npz(data),
                         text,
@@ -702,7 +705,10 @@ class SearchEngine:
                     semantic_query = None
                     if semantic_embeddings is not None:
                         model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
-                        semantic_query = self._encode_asr_query(text, model_name)
+                        try:
+                            semantic_query = self._encode_asr_query(text, model_name)
+                        except Exception:
+                            semantic_query = None
                     candidates.extend(_asr_candidates(
                         _ocr_chunks_from_npz(data),
                         text,

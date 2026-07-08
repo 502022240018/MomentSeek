@@ -12,6 +12,7 @@ from PIL import Image
 
 from app.indexing.common import atomic_save_npz, normalize
 from app.media import probe_video, read_frames, save_thumbnail
+from app.model_sources import hf_cached_snapshot_path, offline_env, resolve_hf_model_source
 
 
 def resolve_device(npu_enabled: bool, npu_device_id: int, cuda_enabled: bool = False) -> str:
@@ -326,33 +327,7 @@ def _segment_id_for_timestamp(timestamp_ms: int, segment_times_ms: np.ndarray) -
 
 
 def _hf_cached_snapshot_path(model_cache_dir: str | Path | None, model_id: str) -> Path | None:
-    if not model_cache_dir:
-        return None
-    cache_dir = Path(model_cache_dir)
-    repo_name = f"models--{model_id.replace('/', '--')}"
-    for repo_dir in (cache_dir / "hub" / repo_name, cache_dir / repo_name):
-        snapshots = repo_dir / "snapshots"
-        if not repo_dir.exists() or not snapshots.exists():
-            continue
-        ref = repo_dir / "refs" / "main"
-        if ref.exists():
-            snapshot = snapshots / ref.read_text(encoding="utf-8").strip()
-            if snapshot.exists():
-                return snapshot
-        complete_snapshots = []
-        for snapshot in snapshots.iterdir():
-            if not snapshot.is_dir():
-                continue
-            has_config = (snapshot / "config.json").exists()
-            has_weights = (snapshot / "model.safetensors").exists() or (snapshot / "pytorch_model.bin").exists()
-            if has_config and has_weights:
-                complete_snapshots.append(snapshot)
-        if complete_snapshots:
-            return sorted(complete_snapshots, key=lambda path: path.name)[0]
-        for snapshot in sorted(snapshots.iterdir(), key=lambda path: path.name):
-            if snapshot.is_dir():
-                return snapshot
-    return None
+    return hf_cached_snapshot_path(model_cache_dir, model_id)
 
 
 def _hf_model_cached(model_cache_dir: str | Path | None, model_id: str) -> bool:
@@ -360,10 +335,7 @@ def _hf_model_cached(model_cache_dir: str | Path | None, model_id: str) -> bool:
 
 
 def _hf_load_source(model_cache_dir: str | Path | None, model_id: str) -> tuple[str, bool]:
-    snapshot = _hf_cached_snapshot_path(model_cache_dir, model_id)
-    if snapshot is not None:
-        return str(snapshot), True
-    return model_id, False
+    return resolve_hf_model_source(model_cache_dir, model_id, local_files_only=True)
 
 
 def _resolve_openclip_pretrained(model_name: str, pretrained: str) -> str:
@@ -374,9 +346,16 @@ def _resolve_openclip_pretrained(model_name: str, pretrained: str) -> str:
             Path("models") / filename,
             Path.cwd() / "models" / filename,
         ):
-            if candidate.exists():
-                return str(candidate)
-    return pretrained
+            if candidate.is_file():
+                return str(candidate.resolve())
+        raise FileNotFoundError(
+            f"本地 OpenCLIP 权重缺失: {filename}; expected under /app/models or ./models"
+        )
+
+    pretrained_path = Path(pretrained)
+    if pretrained_path.is_file():
+        return str(pretrained_path.resolve())
+    raise FileNotFoundError(f"本地 OpenCLIP 权重缺失: {pretrained}")
 
 
 class OpenClipEncoder:
@@ -514,12 +493,7 @@ class HfVisualEncoder:
         self.model_id = config.model_id or config.key
         self.dtype = torch.bfloat16 if device.startswith(("npu", "cuda")) else torch.float32
         load_source, local_files_only = _hf_load_source(model_cache_dir, self.model_id)
-        offline_env = {}
-        if local_files_only:
-            for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
-                offline_env[name] = os.environ.get(name)
-                os.environ[name] = "1"
-        try:
+        with offline_env(local_files_only):
             self.processor = AutoProcessor.from_pretrained(
                 load_source,
                 trust_remote_code=True,
@@ -531,12 +505,6 @@ class HfVisualEncoder:
                 torch_dtype=self.dtype,
                 local_files_only=local_files_only,
             ).to(device)
-        finally:
-            for name, old_value in offline_env.items():
-                if old_value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = old_value
         self.model.eval()
 
     def _move_batch(self, batch: dict[str, Any]) -> dict[str, Any]:

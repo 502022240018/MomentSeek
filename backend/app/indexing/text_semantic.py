@@ -1,52 +1,19 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import numpy as np
 
 from app.indexing.common import atomic_save_npz
+from app.model_sources import hf_cached_snapshot_path, offline_env, resolve_hf_model_source
 
 
 def _hf_cached_snapshot_path(model_dir: str | Path, model_name: str) -> Path | None:
-    root = Path(model_dir)
-    repo_name = f"models--{model_name.replace('/', '--')}"
-    for repo_dir in (root / "hub" / repo_name, root / repo_name):
-        snapshots = repo_dir / "snapshots"
-        if not repo_dir.exists() or not snapshots.exists():
-            continue
-        ref = repo_dir / "refs" / "main"
-        if ref.exists():
-            snapshot = snapshots / ref.read_text(encoding="utf-8").strip()
-            if snapshot.exists():
-                return snapshot
-        complete_snapshots = []
-        for snapshot in snapshots.iterdir():
-            if not snapshot.is_dir():
-                continue
-            has_config = (snapshot / "config.json").exists() or (snapshot / "modules.json").exists()
-            has_weights = (
-                (snapshot / "model.safetensors").exists()
-                or (snapshot / "pytorch_model.bin").exists()
-                or any(snapshot.glob("**/model.safetensors"))
-                or any(snapshot.glob("**/pytorch_model.bin"))
-            )
-            if has_config and has_weights:
-                complete_snapshots.append(snapshot)
-        if complete_snapshots:
-            return sorted(complete_snapshots, key=lambda path: path.name)[0]
-        for snapshot in sorted(snapshots.iterdir(), key=lambda path: path.name):
-            if snapshot.is_dir():
-                return snapshot
-    return None
+    return hf_cached_snapshot_path(model_dir, model_name)
 
 
 def _resolve_model_source(model_name: str, model_dir: str | Path, local_files_only: bool) -> tuple[str, bool]:
-    if local_files_only:
-        snapshot = _hf_cached_snapshot_path(model_dir, model_name)
-        if snapshot is not None:
-            return str(snapshot), True
-    return model_name, local_files_only
+    return resolve_hf_model_source(model_dir, model_name, local_files_only=local_files_only)
 
 
 def resolve_text_embedding_device(device: str, cuda_enabled: bool = False) -> str:
@@ -81,29 +48,15 @@ class TextEmbeddingEncoder:
         self.device = device
         Path(model_dir).mkdir(parents=True, exist_ok=True)
         model_source, resolved_local_only = _resolve_model_source(model_name, model_dir, local_files_only)
-        offline_env = {}
-        if resolved_local_only:
-            # Some transformers versions still make metadata calls while loading a
-            # cached tokenizer. Force offline mode so shared-server jobs fail fast
-            # to lexical fallback instead of hanging on Hugging Face networking.
-            for name in ("TRANSFORMERS_OFFLINE", "HF_HUB_OFFLINE"):
-                offline_env[name] = os.environ.get(name)
-                os.environ[name] = "1"
         from sentence_transformers import SentenceTransformer
 
-        try:
+        with offline_env(resolved_local_only):
             self.model = SentenceTransformer(
                 model_source,
                 cache_folder=str(model_dir),
                 device=device,
                 local_files_only=resolved_local_only,
             )
-        finally:
-            for name, old_value in offline_env.items():
-                if old_value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = old_value
 
     def encode(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
         if not texts:

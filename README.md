@@ -4,7 +4,7 @@
 
 - `visual_index`：SigLIP2 / CLIP 系列视觉 embedding，默认 5fps 抽帧、5 秒 bucket，按 bucket 内最大相似帧返回场景、物体和视觉语义命中。
 - `face_index`：InsightFace / ArcFace，同一人物与明星出现片段。
-- `asr_index`：Whisper baseline（保留 FunASR 适配器）+ 文本 embedding 语义索引，检索带时间戳的语音内容。
+- `asr_index`：默认 SenseVoiceSmall/FunASR，可选 faster-whisper turbo + 文本 embedding 语义索引，检索带时间戳的语音内容。
 - `ocr_index`：RapidOCR + 文本 embedding 语义索引，检索画面中的字幕、招牌、标题和其他可读文字。
 
 前端参考视频检索 Playground 的交互形态，后端提供 FastAPI 和 OpenAPI 文档。检索结果统一返回连续的 `start_time/end_time`、置信度、缩略图和命中证据。
@@ -109,9 +109,11 @@ docker compose -f compose.yml -f compose.server.yml -f compose.ascend.yml up -d 
 
 模型不提交到 Git。当前约定：
 
-1. 开发 profile 使用 `deploy/models/dev-full.models.json`，bootstrap 可自动下载校验脚本支持的 Hugging Face 小模型条目。
-2. Ascend staging/prod 使用 `deploy/models/ascend-prod.models.json`，模型必须预缓存并挂载到容器内 `/app/models`。
-3. visual / face / ASR / OCR 的模型、缓存和 lock 规则以 [docs/MODELS.md](docs/MODELS.md) 为准。
+1. 开发 profile 使用 `deploy/models/dev-full.models.json`，bootstrap 可显式下载校验脚本支持的 Hugging Face 小模型条目。
+2. 运行时只从本地 `models/` 或容器内 `/app/models` 读取模型；只有 bootstrap / `verify_models.py --download` 这类显式准备命令允许下载。
+3. ASR 默认使用 `SenseVoiceSmall`，可通过 `ASR_ENGINE=faster-whisper` + `ASR_MODEL=turbo` 显式切换到 faster-whisper turbo。
+4. Ascend staging/prod 使用 `deploy/models/ascend-prod.models.json`，模型必须预缓存并挂载到容器内 `/app/models`。
+5. visual / face / ASR / OCR 的模型、缓存和 lock 规则以 [docs/MODELS.md](docs/MODELS.md) 为准。
 
 在新的昇腾服务器上，通过 `ASCEND_RUNTIME_IMAGE` 指向与驱动匹配的 ARM64 CANN/torch_npu 基础镜像，不需要修改业务代码。
 当前服务器镜像额外固定 NumPy 1.26，以兼容 InsightFace 的 ONNXRuntime；ARM64 wheel 放在不入 Git 的 `vendor-wheels/`，部署前按 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 准备。

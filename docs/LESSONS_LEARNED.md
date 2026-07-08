@@ -189,3 +189,26 @@
   docs/RETRIEVAL_CHANNELS.md
   docs/experiments/asr/2026-07-07-asr-postprocess-tuning.md
 ```
+
+## 2026-07-08 本地容器模型缓存位置
+
+```text
+类别：Docker / model cache
+现象：
+  本地 ASR 实验跑过 SenseVoice/FunASR，但按新默认配置重建 ASR 时，
+  /app/models/funasr 下找不到 iic/SenseVoiceSmall、fsmn-vad、ct-punc。
+根因：
+  实验阶段模型可能下载到了容器内部 /root/.cache/modelscope；
+  该目录不是宿主机挂载目录，docker compose --force-recreate 后容器可写层会被替换。
+影响：
+  新代码的 local-only 模型解析会正确报缺模型；如果没有提前迁移缓存，就需要重新显式下载模型。
+经验：
+  能跑过实验不等于模型已经进入项目可复用目录。必须检查宿主机挂载目录，而不是只看实验是否成功。
+以后规则：
+  所有要长期复用的模型必须放在项目 models/ 或部署约定的 /app/models 挂载目录；
+  recreate 容器前，如果怀疑模型在容器内部 cache，先复制 /root/.cache/modelscope 到宿主机 models/funasr；
+  运行时索引不得隐式下载模型，只能由 bootstrap、verify_models.py --download 或人工显式模型准备步骤下载。
+相关文档：
+  docs/MODELS.md
+  docs/DEVELOPMENT.md
+```

@@ -22,7 +22,7 @@ deploy/env/dev.cpu.example
 deploy/env/dev.cuda.example
 ```
 
-`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。`dev.cpu` 默认使用 `VISUAL_MODEL=chinese-clip-vit-b16`，用于 clean clone 最小验证；`dev.cuda` 默认使用 `VISUAL_MODEL=siglip2-so400m-384`，用于本地 GPU 演示或读取当前服务器迁移来的 SigLIP2 v3 索引。开发 profile 的必需校验项是 Hugging Face visual / semantic 模型；Face、Whisper、RapidOCR 在 bootstrap 阶段不阻塞，首次使用对应通道时仍要由库或本地缓存准备。staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载，也不能用 `scripts/bootstrap_dev.*` 准备环境。
+`dev.cpu` 和 `dev.cuda` 都使用 `deploy/models/dev-full.models.json`。`dev.cpu` 默认使用 `VISUAL_MODEL=chinese-clip-vit-b16`，用于 clean clone 最小验证；`dev.cuda` 默认使用 `VISUAL_MODEL=siglip2-so400m-384`，用于本地 GPU 演示或读取当前服务器迁移来的 SigLIP2 v3 索引。开发 profile 的必需校验项是 Hugging Face visual / semantic 模型；Face、SenseVoice/faster-whisper、RapidOCR 在 bootstrap 阶段不阻塞，但运行时只读取本地模型，缺失时会明确报错，不在索引任务中隐式下载。staging/prod 必须使用预缓存模型和锁文件校验，不能在运行时下载，也不能用 `scripts/bootstrap_dev.*` 准备环境。
 
 `scripts/bootstrap_dev.*` 只接受 `dev.cpu` 和 `dev.cuda`。它们安装的是本地开发依赖，不安装 CANN/torch_npu，也不负责准备 Ascend staging/prod。`dev.cuda` 只表示运行配置允许 CUDA；如果需要 GPU 加速，先准备匹配本机驱动的 CUDA/PyTorch 环境，并用 `python -c "import torch; print(torch.cuda.is_available())"` 验证。
 
@@ -118,7 +118,7 @@ cp deploy/env/dev.cuda.example .env
 
 ## 模型下载策略
 
-开发 profile 的目标是降低新开发者启动成本，但当前 `scripts/verify_models.py --download` 只会下载 Hugging Face 模型条目。`dev-full.models.json` 因此只把 Hugging Face visual / semantic 条目标为必需；InsightFace、Whisper 和 RapidOCR 在 bootstrap 阶段是可选校验项，缺失时不会阻塞 bootstrap。首次使用 face / ASR / OCR 通道时，对应库仍可能需要初始化、下载自己的资源或读取已有缓存。下载入口是 bootstrap 脚本和 `scripts/verify_models.py --download`，模型清单来自 `MODEL_MANIFEST`：
+开发 profile 的目标是降低新开发者启动成本，但当前 `scripts/verify_models.py --download` 只会下载 Hugging Face 模型条目。`dev-full.models.json` 因此只把 Hugging Face visual / semantic 条目标为必需；InsightFace、SenseVoice/faster-whisper 和 RapidOCR 在 bootstrap 阶段是可选校验项，缺失时不会阻塞 bootstrap。运行时只读取本地模型，缺失时会明确报错；不要依赖索引任务自动联网下载。显式下载入口是 bootstrap 脚本和 `scripts/verify_models.py --download`，模型清单来自 `MODEL_MANIFEST`：
 
 ```text
 dev.cpu / dev.cuda -> deploy/models/dev-full.models.json
@@ -130,7 +130,7 @@ dev.cpu / dev.cuda -> deploy/models/dev-full.models.json
 models/
 ```
 
-本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。若需要离线验证 ASR，Whisper 条目必须在目标目录中存在与 `ASR_MODEL` 同名的 `.pt` 文件，例如 `models/whisper/base.pt`。其他模型条目按对应库的要求准备安装和缓存。
+本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。ASR 默认是 `ASR_ENGINE=funasr` + `ASR_ZH_MODEL=iic/SenseVoiceSmall`，本地目录约定为 `models/funasr/iic/SenseVoiceSmall`，并配套 `models/funasr/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch` 和 `models/funasr/iic/punc_ct-transformer_cn-en-common-vocab471067-large`。需要更强多语言或更好效果时，可切到 `ASR_ENGINE=faster-whisper` + `ASR_MODEL=turbo`，本地 snapshot 目录约定为 `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。其他模型条目按 `docs/MODELS.md` 的目录约定准备。
 
 ## 启动后端
 
@@ -210,7 +210,7 @@ Linux/macOS：
 
 `.env` 已存在：不要直接覆盖。先比较 example 和当前 `.env`，尤其是端口、模型目录、runtime 目录和设备开关。
 
-模型下载慢或失败：先确认当前 profile 是 `dev.cpu` 或 `dev.cuda`，并确认显式传入了 `-DownloadModels` 或 `--download`。当前自动下载只覆盖 Hugging Face 条目；InsightFace、Whisper 和 RapidOCR 相关缓存不阻塞 bootstrap，但首次使用对应通道前仍需按库要求准备。线上 profile 不应打开运行时下载。
+模型下载慢或失败：先确认当前 profile 是 `dev.cpu` 或 `dev.cuda`，并确认显式传入了 `-DownloadModels` 或 `--download`。当前自动下载只覆盖 Hugging Face 条目；InsightFace、SenseVoice/faster-whisper 和 RapidOCR 相关缓存不阻塞 bootstrap，但运行时只读取本地模型，缺失时应按 `docs/MODELS.md` 补齐缓存。线上 profile 不应打开运行时下载。
 
 端口被占用：优先调整 `.env` 中的 `APP_PORT` 或前端开发端口。不要为了本地开发执行 broad kill。
 

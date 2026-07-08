@@ -18,11 +18,32 @@
       "required": true
     },
     {
-      "name": "whisper_small",
-      "kind": "whisper",
-      "id": "small",
-      "target": "/app/models/whisper",
+      "name": "funasr_sensevoice_small",
+      "kind": "directory",
+      "id": "iic/SenseVoiceSmall",
+      "target": "/app/models/funasr/iic/SenseVoiceSmall",
       "required": true
+    },
+    {
+      "name": "funasr_fsmn_vad",
+      "kind": "directory",
+      "id": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+      "target": "/app/models/funasr/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+      "required": true
+    },
+    {
+      "name": "funasr_ct_punc",
+      "kind": "directory",
+      "id": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+      "target": "/app/models/funasr/iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+      "required": true
+    },
+    {
+      "name": "faster_whisper_turbo",
+      "kind": "directory",
+      "id": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+      "target": "/app/models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo",
+      "required": false
     },
     {
       "name": "text_semantic_minilm",

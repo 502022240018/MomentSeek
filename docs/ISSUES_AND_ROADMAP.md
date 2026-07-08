@@ -237,13 +237,13 @@ ID:
 状态：open
 范围：asr indexing performance
 问题或目标：
-  Whisper small 较安全，但 ASR 耗时受语音密度影响很大；medium 在共享 NPU 上曾 OOM。
+  ASR 默认切到 SenseVoiceSmall/FunASR；ASR 耗时仍受语音密度、VAD、timestamp 对齐和 chunk 切分影响很大。
 影响：
   长视频或语音密集视频可能由 ASR 主导总耗时。
 证据或上下文：
-  Whisper medium 在共享 NPU 2 上 OOM；当前默认 small。
+  Whisper medium 在共享 NPU 2 上曾 OOM；2026-07-08 实验显示 SenseVoiceSmall 速度快、文本可读性好，但 timestamp/chunk 切分仍需打磨；faster-whisper turbo 作为多语言/高效果备选。
 下一步：
-  评估 FunASR/Paraformer 对中文质量的提升，以及 faster-whisper 或分段策略对速度的提升。
+  优化 SenseVoice timestamp 对齐、VAD 和 chunk 合并策略；保留 faster-whisper turbo 对特殊语言或高效果场景的可切换路径。
 相关文件或实验：
   backend/app/indexing/asr.py
   docs/OPERATIONS.md

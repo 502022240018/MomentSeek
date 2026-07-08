@@ -13,6 +13,11 @@ from app.indexing.asr_text import asr_text_profile
 from app.indexing.common import atomic_save_npz
 from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
 from app.media import extract_audio, parse_timecode
+from app.model_sources import (
+    offline_env,
+    resolve_faster_whisper_model_source,
+    resolve_modelscope_model_source,
+)
 
 
 DEFAULT_ASR_POSTPROCESS_STRATEGY = "bucket_bonus"
@@ -73,18 +78,28 @@ def load_sidecar(path: str | Path) -> list[dict]:
     return chunks
 
 
-def _funasr(audio_path: str, model_name: str, device: str) -> list[dict]:
+def _funasr(
+    audio_path: str,
+    model_name: str,
+    device: str,
+    model_root: str | Path | None = None,
+    local_files_only: bool = True,
+) -> list[dict]:
+    model_source = resolve_modelscope_model_source(model_root, model_name, local_files_only=local_files_only)
+    vad_source = resolve_modelscope_model_source(model_root, "fsmn-vad", local_files_only=local_files_only)
+    punc_source = resolve_modelscope_model_source(model_root, "ct-punc", local_files_only=local_files_only)
     if str(device).startswith("npu"):
         import torch_npu  # noqa: F401  # register Ascend backend before model load
     from funasr import AutoModel
 
-    model = AutoModel(
-        model=model_name,
-        vad_model="fsmn-vad",
-        punc_model="ct-punc",
-        device=device,
-        disable_update=True,
-    )
+    with offline_env(local_files_only):
+        model = AutoModel(
+            model=model_source,
+            vad_model=vad_source,
+            punc_model=punc_source,
+            device=device,
+            disable_update=True,
+        )
     result = model.generate(input=audio_path, batch_size_s=300, sentence_timestamp=True)
     if not result:
         return []
@@ -106,19 +121,33 @@ def _funasr(audio_path: str, model_name: str, device: str) -> list[dict]:
     return [{"start_time": 0, "end_time": 0, "text": text}] if text else []
 
 
+def _resolve_whisper_model_source(model_name: str, model_dir: str | Path, local_files_only: bool) -> str:
+    explicit_path = Path(model_name)
+    if explicit_path.exists():
+        return str(explicit_path)
+    cached = Path(model_dir) / f"{model_name}.pt"
+    if cached.is_file() and cached.stat().st_size > 0:
+        return str(cached)
+    if local_files_only:
+        raise FileNotFoundError(f"本地 Whisper 模型缺失: {model_name}; model_dir={model_dir}")
+    return model_name
+
+
 def _whisper(
     audio_path: str,
     model_name: str,
     device: str,
     model_dir: str,
     language: str = "auto",
+    local_files_only: bool = True,
 ) -> tuple[list[dict], dict]:
-    import whisper
-
     if str(device).startswith("npu"):
         import torch_npu  # noqa: F401  # register Ascend backend before .to(device)
     Path(model_dir).mkdir(parents=True, exist_ok=True)
-    model = whisper.load_model(model_name, device=device, download_root=model_dir)
+    model_source = _resolve_whisper_model_source(model_name, model_dir, local_files_only)
+    import whisper
+
+    model = whisper.load_model(model_source, device=device, download_root=model_dir)
     options = {"fp16": device != "cpu", "task": "transcribe"}
     if language and language != "auto":
         options["language"] = language
@@ -132,6 +161,44 @@ def _whisper(
         "task": "transcribe",
         "requested_language": language or "auto",
         "detected_language": str(result.get("language") or ""),
+    }
+
+
+def _faster_whisper(
+    audio_path: str,
+    model_name: str,
+    device: str,
+    model_dir: str,
+    language: str = "auto",
+    local_files_only: bool = True,
+) -> tuple[list[dict], dict]:
+    from faster_whisper import WhisperModel
+
+    model_source = resolve_faster_whisper_model_source(model_dir, model_name, local_files_only=local_files_only)
+    fw_device = "cuda" if str(device).startswith("cuda") else "cpu"
+    compute_type = "float16" if fw_device == "cuda" else "int8"
+    with offline_env(local_files_only):
+        model = WhisperModel(model_source, device=fw_device, compute_type=compute_type)
+    transcribe_language = None if not language or language == "auto" else language
+    segments_iter, info = model.transcribe(
+        audio_path,
+        language=transcribe_language,
+        task="transcribe",
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 500},
+        condition_on_previous_text=True,
+        beam_size=5,
+    )
+    chunks = [
+        {"start_time": float(item.start), "end_time": float(item.end), "text": str(item.text).strip()}
+        for item in segments_iter
+        if str(item.text).strip()
+    ]
+    return chunks, {
+        "task": "transcribe",
+        "requested_language": language or "auto",
+        "detected_language": str(getattr(info, "language", "") or ""),
+        "compute_type": compute_type,
     }
 
 
@@ -183,6 +250,9 @@ def build_asr_index(
     language: str = "auto",
     sidecar_path: str | None = None,
     funasr_model: str = "paraformer-zh",
+    funasr_model_dir: str | None = None,
+    faster_whisper_model_dir: str | None = None,
+    model_local_files_only: bool = True,
     semantic_enabled: bool = True,
     semantic_output_path: str | None = None,
     semantic_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -232,10 +302,17 @@ def build_asr_index(
         # Chinese transcription quality: prefer FunASR/Paraformer only when the
         # request explicitly asks for Chinese, or when FunASR is explicitly chosen.
         # True language auto needs Whisper's language detection.
-        prefer_funasr = engine == "funasr" or (engine == "auto" and requested_language == "zh")
+        normalized_engine = engine.replace("_", "-").casefold()
+        prefer_funasr = normalized_engine == "funasr" or (normalized_engine == "auto" and requested_language == "zh")
         if prefer_funasr:
             try:
-                raw_chunks = _funasr(str(audio_path), funasr_model, device)
+                raw_chunks = _funasr(
+                    str(audio_path),
+                    funasr_model,
+                    device,
+                    model_root=funasr_model_dir or str(Path(model_dir).parent / "funasr"),
+                    local_files_only=model_local_files_only,
+                )
                 used_engine = "funasr"
                 effective_model = funasr_model
                 if (
@@ -253,12 +330,32 @@ def build_asr_index(
                     device,
                     model_dir,
                     requested_language,
+                    local_files_only=model_local_files_only,
                 )
                 used_engine = "whisper"
                 task = str(whisper_metadata.get("task") or task)
                 detected_language = str(whisper_metadata.get("detected_language") or "")
+        elif normalized_engine == "faster-whisper":
+            raw_chunks, whisper_metadata = _faster_whisper(
+                str(audio_path),
+                model_name,
+                device,
+                faster_whisper_model_dir or str(Path(model_dir).parent / "faster-whisper"),
+                requested_language,
+                local_files_only=model_local_files_only,
+            )
+            used_engine = "faster-whisper"
+            task = str(whisper_metadata.get("task") or task)
+            detected_language = str(whisper_metadata.get("detected_language") or "")
         else:
-            raw_chunks, whisper_metadata = _whisper(str(audio_path), model_name, device, model_dir, requested_language)
+            raw_chunks, whisper_metadata = _whisper(
+                str(audio_path),
+                model_name,
+                device,
+                model_dir,
+                requested_language,
+                local_files_only=model_local_files_only,
+            )
             used_engine = "whisper"
             task = str(whisper_metadata.get("task") or task)
             detected_language = str(whisper_metadata.get("detected_language") or "")
