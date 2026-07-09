@@ -82,7 +82,15 @@ def _needs_latin_boundary_repair(left_text: str, right_text: str) -> bool:
         return False
     if _ends_sentence(left_text):
         return False
-    return left[-1].isalpha() and right[0].isalpha()
+
+    def ascii_alpha(char: str) -> bool:
+        return "a" <= char.lower() <= "z"
+
+    if not ascii_alpha(left[-1]) or not ascii_alpha(right[0]):
+        return False
+    left_tail = left.split()[-1]
+    right_head = right.split()[0]
+    return len(left_tail) <= 3 or len(right_head) <= 3
 
 
 def _join_text(left_text: str, right_text: str, *, boundary_repair: bool) -> str:

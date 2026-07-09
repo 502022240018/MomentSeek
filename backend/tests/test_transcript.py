@@ -411,8 +411,51 @@ def test_sidecar_asr_index_postprocesses_short_fragments_and_preserves_schema(tm
     with np.load(tmp_path / "asr.npz", allow_pickle=False) as data:
         assert set(data.files) == {"chunk_times_ms", "texts", "embeddings", "embedding_chunk_indices"}
         assert data["chunk_times_ms"].tolist() == [[0, 1200], [3200, 3700]]
-        assert data["texts"].tolist() == ["今天 我们聊一本书", "下一段"]
+        assert data["texts"].tolist() == ["今天我们聊一本书", "下一段"]
         assert data["embedding_chunk_indices"].tolist() == [0, 1]
     assert result["raw_chunks"] == 3
     assert result["chunks"] == 2
     assert result["postprocess_stats"]["merged_chunks"] == 1
+
+
+def test_sidecar_asr_pipeline_repairs_cjk_boundary_and_keeps_npz_schema(tmp_path, monkeypatch):
+    sidecar = tmp_path / "broken.srt"
+    sidecar.write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\n孤\n\n"
+        "2\n00:00:04,940 --> 00:00:06,000\n独敏感又倔强。\n",
+        encoding="utf-8",
+    )
+
+    def fake_semantic_arrays(**kwargs):
+        chunks = kwargs["chunks"]
+        assert [chunk["text"] for chunk in chunks] == ["孤独敏感又倔强。"]
+        return {
+            "embeddings": np.asarray([[1.0, 0.0]], dtype=np.float16),
+            "embedding_chunk_indices": np.asarray([0], dtype=np.int32),
+            "semantic_chunks": 1,
+            "semantic_model": "fake-semantic",
+            "semantic_device": "cpu",
+            "semantic_status": "complete",
+        }
+
+    monkeypatch.setattr(asr, "build_text_semantic_arrays", fake_semantic_arrays, raising=False)
+
+    result = build_asr_index(
+        video_path=str(tmp_path / "video.mp4"),
+        output_path=str(tmp_path / "asr.npz"),
+        working_dir=str(tmp_path / "work"),
+        engine="sidecar",
+        model_name="small",
+        device="cpu",
+        model_dir=str(tmp_path / "models"),
+        sidecar_path=str(sidecar),
+        semantic_enabled=True,
+        semantic_model="fake-semantic",
+    )
+
+    with np.load(tmp_path / "asr.npz", allow_pickle=False) as data:
+        assert set(data.files) == {"chunk_times_ms", "texts", "embeddings", "embedding_chunk_indices"}
+        assert data["texts"].tolist() == ["孤独敏感又倔强。"]
+    assert result["raw_items"] == 2
+    assert result["retrieval_chunks"] == 1
+    assert result["chunk_builder_stats"]["word_boundary_repairs"] == 1

@@ -66,3 +66,15 @@ def test_builder_repairs_latin_word_boundary():
 
     assert [chunk.text for chunk in chunks] == ["what are you doing"]
     assert stats["word_boundary_repairs"] == 1
+
+
+def test_builder_does_not_treat_complete_latin_words_as_word_boundary_break():
+    chunks, stats = build_retrieval_chunks(
+        [
+            _raw(0, 1000, 2500, "hello world"),
+            _raw(1, 5000, 7000, "green field"),
+        ],
+    )
+
+    assert [chunk.text for chunk in chunks] == ["hello world", "green field"]
+    assert stats["word_boundary_repairs"] == 0

@@ -8,9 +8,10 @@ from pathlib import Path
 
 import numpy as np
 
-from app.indexing.asr_postprocess import postprocess_asr_chunks, strategy_config
+from app.indexing.asr_debug import write_asr_debug_artifacts
+from app.indexing.asr_retrieval_chunks import RetrievalChunkConfig, build_retrieval_chunks
 from app.indexing.asr_text import asr_text_profile
-from app.indexing.asr_transcript_parser import parse_funasr_raw_transcript
+from app.indexing.asr_transcript_parser import parse_funasr_raw_transcript, raw_items_from_chunks
 from app.indexing.common import atomic_save_npz
 from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
 from app.media import extract_audio, parse_timecode
@@ -253,6 +254,20 @@ def _empty_postprocess_stats() -> dict[str, int]:
     }
 
 
+def _empty_chunk_builder_stats() -> dict[str, int]:
+    return {
+        "raw_items": 0,
+        "normalized_items": 0,
+        "retrieval_chunks": 0,
+        "dropped_empty_items": 0,
+        "merged_items": 0,
+        "word_boundary_repairs": 0,
+        "fake_gap_repairs": 0,
+        "long_chunks": 0,
+        "semantic_ineligible_chunks": 0,
+    }
+
+
 def build_asr_index(
     video_path: str,
     output_path: str,
@@ -274,6 +289,10 @@ def build_asr_index(
     semantic_model_dir: str | None = None,
     semantic_batch_size: int = 32,
     semantic_local_files_only: bool = True,
+    debug_artifacts_enabled: bool = False,
+    save_raw_transcript: bool = False,
+    debug_output_dir: str | None = None,
+    vad_strategy: str = "funasr_fsmn",
 ) -> dict:
     effective_model = model_name
     semantic_result: dict | None = None
@@ -281,9 +300,10 @@ def build_asr_index(
     requested_language = language or "auto"
     detected_language = ""
     task = "transcribe"
+    raw_parser_stats: dict[str, int] = {}
 
     if sidecar_path:
-        raw_chunks = load_sidecar(sidecar_path)
+        raw_items = raw_items_from_chunks(load_sidecar(sidecar_path), source="sidecar")
         used_engine = "sidecar"
     else:
         try:
@@ -291,18 +311,26 @@ def build_asr_index(
         except subprocess.CalledProcessError:
             chunks: list[dict] = []
             used_engine = "no_audio"
+            empty_chunk_builder_stats = _empty_chunk_builder_stats()
             _save_asr_npz(output_path, chunks, np.empty((0, 0), dtype=np.float16), np.empty((0,), dtype=np.int32))
             if semantic_target is not None:
                 semantic_target.unlink(missing_ok=True)
             return {
                 "chunks": 0,
                 "raw_chunks": 0,
+                "raw_items": 0,
+                "retrieval_chunks": 0,
                 "engine": used_engine,
                 "model": effective_model,
                 "language": requested_language,
                 "task": task,
                 "requested_language": requested_language,
                 "detected_language": detected_language,
+                "language_route": "no_audio",
+                "route_reason": "no audio stream found",
+                "vad_strategy": vad_strategy,
+                "raw_parser_stats": {},
+                "chunk_builder_stats": empty_chunk_builder_stats,
                 "postprocess_strategy": DEFAULT_ASR_POSTPROCESS_STRATEGY,
                 "postprocess_stats": _empty_postprocess_stats(),
                 "text_profile": asr_text_profile([]),
@@ -320,7 +348,7 @@ def build_asr_index(
         prefer_funasr = normalized_engine == "funasr" or (normalized_engine == "auto" and requested_language == "zh")
         if prefer_funasr:
             try:
-                raw_chunks = _funasr(
+                model_chunks = _funasr(
                     str(audio_path),
                     funasr_model,
                     device,
@@ -328,6 +356,7 @@ def build_asr_index(
                     local_files_only=model_local_files_only,
                     language=requested_language,
                 )
+                raw_items = raw_items_from_chunks(model_chunks, source="funasr")
                 used_engine = "funasr"
                 effective_model = funasr_model
                 if (
@@ -339,7 +368,7 @@ def build_asr_index(
             except Exception:
                 if engine == "funasr":
                     raise
-                raw_chunks, whisper_metadata = _whisper(
+                model_chunks, whisper_metadata = _whisper(
                     str(audio_path),
                     model_name,
                     device,
@@ -347,11 +376,12 @@ def build_asr_index(
                     requested_language,
                     local_files_only=model_local_files_only,
                 )
+                raw_items = raw_items_from_chunks(model_chunks, source="whisper")
                 used_engine = "whisper"
                 task = str(whisper_metadata.get("task") or task)
                 detected_language = str(whisper_metadata.get("detected_language") or "")
         elif normalized_engine == "faster-whisper":
-            raw_chunks, whisper_metadata = _faster_whisper(
+            model_chunks, whisper_metadata = _faster_whisper(
                 str(audio_path),
                 model_name,
                 device,
@@ -359,11 +389,12 @@ def build_asr_index(
                 requested_language,
                 local_files_only=model_local_files_only,
             )
+            raw_items = raw_items_from_chunks(model_chunks, source="faster_whisper")
             used_engine = "faster-whisper"
             task = str(whisper_metadata.get("task") or task)
             detected_language = str(whisper_metadata.get("detected_language") or "")
         else:
-            raw_chunks, whisper_metadata = _whisper(
+            model_chunks, whisper_metadata = _whisper(
                 str(audio_path),
                 model_name,
                 device,
@@ -371,16 +402,26 @@ def build_asr_index(
                 requested_language,
                 local_files_only=model_local_files_only,
             )
+            raw_items = raw_items_from_chunks(model_chunks, source="whisper")
             used_engine = "whisper"
             task = str(whisper_metadata.get("task") or task)
             detected_language = str(whisper_metadata.get("detected_language") or "")
 
-    segment_ids = _fixed_bucket_segment_ids(raw_chunks, bucket_ms=5000)
-    chunks, postprocess_stats = postprocess_asr_chunks(
-        raw_chunks,
-        segment_ids=segment_ids,
-        config=strategy_config(DEFAULT_ASR_POSTPROCESS_STRATEGY),
+    retrieval_chunks, chunk_builder_stats = build_retrieval_chunks(
+        raw_items,
+        config=RetrievalChunkConfig(),
     )
+    chunks = [chunk.to_search_dict() for chunk in retrieval_chunks]
+    postprocess_stats = {
+        "raw_chunks": len(raw_items),
+        "normalized_chunks": chunk_builder_stats["normalized_items"],
+        "processed_chunks": len(chunks),
+        "dropped_empty_chunks": chunk_builder_stats["dropped_empty_items"],
+        "merged_chunks": chunk_builder_stats["merged_items"],
+        "cross_segment_merges": 0,
+        "semantic_ineligible_chunks": chunk_builder_stats["semantic_ineligible_chunks"],
+        "long_low_info_chunks": chunk_builder_stats["long_chunks"],
+    }
 
     if not semantic_enabled:
         if semantic_target is not None:
@@ -416,6 +457,16 @@ def build_asr_index(
                 "semantic_error": str(exc),
             }
 
+    debug_dir = Path(debug_output_dir) if debug_output_dir else Path(output_path).parent / "debug"
+    write_asr_debug_artifacts(
+        debug_dir=debug_dir,
+        enabled=debug_artifacts_enabled,
+        save_raw_transcript=save_raw_transcript,
+        raw_items=raw_items,
+        retrieval_chunks=retrieval_chunks,
+        repair_stats={**chunk_builder_stats, **raw_parser_stats},
+    )
+
     _save_asr_npz(
         output_path,
         chunks,
@@ -428,13 +479,20 @@ def build_asr_index(
     )
     result = {
         "chunks": len(chunks),
-        "raw_chunks": len(raw_chunks),
+        "raw_chunks": len(raw_items),
+        "raw_items": len(raw_items),
+        "retrieval_chunks": len(chunks),
         "engine": used_engine,
         "model": effective_model,
         "language": detected_language or requested_language,
         "task": task,
         "requested_language": requested_language,
         "detected_language": detected_language,
+        "language_route": f"{used_engine}:{detected_language or requested_language}",
+        "route_reason": "explicit language" if requested_language != "auto" else "default auto language",
+        "vad_strategy": vad_strategy,
+        "raw_parser_stats": raw_parser_stats,
+        "chunk_builder_stats": chunk_builder_stats,
         "postprocess_strategy": DEFAULT_ASR_POSTPROCESS_STRATEGY,
         "postprocess_stats": postprocess_stats,
         "text_profile": asr_text_profile(chunk.get("text", "") for chunk in chunks),
