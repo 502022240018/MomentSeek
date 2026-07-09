@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.db import Catalog
 from app.deployment import build_deployment_info
-from app.media import export_preview_clip, probe_video
+from app.media import export_preview_clip, extract_frame, probe_video
 from app.schemas import HealthResponse, IndexRequest, VideoRenameRequest
 from app.search import SearchEngine
 from app.settings import get_settings
@@ -99,7 +99,7 @@ def _remove_video_files(video: dict, video_id: str) -> None:
             Path(path).unlink(missing_ok=True)
         except OSError:
             pass
-    for directory in (settings.index_dir / video_id, settings.thumbnail_dir / video_id, settings.clip_cache_dir / video_id):
+    for directory in (settings.index_dir / video_id, settings.thumbnail_dir / video_id, settings.clip_cache_dir / video_id, settings.frame_cache_dir / video_id):
         shutil.rmtree(directory, ignore_errors=True)
 
 
@@ -119,6 +119,10 @@ def _clip_cache_path(video_id: str, start_time: float, end_time: float) -> Path:
     start_ms = max(0, round(start_time * 1000))
     end_ms = max(start_ms + 250, round(end_time * 1000))
     return settings.clip_cache_dir / video_id / f"{start_ms:012d}_{end_ms:012d}.mp4"
+
+
+def _frame_cache_path(video_id: str, ms: int) -> Path:
+    return settings.frame_cache_dir / video_id / f"{max(0, ms):012d}.jpg"
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -256,6 +260,36 @@ async def video_clip(
         media_type="video/mp4",
         filename=f"{video_id}_{round(start * 1000)}_{round(bounded_end * 1000)}.mp4",
         content_disposition_type="inline",
+    )
+
+
+@app.get("/api/videos/{video_id}/frame")
+async def video_frame(
+    video_id: str,
+    ms: int = Query(..., ge=0),
+):
+    video = catalog.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+    video_path = settings.resolve_path(video["file_path"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+
+    duration_ms = int(round(float(video.get("duration") or 0) * 1000))
+    bounded_ms = min(ms, duration_ms - 1) if duration_ms > 0 else ms
+    bounded_ms = max(0, bounded_ms)
+
+    frame_path = _frame_cache_path(video_id, bounded_ms)
+    if not frame_path.exists() or frame_path.stat().st_size == 0:
+        try:
+            await run_in_threadpool(extract_frame, video_path, frame_path, bounded_ms)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return FileResponse(
+        frame_path,
+        media_type="image/jpeg",
+        content_disposition_type="inline",
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 
@@ -405,16 +439,6 @@ async def search(
         "elapsed_seconds": elapsed_seconds,
         "results": results,
     }
-
-
-@app.get("/api/thumbnails/{video_id}/{filename}")
-def thumbnail(video_id: str, filename: str):
-    if Path(filename).name != filename:
-        raise HTTPException(status_code=400, detail="文件名不合法")
-    path = settings.thumbnail_dir / video_id / filename
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="缩略图不存在")
-    return FileResponse(path, content_disposition_type="inline")
 
 
 static_dir = Path(__file__).resolve().parent / "static"

@@ -243,7 +243,7 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
   const [visualShotThreshold, setVisualShotThreshold] = useState(0.2);
   const [faceSampleFps, setFaceSampleFps] = useState(2);
   const [includeOcr, setIncludeOcr] = useState(false);
-  const [ocrSampleFps, setOcrSampleFps] = useState(0.05);
+  const [ocrSampleFps, setOcrSampleFps] = useState(1.00);
   const [asrModel, setAsrModel] = useState("small");
   const [asrLanguage, setAsrLanguage] = useState("zh");
   const [uploading, setUploading] = useState(false);
@@ -324,7 +324,7 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
       </>}
       <label>Face fps<input type="number" min="0.2" max="15" step="0.5" value={faceSampleFps} onChange={event => setFaceSampleFps(Number(event.target.value))} /></label>
       <label className="inline-check"><input type="checkbox" checked={includeOcr} onChange={event => setIncludeOcr(event.target.checked)} />包含 OCR</label>
-      <label>OCR fps<input type="number" min="0.02" max="5" step="0.05" value={ocrSampleFps} onChange={event => setOcrSampleFps(Number(event.target.value))} /></label>
+      <label>OCR fps<input type="number" min="0.90" max="2" step="0.05" value={ocrSampleFps} onChange={event => setOcrSampleFps(Number(event.target.value))} /></label>
       <label>ASR 模型<select value={asrModel} onChange={event => setAsrModel(event.target.value)}><option value="base">base 更快</option><option value="small">small 推荐</option><option value="medium">medium 更准更慢</option><option value="large-v3">large-v3 高风险</option></select></label>
       <label>ASR 语言<select value={asrLanguage} onChange={event => setAsrLanguage(event.target.value)}><option value="zh">中文</option><option value="en">English</option><option value="auto">Auto</option></select></label>
     </div>

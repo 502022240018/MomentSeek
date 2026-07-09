@@ -623,7 +623,6 @@ class ClipEncoder:
 def build_visual_index(
     video_path: str,
     output_path: str,
-    thumbnail_dir: str,
     model_name: str,
     pretrained: str,
     sample_fps: float,
@@ -655,12 +654,10 @@ def build_visual_index(
             model_cache_dir=model_cache_dir,
         )
     device = encoder.device
-    thumbnails: dict[int, str] = {}
     frame_embeddings: list[np.ndarray] = []
     frame_times_ms: list[int] = []
     pending_frames: list[np.ndarray] = []
     pending_meta: list[tuple[int, int]] = []
-    thumbnail_dir = Path(thumbnail_dir)
     total_frames = 0
     segment_ms = max(1, int(round(float(segment_seconds) * 1000)))
     requested_strategy = (segment_strategy or "fixed").strip().lower()
@@ -724,10 +721,6 @@ def build_visual_index(
             bucket = _segment_id_for_timestamp(timestamp_ms, explicit_segment_times)
         else:
             bucket = timestamp_ms // segment_ms
-        if bucket not in thumbnails:
-            thumbnail = thumbnail_dir / f"visual_{bucket:06d}.jpg"
-            save_thumbnail(frame, thumbnail)
-            thumbnails[bucket] = thumbnail.name
         pending_frames.append(frame)
         pending_meta.append((bucket, timestamp_ms))
         frame_segment_ids.append(int(bucket))

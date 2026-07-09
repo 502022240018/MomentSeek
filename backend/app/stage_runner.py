@@ -20,10 +20,8 @@ def run(stage: str, job_id: str) -> dict:
         raise KeyError(f"视频不存在: {job['video_id']}")
 
     video_index_dir = settings.index_dir / video["id"]
-    thumbnail_dir = settings.thumbnail_dir / video["id"]
     working_dir = video_index_dir / "work"
     video_index_dir.mkdir(parents=True, exist_ok=True)
-    thumbnail_dir.mkdir(parents=True, exist_ok=True)
     working_dir.mkdir(parents=True, exist_ok=True)
     options = job.get("options") or {}
     video_path = str(settings.resolve_path(video["file_path"]))
@@ -37,7 +35,6 @@ def run(stage: str, job_id: str) -> dict:
         result = build_visual_index(
             video_path=video_path,
             output_path=str(video_index_dir / "visual.npz"),
-            thumbnail_dir=str(thumbnail_dir),
             model_name=settings.clip_model,
             pretrained=settings.clip_pretrained,
             sample_fps=float(options.get("visual_sample_fps", settings.visual_sample_fps)),
@@ -65,7 +62,6 @@ def run(stage: str, job_id: str) -> dict:
         result = build_face_index(
             video_path=video_path,
             output_path=str(video_index_dir / "face.npz"),
-            thumbnail_dir=str(thumbnail_dir),
             model_name=settings.face_model,
             sample_fps=float(options.get("face_sample_fps", settings.face_sample_fps)),
             provider=settings.face_provider,
@@ -114,7 +110,6 @@ def run(stage: str, job_id: str) -> dict:
         result = build_ocr_index(
             video_path=video_path,
             output_path=str(video_index_dir / "ocr.npz"),
-            thumbnail_dir=str(thumbnail_dir),
             working_dir=str(working_dir),
             sample_fps=float(options.get("ocr_sample_fps", settings.ocr_sample_fps)),
             decode_height=settings.ocr_decode_height,

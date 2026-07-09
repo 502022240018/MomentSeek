@@ -19,9 +19,11 @@ runtime/
   catalog.sqlite3
   uploads/
   indexes/{video_id}/
-  thumbnails/{video_id}/
+  frame_cache/{video_id}/
   clips/{video_id}/
 ```
+
+缩略图不再随索引预存。检索命中后按最佳命中帧时间戳实时抽帧（`GET /api/videos/{id}/frame?ms=`），结果缓存到 `frame_cache/{video_id}/{ms}.jpg`，避免 `thumbnails/` 随视频量线性膨胀。
 
 当前 MVP 把索引保存在本地 `index_manifest.json` 和通道 `.npz` 文件中。后续如果扩展到多机或百万级片段，可以在保持 API 概念不变的前提下，把存储层替换为 pgvector、Milvus、Qdrant 等系统。
 
@@ -131,7 +133,7 @@ staging/prod 验证时应把这些字段与 `docs/DEPLOYMENT.md` 中的 release 
 | `GET` | `/api/entities` | `main.py::list_entities` | 人物库列表 | `api.ts::entities` | `db.py` |
 | `GET` | `/api/entities/{entity_id}/reference` | `main.py::entity_reference` | 返回人物参考图 | entity UI | `runtime/entities` |
 | `POST` | `/api/search` | `main.py::search` | 多模态搜索 | `api.ts::search` | `search.py`, indexes, thumbnails/clips |
-| `GET` | `/api/thumbnails/{video_id}/{filename}` | `main.py::thumbnail` | 返回缩略图 | 结果卡 | `runtime/thumbnails` |
+| `GET` | `/api/videos/{video_id}/frame` | `main.py::video_frame` | 按时间戳实时抽帧作缩略图（磁盘+HTTP 缓存） | 结果卡 `<img>` | `media.py::extract_frame`, `runtime/frame_cache` |
 | `GET` | `/` | `main.py::root` | 返回前端入口 | 浏览器 | frontend build |
 | `GET` | `/{path:path}` | `main.py::frontend` | 返回前端路由/静态资源 | 浏览器 | frontend build |
 

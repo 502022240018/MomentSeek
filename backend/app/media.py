@@ -196,6 +196,41 @@ def export_preview_clip(
     return output_path
 
 
+def extract_frame(video_path: str | Path, output_path: str | Path, ms: int, max_width: int = 480) -> Path:
+    """Grab a single JPEG frame at a timestamp for on-demand result thumbnails.
+
+    Thumbnails are no longer pre-stored during indexing. Search points each result
+    at its best-hit timestamp and this seeks the source once (ffmpeg `-ss` before
+    `-i` for a fast keyframe seek), downscaling to keep the cache small. Written
+    atomically so a concurrent request never serves a half-written file.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(f".{output_path.stem}.{uuid.uuid4().hex}.tmp.jpg")
+    seconds = max(0.0, ms / 1000.0)
+    command = [
+        ffmpeg_executable(), "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{seconds:.3f}", "-i", str(video_path),
+        "-frames:v", "1",
+        "-vf", f"scale='min({max_width},iw)':-2",
+        "-q:v", "3",
+        str(temp_path),
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if not temp_path.exists() or temp_path.stat().st_size == 0:
+            raise RuntimeError("ffmpeg 未产出帧图")
+        temp_path.replace(output_path)
+    except subprocess.CalledProcessError as exc:
+        temp_path.unlink(missing_ok=True)
+        details = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(f"帧图抽取失败: {details[-1200:]}") from exc
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return output_path
+
+
 def ffmpeg_executable() -> str:
     executable = shutil.which("ffmpeg")
     if executable:

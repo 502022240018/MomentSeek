@@ -146,10 +146,10 @@ ArcFace identity embedding
 | `embeddings` | `[num_tracks, 512] float32` | 每条人脸 track 的平均身份向量 |
 | `track_times_ms` | `[num_tracks, 3] int32` | `[start_ms, end_ms, best_shot_ms]` |
 
-Track id 就是数组行号。缩略图固定为：
+Track id 就是数组行号。缩略图不再预存，检索命中后用 `best_shot_ms` 实时抽帧：
 
 ```text
-runtime/thumbnails/{video_id}/face_{track_id:06d}.jpg
+GET /api/videos/{video_id}/frame?ms={best_shot_ms}
 ```
 
 查询来源：
@@ -300,10 +300,10 @@ OCR 的 chunk 是一次 OCR sampled frame/time window；文本与 score 在 box 
 | `box_scores` | `[num_boxes] float32` | OCR box 置信度 |
 | `boxes` | `[num_boxes, 4, 2] float32` | 归一化到 `[0, 1]` 的四点框 |
 
-缩略图固定为：
+缩略图不再预存，检索命中后用该 OCR 帧的 `frame_ms` 实时抽帧：
 
 ```text
-runtime/thumbnails/{video_id}/ocr_{chunk_id:06d}.jpg
+GET /api/videos/{video_id}/frame?ms={frame_ms}
 ```
 
 OCR 检索复用 ASR 的 lexical + semantic candidate 逻辑，返回 OCR chunk。

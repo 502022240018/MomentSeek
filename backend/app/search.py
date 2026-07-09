@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -19,7 +20,6 @@ class Candidate:
     end_time: float
     score: float
     modality: str
-    thumbnail: str | None = None
     evidence: str | None = None
     raw_score: float | None = None
     robust_z: float | None = None
@@ -266,7 +266,6 @@ def _visual_candidates(
             end_time=_seconds(end_ms),
             score=ranking_score,
             modality="visual",
-            thumbnail=f"visual_{segment_id:06d}.jpg",
             evidence=detail if above else detail + " · 低于阈值",
             raw_score=raw_score,
             robust_z=z_score,
@@ -323,7 +322,6 @@ def _face_candidates(data, query: np.ndarray, video_id: str, limit: int, thresho
             end_time=_seconds(end_ms),
             score=confidence,
             modality="face",
-            thumbnail=f"face_{index:06d}.jpg",
             evidence=detail if above else detail + " · 低于阈值",
             raw_score=cosine,
             decision="absolute_hit" if above else "weak",
@@ -404,6 +402,11 @@ def _asr_candidates(
             decision = "weak"
 
         detail = str(chunk.get("text", "")).strip()
+        display_features = {}
+
+        if modality == "ocr":
+            detail, display_features = _ocr_display_text(query_text, chunk)
+
         metrics = [f"lexical={lexical:.3f}"]
         if semantic_cosine is not None:
             metrics.append(f"semantic={semantic:.3f}")
@@ -413,11 +416,15 @@ def _asr_candidates(
         evidence = f"{detail} · {' · '.join(metrics)}"
         start_ms = int(chunk.get("start_ms", round(float(chunk.get("start_time", 0)) * 1000)))
         end_ms = int(chunk.get("end_ms", round(float(chunk.get("end_time", 0)) * 1000)))
+        # OCR chunks carry the sampled frame timestamp; ASR is audio-only so we fall
+        # back to the chunk start. Either way the thumbnail is fetched on demand.
+        best_ms = int(chunk.get("frame_ms", start_ms))
         features = {
             "lexical_score": lexical,
             "semantic_score": semantic if semantic_cosine is not None else None,
             "semantic_cosine": semantic_cosine,
         }
+        features.update(display_features)
         if "score" in chunk:
             features[f"{modality}_score"] = float(chunk["score"])
         candidates.append(Candidate(
@@ -426,7 +433,6 @@ def _asr_candidates(
             end_time=_seconds(end_ms),
             score=score,
             modality=modality,
-            thumbnail=str(chunk.get("thumbnail") or "") or None,
             evidence=evidence if above else evidence + " · 低于阈值",
             raw_score=score,
             decision=decision,
@@ -434,8 +440,10 @@ def _asr_candidates(
             lexical_score=lexical,
             semantic_score=semantic if semantic_cosine is not None else None,
             semantic_cosine=semantic_cosine,
+            best_time=_seconds(best_ms),
             unit_type="chunk",
             unit_id=int(chunk.get("chunk_id", index)),
+            best_ms=best_ms,
             text=detail,
             features=features,
         ))
@@ -460,33 +468,208 @@ def _asr_chunks_from_npz(data) -> list[dict]:
     ]
 
 
-def _ocr_chunks_from_npz(data) -> list[dict]:
-    required = {"chunk_times_ms", "box_chunk_indices", "box_texts", "box_scores", "boxes"}
+def _limit_text(value: str, max_chars: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _ocr_display_text(
+    query_text: str,
+    chunk: dict,
+    max_boxes: int = 3,
+    max_chars: int = 120,
+    max_frame_chars: int = 500,
+) -> tuple[str, dict]:
+    """
+    为 OCR evidence 选择更适合展示的文本。
+
+    检索仍然基于整帧 OCR 文本；
+    展示优先显示和 query 词面最相关的 box 文本；
+    如果找不到明确相关 box，则回退到整帧 OCR 文本。
+    """
+    frame_text = str(chunk.get("text", "")).strip()
+
+    box_texts = [
+        str(value).strip()
+        for value in chunk.get("ocr_box_texts", [])
+        if str(value).strip()
+    ]
+
+    box_scores = [
+        float(value)
+        for value in chunk.get("ocr_box_scores", [])
+    ]
+
+    frame_context = _limit_text(frame_text, max_frame_chars)
+
+    if not box_texts:
+        return _limit_text(frame_text, max_chars), {
+            "ocr_display_mode": "frame_text",
+            "ocr_frame_text": frame_context,
+            "ocr_box_count": 0,
+        }
+
+    scored: list[tuple[float, float, float, int, str]] = []
+
+    for index, text in enumerate(box_texts):
+        box_lexical = lexical_score(query_text, text)
+        box_confidence = box_scores[index] if index < len(box_scores) else 0.0
+
+        # 展示排序：query 相关性为主，OCR 置信度为辅。
+        display_score = 0.85 * float(box_lexical) + 0.15 * float(box_confidence)
+
+        scored.append((
+            display_score,
+            float(box_lexical),
+            float(box_confidence),
+            index,
+            text,
+        ))
+
+    scored.sort(reverse=True)
+
+    selected: list[str] = []
+    selected_box_scores: list[float] = []
+    selected_box_lexical_scores: list[float] = []
+
+    for _display_score, box_lexical, box_confidence, _index, text in scored:
+        # 只展示和 query 有词面相关性的 box。
+        # 如果是纯语义命中但没有明确 box 词面命中，则回退整帧文本。
+        if box_lexical <= 0:
+            continue
+
+        selected.append(text)
+        selected_box_scores.append(box_confidence)
+        selected_box_lexical_scores.append(box_lexical)
+
+        if len(selected) >= max_boxes:
+            break
+
+    if not selected:
+        return _limit_text(frame_text, max_chars), {
+            "ocr_display_mode": "frame_text",
+            "ocr_frame_text": frame_context,
+            "ocr_box_count": len(box_texts),
+        }
+
+    display_text = _limit_text(" / ".join(selected), max_chars)
+
+    return display_text, {
+        "ocr_display_mode": "matched_boxes",
+        "ocr_frame_text": frame_context,
+        "ocr_box_count": len(box_texts),
+        "ocr_matched_box_texts": selected,
+        "ocr_matched_box_scores": selected_box_scores,
+        "ocr_matched_box_lexical_scores": selected_box_lexical_scores,
+    }
+
+
+
+def _ocr_chunks_from_npz(
+    data,
+    frame_window_ms: int = 800,
+) -> list[dict]:
+    """
+    OCR 新 schema:
+
+    - 不再保存 chunk_times_ms
+    - embedding_chunk_indices: embedding_id -> frame_ms
+    - box_chunk_indices: box_id -> frame_ms
+
+    这里按 frame_ms 重建 frame-level OCR chunks。
+    """
+    required = {"box_chunk_indices", "box_texts", "box_scores", "boxes"}
     if not required.issubset(set(data.files)):
-        raise ValueError("ocr v3 索引缺少必要数组，请重跑 OCR 索引")
-    times = data["chunk_times_ms"].astype(np.int32)
-    box_chunk_indices = data["box_chunk_indices"].astype(np.int32)
+        raise ValueError("ocr 索引缺少必要数组，请重跑 OCR 索引")
+
+    if "chunk_times_ms" in data.files:
+        raise ValueError("检测到旧版 OCR 索引 chunk_times_ms，请重跑 OCR 索引生成新版结构")
+
+    box_frame_times = data["box_chunk_indices"].astype(np.int32)
     box_texts = _decode_text_array(data["box_texts"])
     box_scores = np.asarray(data["box_scores"], dtype=np.float32)
-    if times.ndim != 2 or times.shape[1] != 3:
-        raise ValueError("ocr v3 chunk_times_ms 必须是 [num_chunks, 3]，请重跑 OCR 索引")
-    if not (len(box_chunk_indices) == len(box_texts) == len(box_scores)):
-        raise ValueError("ocr v3 box 数组长度不一致，请重跑 OCR 索引")
+    boxes = np.asarray(data["boxes"], dtype=np.float32)
+
+    if not (len(box_frame_times) == len(box_texts) == len(box_scores) == len(boxes)):
+        raise ValueError("ocr box 数组长度不一致，请重跑 OCR 索引")
+
+    # 保留首次出现顺序。
+    # ocr.py 保存缩略图时使用 chunk 顺序：ocr_000000.jpg, ocr_000001.jpg ...
+    # box_chunk_indices 也是按 chunk 顺序写入，所以这里不能简单 np.unique 排序。
+    frame_times: list[int] = []
+    seen: set[int] = set()
+    for value in box_frame_times:
+        frame_ms = int(value)
+        if frame_ms not in seen:
+            seen.add(frame_ms)
+            frame_times.append(frame_ms)
+
+    half_window = max(int(frame_window_ms // 2), 1)
+
     chunks: list[dict] = []
-    for chunk_id, row in enumerate(times):
-        indices = np.flatnonzero(box_chunk_indices == chunk_id)
-        texts = [box_texts[int(index)] for index in indices if box_texts[int(index)].strip()]
-        scores = box_scores[indices] if len(indices) else np.empty((0,), dtype=np.float32)
+    for chunk_id, frame_ms in enumerate(frame_times):
+        indices = np.flatnonzero(box_frame_times == frame_ms)
+
+        box_text_values: list[str] = []
+        box_score_values: list[float] = []
+
+        for index in indices:
+            text_value = box_texts[int(index)].strip()
+            if not text_value:
+                continue
+            box_text_values.append(text_value)
+            box_score_values.append(float(box_scores[int(index)]))
+
+        frame_text = " ".join(box_text_values)
+
+        start_ms = max(0, frame_ms - half_window)
+        end_ms = frame_ms + half_window
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1
+
         chunks.append({
             "chunk_id": chunk_id,
-            "start_ms": int(row[0]),
-            "end_ms": int(row[1]),
-            "frame_ms": int(row[2]),
-            "text": " ".join(texts),
-            "score": float(scores.max()) if len(scores) else 0.0,
-            "thumbnail": f"ocr_{chunk_id:06d}.jpg",
+            "start_ms": int(start_ms),
+            "end_ms": int(end_ms),
+            "frame_ms": int(frame_ms),
+
+            # 检索仍然使用整帧 OCR 文本。
+            "text": frame_text,
+
+            # 展示阶段使用 box 明细，从里面挑和 query 最相关的文本。
+            "ocr_box_texts": box_text_values,
+            "ocr_box_scores": box_score_values,
+
+            "score": max(box_score_values) if box_score_values else 0.0,
         })
     return chunks
+
+
+def _remap_embedding_frame_times_to_chunk_indices(
+    chunks: list[dict],
+    embedding_frame_times_ms: np.ndarray | None,
+) -> np.ndarray | None:
+    """
+    OCR 新 schema 的 embedding_chunk_indices 保存的是 frame_ms。
+    但 _asr_candidates 内部需要 embedding_id -> chunk_id。
+    所以这里把 frame_ms 映射成当前重建 chunks 的 chunk_id。
+    """
+    if embedding_frame_times_ms is None:
+        return None
+
+    frame_to_chunk_id = {
+        int(chunk["frame_ms"]): int(chunk["chunk_id"])
+        for chunk in chunks
+        if "frame_ms" in chunk and "chunk_id" in chunk
+    }
+
+    values = np.asarray(embedding_frame_times_ms, dtype=np.int32).reshape((-1,))
+    return np.asarray(
+        [frame_to_chunk_id.get(int(frame_ms), -1) for frame_ms in values],
+        dtype=np.int32,
+    )
 
 
 def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict, Path]:
@@ -541,10 +724,96 @@ def _serialize_evidence(item: Candidate) -> dict:
         "detail": item.evidence,
     }
 
+_OCR_ONLY_MERGE_GAP_SECONDS = 0.35
+_OCR_MERGE_MIN_SCORE_RATIO = 0.70
+_OCR_MERGE_MAX_SCORE_DROP = 0.25
+
+def _ocr_scores_compatible(group: list[Candidate], candidate: Candidate) -> bool:
+    """
+    OCR-only 合并时，避免高分命中被明显低分命中拖长。
+
+    规则：
+    - candidate 必须是 above_threshold；
+    - group 里必须已有 above_threshold 的 OCR 命中；
+    - candidate 分数不能比 group 里最佳 OCR 命中低太多。
+    """
+    if candidate.modality != "ocr" or not candidate.above_threshold:
+        return False
+
+    group_scores = [
+        float(item.score)
+        for item in group
+        if item.modality == "ocr" and item.above_threshold
+    ]
+    if not group_scores:
+        return False
+
+    best_score = max(group_scores)
+
+    if candidate.score >= best_score:
+        return True
+
+    threshold = max(
+        best_score * _OCR_MERGE_MIN_SCORE_RATIO,
+        best_score - _OCR_MERGE_MAX_SCORE_DROP,
+    )
+    return float(candidate.score) >= threshold
+
+
+def _should_merge_ocr_only(
+    group: list[Candidate],
+    candidate: Candidate,
+) -> bool:
+    """
+    OCR-only 结果使用更严格的帧级合并策略。
+
+    只允许：
+    - OCR 与 OCR 合并；
+    - 都是 above-threshold；
+    - 时间窗口重叠或几乎相邻；
+    - 分数不能差太多。
+
+    不设置最大合并时长：
+    如果同一段 OCR 文本持续稳定出现很久，它应该保留为一个连续命中片段。
+    """
+    if candidate.modality != "ocr":
+        return False
+    if any(item.modality != "ocr" for item in group):
+        return False
+
+    if not candidate.above_threshold:
+        return False
+    if not any(item.above_threshold for item in group):
+        return False
+
+    group_end = max(item.end_time for item in group)
+
+    # 只允许重叠或几乎直接相邻。
+    # 例如 frame_window_ms=800 且 1fps 时：
+    # 10.0s -> 9.6-10.4
+    # 11.0s -> 10.6-11.4
+    # gap=0.2，可以合并。
+    gap = candidate.start_time - group_end
+    if gap > _OCR_ONLY_MERGE_GAP_SECONDS:
+        return False
+
+    if not _ocr_scores_compatible(group, candidate):
+        return False
+
+    return True
+
 
 def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_duration: float) -> bool:
     if group[0].video_id != candidate.video_id:
         return False
+
+    group_modalities = {item.modality for item in group}
+
+    # OCR-only 使用更严格的帧级合并规则。
+    # 不再使用全局 merge_gap=2，避免弱命中拖长结果时间段。
+    if candidate.modality == "ocr" and group_modalities == {"ocr"}:
+        return _should_merge_ocr_only(group, candidate)
+
     group_start = min(item.start_time for item in group)
     group_end = max(item.end_time for item in group)
     merged_start = min(group_start, candidate.start_time)
@@ -552,7 +821,6 @@ def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_
     if merged_end - merged_start > max_duration:
         return False
 
-    group_modalities = {item.modality for item in group}
     overlaps = candidate.start_time < group_end and candidate.end_time > group_start
     near = candidate.start_time <= group_end + gap
 
@@ -701,16 +969,21 @@ class SearchEngine:
             if "ocr" in modalities and text and "ocr" in indexed_modalities:
                 _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
                 with np.load(index_file, allow_pickle=False) as data:
-                    semantic_embeddings, embedding_chunk_indices = _semantic_arrays(data)
+                    semantic_embeddings, embedding_frame_times_ms = _semantic_arrays(data)
                     semantic_query = None
+
                     if semantic_embeddings is not None:
                         model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
-                        try:
-                            semantic_query = self._encode_asr_query(text, model_name)
-                        except Exception:
-                            semantic_query = None
+                        semantic_query = self._encode_asr_query(text, model_name)
+
+                    ocr_chunks = _ocr_chunks_from_npz(data)
+                    embedding_chunk_indices = _remap_embedding_frame_times_to_chunk_indices(
+                        ocr_chunks,
+                        embedding_frame_times_ms,
+                    )
+
                     candidates.extend(_asr_candidates(
-                        _ocr_chunks_from_npz(data),
+                        ocr_chunks,
                         text,
                         video["id"],
                         limit * 3,
@@ -731,8 +1004,17 @@ class SearchEngine:
                 best_by_modality[item.modality] = max(best_by_modality.get(item.modality, -1), item.score)
             denominator = sum(weights.get(name, 1) for name in best_by_modality)
             score = sum(weights.get(name, 1) * value for name, value in best_by_modality.items()) / denominator
-            best_thumbnail = next((item.thumbnail for item in sorted(group, key=lambda value: value.score, reverse=True) if item.thumbnail), None)
+            # Thumbnails are generated on demand from the source video. Pick the
+            # best-hit timestamp of the highest-scoring candidate that has one
+            # (score already encodes modality priority), and let the frame endpoint
+            # seek + cache it. Fall back to the moment's start when no candidate
+            # carries a frame timestamp (e.g. an ASR chunk without frame_ms).
+            ranked = sorted(group, key=lambda value: value.score, reverse=True)
+            best_ms = next((item.best_ms for item in ranked if item.best_ms is not None), None)
             video_id = group[0].video_id
+            group_start = min(item.start_time for item in group)
+            if best_ms is None:
+                best_ms = max(0, round(group_start * 1000))
             group_decisions = {item.decision for item in group}
             decision = next(
                 (name for name in ("strong", "fuzzy", "fallback", "absolute_hit", "semantic_lexical_hit", "semantic_hit", "lexical_hit", "weak") if name in group_decisions),
@@ -746,7 +1028,7 @@ class SearchEngine:
                 end_time=max(item.end_time for item in group),
                 score=score,
                 modalities=sorted(best_by_modality),
-                thumbnail_url=(f"/api/thumbnails/{video_id}/{best_thumbnail}" if best_thumbnail else None),
+                thumbnail_url=f"/api/videos/{video_id}/frame?ms={int(best_ms)}",
                 media_url=f"/api/videos/{video_id}/media",
                 clip_url=f"/api/videos/{video_id}/clip?start={min(item.start_time for item in group):.3f}&end={max(item.end_time for item in group):.3f}",
                 decision=decision,

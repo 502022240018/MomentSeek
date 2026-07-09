@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-
 import cv2
 import numpy as np
 
 from app.indexing.common import atomic_save_npz, normalize
-from app.media import read_frames, save_thumbnail
+from app.media import read_frames
 
 
 def _has_non_empty_onnx(path: Path) -> bool:
@@ -85,7 +84,6 @@ class Track:
 def build_face_index(
     video_path: str,
     output_path: str,
-    thumbnail_dir: str,
     model_name: str,
     sample_fps: float,
     provider: str,
@@ -155,14 +153,9 @@ def build_face_index(
     finished.extend(active)
 
     embeddings, track_times_ms = [], []
-    thumbnail_dir = Path(thumbnail_dir)
     for track in finished:
         if not track.embeddings:
             continue
-        row_index = len(embeddings)
-        thumbnail = thumbnail_dir / f"face_{row_index:06d}.jpg"
-        if track.best_crop is not None and track.best_crop.size:
-            save_thumbnail(track.best_crop, thumbnail, max_width=240)
         embeddings.append(normalize(np.mean(track.embeddings, axis=0)))
         track_times_ms.append([
             int(round(track.start * 1000)),

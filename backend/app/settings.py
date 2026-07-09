@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     npu_enabled: bool = False
     npu_device_id: int = 0
-    cuda_enabled: bool = False
+    cuda_enabled: bool = True
     ascend_visible_devices: str | None = None
     ascend_rt_visible_devices: str | None = None
     torch_device_backend_autoload: str | None = None
@@ -90,13 +90,10 @@ class Settings(BaseSettings):
 
     ocr_engine: str = "rapidocr"
     ocr_device: str = "auto"
-    # RapidOCR 3.9's default PP-OCRv6 ONNX models attach to CANN on the Ascend
-    # container but return empty OCR results in practice. PP-OCRv4 English mobile
-    # is the current verified NPU baseline for video text overlays.
-    ocr_version: str = "PP-OCRv4"
-    ocr_det_lang: str = "en"
-    ocr_rec_lang: str = "en"
-    ocr_model_type: str = "mobile"
+    ocr_version: str = "PP-OCRv6"
+    ocr_det_lang: str = "ch"
+    ocr_rec_lang: str = "ch"
+    ocr_model_type: str = "tiny"
     ocr_sample_fps: float = 0.05
     ocr_decode_height: int = 720
     ocr_min_confidence: float = 0.5
@@ -116,12 +113,12 @@ class Settings(BaseSettings):
         return self.app_data_dir / "indexes"
 
     @property
-    def thumbnail_dir(self) -> Path:
-        return self.app_data_dir / "thumbnails"
-
-    @property
     def clip_cache_dir(self) -> Path:
         return self.app_data_dir / "clips"
+
+    @property
+    def frame_cache_dir(self) -> Path:
+        return self.app_data_dir / "frame_cache"
 
     @property
     def query_dir(self) -> Path:
@@ -133,8 +130,8 @@ class Settings(BaseSettings):
             self.app_model_dir,
             self.upload_dir,
             self.index_dir,
-            self.thumbnail_dir,
             self.clip_cache_dir,
+            self.frame_cache_dir,
             self.query_dir,
             self.resolve_path(self.visual_hf_cache_dir),
         ):
