@@ -108,6 +108,35 @@ ID:
   backend/app/search.py
 ```
 
+### RQ-003C ASR pipeline 分层与 false timestamp gap
+```text
+优先级：P1
+状态：done for first pass / keep monitoring
+范围：asr search quality / transcript reliability
+问题或目标：
+  生产 ASR 索引曾出现中文词内断裂和不自然切分，例如“孤/独敏感”“很/难受”“永/远”。
+  用户听查确认部分 timestamp gap 并不是音频真实停顿，因此不能把模型 timestamp gap 直接作为最终检索文本边界。
+影响：
+  检索文本不自然会降低 semantic embedding 质量，也会让用户按自然短语查询时漏召回或误召回。
+已完成：
+  1. ASR pipeline 拆为 raw transcript parser 和 retrieval_chunk_builder。
+  2. parser 不再按固定 8s/12s 规则生成最终检索 chunk。
+  3. retrieval_chunk_builder 负责 CJK/Latin 边界保护、短碎片合并和 false gap 修复。
+  4. asr.npz 默认仍只保存 chunk_times_ms、texts、embeddings、embedding_chunk_indices。
+  5. debug 开启时才保存 raw transcript、retrieval chunks 和 repair report。
+仍需观察：
+  - 方言、多语言素材是否需要从手动路由升级为自动模型切换。
+  - SenseVoiceSmall 与 faster-whisper turbo 在同一 chunk builder 下的真实检索召回差异。
+  - 是否需要引入轻量分词辅助来减少 CJK 边界修复误合并。
+相关文件或实验：
+  backend/app/indexing/asr.py
+  backend/app/indexing/asr_transcript_parser.py
+  backend/app/indexing/asr_retrieval_chunks.py
+  backend/app/indexing/asr_debug.py
+  docs/superpowers/specs/2026-07-09-asr-pipeline-refactor-design.md
+  docs/superpowers/plans/2026-07-09-asr-pipeline-refactor.md
+```
+
 ### RQ-003A ASR 错词容错与专有名词召回
 
 ```text

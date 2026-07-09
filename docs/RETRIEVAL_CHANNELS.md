@@ -177,6 +177,31 @@ features.face_cosine
 
 ## ASR
 
+2026-07-09 起，新建 ASR v3 索引使用分层 pipeline：
+
+```text
+audio_extract
+-> model_transcribe
+-> raw_transcript parser
+-> retrieval_chunk_builder
+-> MiniLM semantic embedding
+-> asr.npz
+```
+
+生产默认只保存最终检索需要的数据；raw transcript、retrieval chunks 和 repair report 仅在调试开关开启时写入 `runtime/indexes/{video_id}/debug/`。删除 debug 目录不影响搜索。
+
+当前默认策略：
+
+```text
+asr_engine = funasr
+asr_zh_model = iic/SenseVoiceSmall
+asr_model = turbo
+asr_language = auto
+asr_vad_strategy = funasr_fsmn
+```
+
+`retrieval_chunk_builder` 负责面向搜索的文本边界，而不是把模型 timestamp gap 直接当最终语义边界。它会做 CJK/Latin 词边界保护、短碎片合并、false timestamp gap 修复，并在 manifest 中记录 `language_route`、`route_reason`、`vad_strategy`、`raw_items`、`retrieval_chunks` 和 `chunk_builder_stats`。
+
 2026-07-07 起，新建 ASR v3 索引会先做轻量后处理，再生成 semantic embedding：
 
 ```text
@@ -213,7 +238,7 @@ docs/experiments/asr/2026-07-07-asr-postprocess-tuning.md
 当前服务器常用引擎：
 
 ```text
-Whisper small
+FunASR / SenseVoiceSmall；faster-whisper turbo 作为多语言或更高效果备用
 ```
 
 `asr.npz` v3：

@@ -1,6 +1,6 @@
 # MomentSeek 当前状态
 
-更新时间：2026-07-07
+更新时间：2026-07-09
 
 ## 项目位置
 
@@ -98,8 +98,11 @@ face_provider = cann
 face_sample_fps = 1.0
 face_decode_height = 720
 
-asr_engine = whisper
-asr_model = small
+asr_engine = funasr
+asr_zh_model = iic/SenseVoiceSmall
+asr_model = turbo
+asr_language = auto
+asr_vad_strategy = funasr_fsmn
 asr_semantic_model = sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 asr_semantic_device = cpu
 
@@ -132,6 +135,19 @@ query -> SigLIP2 query embedding
 -> percentile / robust_z 只用于视频内判定和 evidence 诊断
 -> 返回固定 bucket 或 shot-aware segment
 ```
+
+当前 ASR pipeline：
+
+```text
+audio_extract
+-> model_transcribe
+-> raw_transcript parser
+-> retrieval_chunk_builder
+-> MiniLM semantic embedding
+-> asr.npz
+```
+
+默认 `asr.npz` 不保存 raw transcript，只保留检索需要字段。需要排查 ASR 切分问题时，开启 `ASR_DEBUG_ARTIFACTS=true` 和 `ASR_SAVE_RAW_TRANSCRIPT=true`，debug 文件写入 `runtime/indexes/{video_id}/debug/`。
 
 ## 公网访问
 

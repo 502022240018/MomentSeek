@@ -33,6 +33,7 @@ video_retrieval_mvp/
 - 任何服务器状态变更前，先执行 docs/OPERATIONS.md 中的只读检查。
 - 当前 visual 索引为 SigLIP2 siglip2-so400m-384。
 - Visual 召回使用 5s bucket MaxSim：raw_score = visual_top1。
+- 当前 ASR 索引使用分层 pipeline：raw transcript parser -> retrieval_chunk_builder -> MiniLM semantic embedding；默认不保存 raw transcript，debug 开关开启后才写 `runtime/indexes/{video_id}/debug/`。
 - ASR/OCR semantic embedding 是 MiniLM 文本向量，不能和 visual embedding 混用。
 - 如果要声明完成/修复/通过，必须先按 docs/VALIDATION.md 运行验证命令并读取输出。
 
