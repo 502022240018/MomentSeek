@@ -121,6 +121,9 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
             semantic_batch_size=settings.asr_semantic_batch_size,
             semantic_local_files_only=settings.asr_semantic_local_files_only,
+            debug_artifacts_enabled=bool(options.get("asr_debug_artifacts", settings.asr_debug_artifacts)),
+            save_raw_transcript=bool(options.get("asr_save_raw_transcript", settings.asr_save_raw_transcript)),
+            vad_strategy=str(options.get("asr_vad_strategy", settings.asr_vad_strategy)),
         )
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result

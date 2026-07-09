@@ -459,3 +459,14 @@ def test_sidecar_asr_pipeline_repairs_cjk_boundary_and_keeps_npz_schema(tmp_path
     assert result["raw_items"] == 2
     assert result["retrieval_chunks"] == 1
     assert result["chunk_builder_stats"]["word_boundary_repairs"] == 1
+
+
+def test_settings_default_asr_language_is_auto():
+    from app.settings import Settings
+
+    settings = Settings(app_data_dir="runtime-test")
+
+    assert settings.asr_language == "auto"
+    assert settings.asr_debug_artifacts is False
+    assert settings.asr_save_raw_transcript is False
+    assert settings.asr_vad_strategy == "funasr_fsmn"
