@@ -10,6 +10,7 @@ import numpy as np
 
 from app.indexing.asr_postprocess import postprocess_asr_chunks, strategy_config
 from app.indexing.asr_text import asr_text_profile
+from app.indexing.asr_transcript_parser import parse_funasr_raw_transcript
 from app.indexing.common import atomic_save_npz
 from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
 from app.media import extract_audio, parse_timecode
@@ -78,47 +79,60 @@ def load_sidecar(path: str | Path) -> list[dict]:
     return chunks
 
 
+def _is_sensevoice_model(model_name: str, model_source: str = "") -> bool:
+    return "sensevoice" in f"{model_name} {model_source}".casefold()
+
+
+def _parse_funasr_chunks(result: object, *, is_sensevoice: bool) -> list[dict]:
+    raw_items, _diagnostics = parse_funasr_raw_transcript(result, is_sensevoice=is_sensevoice)
+    return [item.to_dict() for item in raw_items]
+
+
 def _funasr(
     audio_path: str,
     model_name: str,
     device: str,
     model_root: str | Path | None = None,
     local_files_only: bool = True,
+    language: str = "auto",
 ) -> list[dict]:
     model_source = resolve_modelscope_model_source(model_root, model_name, local_files_only=local_files_only)
     vad_source = resolve_modelscope_model_source(model_root, "fsmn-vad", local_files_only=local_files_only)
-    punc_source = resolve_modelscope_model_source(model_root, "ct-punc", local_files_only=local_files_only)
+    is_sensevoice = _is_sensevoice_model(model_name, model_source)
+    punc_source = None if is_sensevoice else resolve_modelscope_model_source(
+        model_root, "ct-punc", local_files_only=local_files_only
+    )
     if str(device).startswith("npu"):
         import torch_npu  # noqa: F401  # register Ascend backend before model load
     from funasr import AutoModel
 
+    model_kwargs = {
+        "model": model_source,
+        "vad_model": vad_source,
+        "device": device,
+        "disable_update": True,
+    }
+    if is_sensevoice:
+        model_kwargs["vad_kwargs"] = {"max_single_segment_time": 30000}
+    else:
+        model_kwargs["punc_model"] = punc_source
     with offline_env(local_files_only):
-        model = AutoModel(
-            model=model_source,
-            vad_model=vad_source,
-            punc_model=punc_source,
-            device=device,
-            disable_update=True,
-        )
-    result = model.generate(input=audio_path, batch_size_s=300, sentence_timestamp=True)
-    if not result:
-        return []
-    item = result[0]
-    sentence_info = item.get("sentence_info") or []
-    chunks = []
-    for sentence in sentence_info:
-        chunks.append({
-            "start_time": float(sentence.get("start", 0)) / 1000,
-            "end_time": float(sentence.get("end", 0)) / 1000,
-            "text": str(sentence.get("text", "")).strip(),
+        model = AutoModel(**model_kwargs)
+    generate_kwargs = {"input": audio_path, "cache": {}, "batch_size_s": 60 if is_sensevoice else 300}
+    if language and language != "auto":
+        generate_kwargs["language"] = language
+    if is_sensevoice:
+        generate_kwargs.update({
+            "use_itn": True,
+            "merge_vad": True,
+            "merge_length_s": 15,
+            "output_timestamp": True,
+            "return_time_stamps": True,
         })
-    if chunks:
-        return [chunk for chunk in chunks if chunk["text"]]
-    text = str(item.get("text", "")).strip()
-    timestamps = item.get("timestamp") or []
-    if text and timestamps:
-        return [{"start_time": timestamps[0][0] / 1000, "end_time": timestamps[-1][1] / 1000, "text": text}]
-    return [{"start_time": 0, "end_time": 0, "text": text}] if text else []
+    else:
+        generate_kwargs["sentence_timestamp"] = True
+    result = model.generate(**generate_kwargs)
+    return _parse_funasr_chunks(result, is_sensevoice=is_sensevoice)
 
 
 def _resolve_whisper_model_source(model_name: str, model_dir: str | Path, local_files_only: bool) -> str:
@@ -312,6 +326,7 @@ def build_asr_index(
                     device,
                     model_root=funasr_model_dir or str(Path(model_dir).parent / "funasr"),
                     local_files_only=model_local_files_only,
+                    language=requested_language,
                 )
                 used_engine = "funasr"
                 effective_model = funasr_model

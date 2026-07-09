@@ -157,6 +157,119 @@ def test_funasr_local_files_only_requires_cached_model(tmp_path):
         )
 
 
+def test_sensevoice_funasr_uses_timestamp_flags_without_external_punc(tmp_path, monkeypatch):
+    calls = {}
+
+    def fake_resolver(_root, model_name, *, local_files_only=True):
+        return {
+            "iic/SenseVoiceSmall": "/models/funasr/sensevoice",
+            "fsmn-vad": "/models/funasr/vad",
+            "ct-punc": "/models/funasr/punc",
+        }[model_name]
+
+    class FakeAutoModel:
+        def __init__(self, **kwargs):
+            calls["init"] = kwargs
+
+        def generate(self, **kwargs):
+            calls["generate"] = kwargs
+            return [{"text": "你好世界", "timestamp": [[1000, 1200], [1200, 1400], [1400, 1600], [1600, 1800]]}]
+
+    fake_funasr = types.SimpleNamespace(AutoModel=FakeAutoModel)
+    fake_postprocess = types.SimpleNamespace(rich_transcription_postprocess=lambda text: text)
+    monkeypatch.setitem(sys.modules, "funasr", fake_funasr)
+    monkeypatch.setitem(sys.modules, "funasr.utils", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "funasr.utils.postprocess_utils", fake_postprocess)
+    monkeypatch.setattr(asr, "resolve_modelscope_model_source", fake_resolver)
+
+    chunks = asr._funasr(
+        str(tmp_path / "audio.wav"),
+        "iic/SenseVoiceSmall",
+        "cuda",
+        model_root=tmp_path / "models" / "funasr",
+        local_files_only=True,
+        language="zh",
+    )
+
+    assert calls["init"]["model"] == "/models/funasr/sensevoice"
+    assert calls["init"]["vad_model"] == "/models/funasr/vad"
+    assert "punc_model" not in calls["init"]
+    assert calls["init"]["vad_kwargs"] == {"max_single_segment_time": 30000}
+    assert calls["generate"]["output_timestamp"] is True
+    assert calls["generate"]["return_time_stamps"] is True
+    assert calls["generate"]["merge_vad"] is True
+    assert "sentence_timestamp" not in calls["generate"]
+    assert chunks == [
+        {
+            "item_id": 0,
+            "start_ms": 1000,
+            "end_ms": 1800,
+            "text": "你好世界",
+            "source": "funasr_timestamp",
+        }
+    ]
+
+
+def test_funasr_timestamped_text_parser_returns_raw_item_without_duration_split():
+    text = "hello world. next part."
+    timed = [char for char in text if char.isalnum()]
+    timestamps = [[index * 1000, index * 1000 + 800] for index in range(len(timed))]
+
+    chunks = asr._parse_funasr_chunks(
+        [{"text": text, "timestamp": timestamps}],
+        is_sensevoice=True,
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0]["text"] == "hello world. next part."
+    assert chunks[0]["start_ms"] == 0
+    assert chunks[0]["end_ms"] > 12000
+
+
+def test_paraformer_funasr_keeps_sentence_timestamp_and_punc(tmp_path, monkeypatch):
+    calls = {}
+
+    def fake_resolver(_root, model_name, *, local_files_only=True):
+        return {
+            "paraformer-zh": "/models/funasr/paraformer",
+            "fsmn-vad": "/models/funasr/vad",
+            "ct-punc": "/models/funasr/punc",
+        }[model_name]
+
+    class FakeAutoModel:
+        def __init__(self, **kwargs):
+            calls["init"] = kwargs
+
+        def generate(self, **kwargs):
+            calls["generate"] = kwargs
+            return [{"sentence_info": [{"start": 500, "end": 1600, "text": "你好"}]}]
+
+    monkeypatch.setitem(sys.modules, "funasr", types.SimpleNamespace(AutoModel=FakeAutoModel))
+    monkeypatch.setattr(asr, "resolve_modelscope_model_source", fake_resolver)
+
+    chunks = asr._funasr(
+        str(tmp_path / "audio.wav"),
+        "paraformer-zh",
+        "cpu",
+        model_root=tmp_path / "models" / "funasr",
+        local_files_only=True,
+        language="zh",
+    )
+
+    assert calls["init"]["punc_model"] == "/models/funasr/punc"
+    assert calls["generate"]["sentence_timestamp"] is True
+    assert "output_timestamp" not in calls["generate"]
+    assert chunks == [
+        {
+            "item_id": 0,
+            "start_ms": 500,
+            "end_ms": 1600,
+            "text": "你好",
+            "source": "funasr_sentence",
+        }
+    ]
+
+
 def test_auto_engine_with_auto_language_uses_whisper_language_detection(tmp_path, monkeypatch):
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"fake wav")
