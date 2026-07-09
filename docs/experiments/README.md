@@ -37,6 +37,7 @@ docs/experiments/<area>/<YYYY-MM-DD>-<topic>.md
 | 2026-07-08 | asr | `asr/2026-07-08-asr-model-vad-speed-eval.md` |
 | 2026-07-08 | asr | `asr/2026-07-08-sensevoice-faster-whisper-medium-turbo.md` |
 | 2026-07-08 | asr | `asr/2026-07-08-asr-best3-metric-retest.md` |
+| 2026-07-09 | asr | `asr/2026-07-09-asr-dual-path-final-scheme.md` |
 
 ## 每份实验总结应包含
 

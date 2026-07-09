@@ -197,16 +197,21 @@ asr_engine = funasr
 asr_zh_model = iic/SenseVoiceSmall
 asr_model = turbo
 asr_language = auto
-asr_vad_strategy = funasr_fsmn
+asr_vad_strategy = silero_12s
 ```
 
-`retrieval_chunk_builder` 负责面向搜索的文本边界，而不是把模型 timestamp gap 直接当最终语义边界。它会做 CJK/Latin 词边界保护、短碎片合并、false timestamp gap 修复，并在 manifest 中记录 `language_route`、`route_reason`、`vad_strategy`、`raw_items`、`retrieval_chunks` 和 `chunk_builder_stats`。
+默认 SenseVoiceSmall 路径使用外置 Silero VAD 先把音频切成最长约 12s 的语音 group，再逐段送入 SenseVoiceSmall，生成 timestamp 后按安全标点拆分 raw item。该路径不再依赖 FunASR 内置 FSMN VAD 作为默认切分器；`funasr_fsmn` 仅作为显式 fallback。
+
+Faster-Whisper 路径保留 builtin VAD：`vad_filter=True`，`min_silence_duration_ms=500`，`condition_on_previous_text=True`，主要作为多语言或更强效果备选。两条路径都进入同一个 `retrieval_chunk_builder`。
+
+`retrieval_chunk_builder` 负责面向搜索的文本边界，而不是把模型 timestamp gap 直接当最终语义边界。当前最终合并窗口是 `8/12/15`：`target_max_duration_ms=8000`、`soft_max_duration_ms=12000`、`hard_max_duration_ms=15000`，常规 gap 500ms，短文本和同 5s bucket gap 1000ms。策略保持保守：只做文本规范化、短碎片/近邻合并、同 5s bucket 内的有限合并、朴素中英文拼接和低信息 chunk 标记；不再根据 CJK/Latin 断词猜测跨较大 gap 强行修复。manifest 中记录 `language_route`、`route_reason`、`vad_strategy`、`raw_items`、`retrieval_chunks` 和 `chunk_builder_stats`。
 
 2026-07-07 起，新建 ASR v3 索引会先做轻量后处理，再生成 semantic embedding：
 
 ```text
 raw ASR chunks
 -> 文本归一化：NFKC、繁体转简体、重复语气词前缀清理
+-> 模型层安全拆分：SenseVoice 使用 timestamp + 标点；faster-whisper 对超长 raw item 只按安全标点近似拆分
 -> chunk 合并：以 ASR 时间间隔为主，5s bucket 只作为轻量正向信号
 -> 低信息 chunk 标记：保留在 texts/chunk_times_ms，但不写入 semantic embeddings
 -> MiniLM semantic embedding

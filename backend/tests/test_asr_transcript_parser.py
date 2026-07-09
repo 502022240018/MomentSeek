@@ -19,6 +19,22 @@ def _timestamps_for_timed_chars(text: str, step_ms: int = 900) -> list[list[int]
     return [[index * step_ms, index * step_ms + 700] for index, _char in enumerate(timed)]
 
 
+def test_sensevoice_timestamp_text_can_split_at_safe_punctuation():
+    text = "<|en|><|NEUTRAL|><|BGM|><|withitn|>hello world. next part, trailing words."
+
+    items, diagnostics = parse_funasr_raw_transcript(
+        [{"text": text, "timestamp": _timestamps_for_timed_chars(text, step_ms=900)}],
+        is_sensevoice=True,
+        split_timestamp_text=True,
+    )
+
+    assert [item.text for item in items] == ["hello world.", "next part, trailing words."]
+    assert [item.emotion for item in items] == ["neutral", "neutral"]
+    assert [item.audio_event for item in items] == ["bgm", "bgm"]
+    assert items[0].end_ms <= items[1].start_ms
+    assert diagnostics["timestamp_split_items"] == 2
+
+
 def test_funasr_parser_keeps_long_sentence_as_raw_item():
     text = "一个人唤醒了,他是我从来没有见过的那种男生,孤独敏感又倔强。"
 

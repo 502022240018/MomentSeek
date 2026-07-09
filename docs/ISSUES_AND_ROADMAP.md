@@ -82,13 +82,15 @@ ID:
   - Whisper 强制 task="transcribe"，manifest 记录 requested/detected language。
   - ASR raw chunks 写入索引前做文本归一化、短 chunk 合并、低信息 chunk semantic 跳过。
   - 新增 scripts/asr_postprocess_report.py，可在现有素材上比较 gap_only/bucket_bonus/shot_bonus/conservative/aggressive_short。
-  - 当前默认策略为收紧后的 bucket_bonus。
+  - 当前默认 retrieval_chunk_builder 使用最终 `8/12/15` 合并窗口：8s target、12s soft、15s hard。
+  - SenseVoiceSmall 默认改为 `silero_12s` 外置 VAD；faster-whisper 保留 builtin VAD 并在超长 raw item 上做安全标点拆分。
 后续：
   - 更多多语种素材上复跑调参报告。
   - 真实 shot-aware visual segment 稳定后，重新评估 shot_bonus。
   - 旧 ASR 索引需要 ASR-only 重跑才会应用新后处理。
 相关实验：
   docs/experiments/asr/2026-07-07-asr-postprocess-tuning.md
+  runtime-server/analysis/asr_dual_path_final_scheme_20260709/
 ```
 
 ```text
@@ -121,13 +123,14 @@ ID:
 已完成：
   1. ASR pipeline 拆为 raw transcript parser 和 retrieval_chunk_builder。
   2. parser 不再按固定 8s/12s 规则生成最终检索 chunk。
-  3. retrieval_chunk_builder 负责 CJK/Latin 边界保护、短碎片合并和 false gap 修复。
+  3. retrieval_chunk_builder 负责短碎片合并、近邻合并、同 5s bucket 内有限合并和低信息 chunk 标记。
   4. asr.npz 默认仍只保存 chunk_times_ms、texts、embeddings、embedding_chunk_indices。
   5. debug 开启时才保存 raw transcript、retrieval chunks 和 repair report。
+  6. 2026-07-09 落地最终双路径方案：SenseVoiceSmall + Silero external VAD 12s；faster-whisper turbo + builtin VAD；两者共用 `8/12/15` retrieval chunk builder。
 仍需观察：
   - 方言、多语言素材是否需要从手动路由升级为自动模型切换。
   - SenseVoiceSmall 与 faster-whisper turbo 在同一 chunk builder 下的真实检索召回差异。
-  - 是否需要引入轻量分词辅助来减少 CJK 边界修复误合并。
+  - 暂不做 CJK/Latin 断词猜测和 false gap 修复，优先从模型、VAD、timestamp 与切分策略上减少原始断裂。
 相关文件或实验：
   backend/app/indexing/asr.py
   backend/app/indexing/asr_transcript_parser.py
@@ -197,6 +200,37 @@ ID:
   runtime-server/analysis/asr_full_texts_after_rebuild_20260707/
   backend/app/indexing/asr.py
   backend/app/indexing/asr_postprocess.py
+```
+
+### RQ-003D ASR 模型 adapter 边界
+
+```text
+优先级：P2
+状态：open
+范围：asr architecture / model extensibility
+问题或目标：
+  当前 ASR 可用 SenseVoiceSmall/FunASR 和 faster-whisper turbo，未来可能继续更换或增加模型。
+  需要保持平台通用 pipeline 简洁，避免把某个模型的输出格式、tag、timestamp 怪癖或参数补丁扩散到通用检索层。
+影响：
+  如果模型分支继续堆在 backend/app/indexing/asr.py，后续新增模型会让加载、VAD、timestamp、language metadata、tag parser 和 retrieval chunk 逻辑互相干扰。
+  如果过早抽象，也可能在模型实验还没稳定时增加不必要复杂度。
+设计原则：
+  1. 模型特异逻辑只放在 model adapter / parser 层，例如模型加载、VAD 参数、raw output 解析、tag 剥离和必要 metadata 映射。
+  2. 通用层保持模型无关：RawTranscriptItem、retrieval_chunk_builder、semantic embedding、asr.npz schema 和 search 不写某个模型专属分支。
+  3. 当前 schema 的 chunk_emotions/chunk_audio_events 是可选通用增强字段；有能力的模型填值，没有能力的模型写空字符串。
+触发条件：
+  1. asr.py 中新增第三个以上模型分支，或单个模型需要大量专属参数。
+  2. timestamp/tag/language metadata 的解析逻辑开始明显膨胀。
+  3. 测试很难单独覆盖某个模型输出到 RawTranscriptItem 的转换。
+  4. 通用 retrieval chunk 合并逻辑被迫判断具体模型名。
+下一步：
+  触发后把模型调用拆为 backend/app/indexing/asr_adapters/ 下的 sensevoice.py、faster_whisper.py、whisper.py、sidecar.py 等小模块。
+  每个 adapter 输出统一的 raw_items 和少量 metadata，主流程继续只负责 extract audio -> adapter.transcribe -> build_retrieval_chunks -> semantic embedding -> save asr.npz。
+相关文件或实验：
+  backend/app/indexing/asr.py
+  backend/app/indexing/asr_transcript_parser.py
+  backend/app/indexing/asr_retrieval_chunks.py
+  docs/RETRIEVAL_CHANNELS.md
 ```
 
 ### RQ-004 OCR chunk 质量

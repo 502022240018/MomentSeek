@@ -11,7 +11,12 @@ import numpy as np
 from app.indexing.asr_debug import write_asr_debug_artifacts
 from app.indexing.asr_retrieval_chunks import RetrievalChunkConfig, build_retrieval_chunks
 from app.indexing.asr_text import asr_text_profile
-from app.indexing.asr_transcript_parser import parse_funasr_raw_transcript, raw_items_from_chunks
+from app.indexing.asr_pipeline_types import RawTranscriptItem
+from app.indexing.asr_transcript_parser import (
+    apply_safe_raw_split,
+    parse_funasr_raw_transcript,
+    raw_items_from_chunks,
+)
 from app.indexing.common import atomic_save_npz
 from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
 from app.media import extract_audio, parse_timecode
@@ -23,6 +28,7 @@ from app.model_sources import (
 
 
 DEFAULT_ASR_POSTPROCESS_STRATEGY = "bucket_bonus"
+SAMPLE_RATE = 16000
 
 
 def resolve_asr_device(device: str, cuda_enabled: bool = False, npu_enabled: bool = False, npu_device_id: int = 0) -> str:
@@ -84,9 +90,173 @@ def _is_sensevoice_model(model_name: str, model_source: str = "") -> bool:
     return "sensevoice" in f"{model_name} {model_source}".casefold()
 
 
-def _parse_funasr_chunks(result: object, *, is_sensevoice: bool) -> list[dict]:
-    raw_items, _diagnostics = parse_funasr_raw_transcript(result, is_sensevoice=is_sensevoice)
+def _parse_funasr_chunks(
+    result: object,
+    *,
+    is_sensevoice: bool,
+    split_timestamp_text: bool = False,
+) -> list[dict]:
+    raw_items, _diagnostics = parse_funasr_raw_transcript(
+        result,
+        is_sensevoice=is_sensevoice,
+        split_timestamp_text=split_timestamp_text,
+    )
     return [item.to_dict() for item in raw_items]
+
+
+def _write_wav_mono(path: str | Path, audio: np.ndarray) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    clipped = np.clip(audio, -1.0, 1.0)
+    int16 = (clipped * 32767.0).astype(np.int16)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(SAMPLE_RATE)
+        wav.writeframes(int16.tobytes())
+
+
+def _build_silero_groups(
+    audio: np.ndarray,
+    vad_model: object,
+    *,
+    max_group_seconds: float = 12.0,
+    max_group_gap_seconds: float = 2.0,
+) -> tuple[list[tuple[int, float, float]], dict[str, object]]:
+    from silero_vad import get_speech_timestamps
+
+    try:
+        import torch
+
+        vad_audio = torch.from_numpy(audio)
+    except Exception:
+        vad_audio = audio
+    speech = get_speech_timestamps(
+        vad_audio,
+        vad_model,
+        sampling_rate=SAMPLE_RATE,
+        threshold=0.5,
+        min_speech_duration_ms=250,
+        min_silence_duration_ms=500,
+        speech_pad_ms=200,
+    )
+    intervals = [
+        (max(0, int(item["start"])) / SAMPLE_RATE, min(len(audio), int(item["end"])) / SAMPLE_RATE)
+        for item in speech
+    ]
+    groups: list[tuple[int, float, float]] = []
+    current_start: float | None = None
+    current_end: float | None = None
+    for start, end in intervals:
+        if current_start is None or current_end is None:
+            current_start, current_end = start, end
+            continue
+        gap = max(0.0, start - current_end)
+        if end - current_start <= max_group_seconds and gap <= max_group_gap_seconds:
+            current_end = end
+        else:
+            groups.append((len(groups), current_start, current_end))
+            current_start, current_end = start, end
+    if current_start is not None and current_end is not None:
+        groups.append((len(groups), current_start, current_end))
+
+    return groups, {
+        "speech_intervals": len(intervals),
+        "vad_groups": len(groups),
+        "max_group_seconds": max_group_seconds,
+        "speech_seconds": round(sum(max(0.0, end - start) for start, end in intervals), 3),
+        "group_audio_seconds": round(sum(max(0.0, end - start) for _, start, end in groups), 3),
+        "groups_gt_cap": sum(1 for _, start, end in groups if end - start > max_group_seconds),
+    }
+
+
+def _offset_raw_items(items: list[RawTranscriptItem], offset_ms: int) -> list[RawTranscriptItem]:
+    return [
+        RawTranscriptItem(
+            item_id=index,
+            start_ms=int(item.start_ms) + offset_ms,
+            end_ms=int(item.end_ms) + offset_ms,
+            text=str(item.text),
+            source=str(item.source),
+            unit_id=item.unit_id,
+            emotion=str(item.emotion or ""),
+            audio_event=str(item.audio_event or ""),
+            diagnostics=dict(item.diagnostics or {}),
+        )
+        for index, item in enumerate(items)
+    ]
+
+
+def _reindex_raw_items(items: list[RawTranscriptItem]) -> list[RawTranscriptItem]:
+    return [
+        RawTranscriptItem(
+            item_id=index,
+            start_ms=int(item.start_ms),
+            end_ms=int(item.end_ms),
+            text=str(item.text),
+            source=str(item.source),
+            unit_id=item.unit_id,
+            emotion=str(item.emotion or ""),
+            audio_event=str(item.audio_event or ""),
+            diagnostics=dict(item.diagnostics or {}),
+        )
+        for index, item in enumerate(items)
+    ]
+
+
+def _sensevoice_silero(
+    audio_path: str,
+    model_kwargs: dict,
+    *,
+    language: str,
+    local_files_only: bool,
+    temp_dir: str | Path | None,
+) -> list[dict]:
+    from funasr import AutoModel
+    from silero_vad import load_silero_vad
+
+    with offline_env(local_files_only):
+        model = AutoModel(**model_kwargs)
+    vad_model = load_silero_vad()
+    audio = load_wav_mono(audio_path)
+    groups, _vad_stats = _build_silero_groups(audio, vad_model, max_group_seconds=12.0)
+    if not groups:
+        return []
+
+    clip_dir = Path(temp_dir) if temp_dir is not None else Path(audio_path).parent / "silero_vad_clips"
+    raw_items: list[RawTranscriptItem] = []
+    for group_index, start_s, end_s in groups:
+        start_sample = int(round(start_s * SAMPLE_RATE))
+        end_sample = int(round(end_s * SAMPLE_RATE))
+        group_audio = audio[start_sample:end_sample]
+        group_path = clip_dir / f"silero_{group_index:04d}_{int(start_s * 1000)}_{int(end_s * 1000)}.wav"
+        _write_wav_mono(group_path, group_audio)
+        generate_kwargs = {
+            "input": str(group_path),
+            "cache": {},
+            "batch_size_s": 60,
+            "use_itn": True,
+            "merge_vad": False,
+            "merge_length_s": 8,
+            "output_timestamp": True,
+            "return_time_stamps": True,
+        }
+        if language and language != "auto":
+            generate_kwargs["language"] = language
+        result = model.generate(**generate_kwargs)
+        parsed_items, _stats = parse_funasr_raw_transcript(
+            result,
+            is_sensevoice=True,
+            split_timestamp_text=True,
+        )
+        parsed_items = apply_safe_raw_split(parsed_items)
+        raw_items.extend(_offset_raw_items(parsed_items, int(round(start_s * 1000))))
+        try:
+            group_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    return [item.to_dict() for item in _reindex_raw_items(raw_items)]
 
 
 def _funasr(
@@ -96,10 +266,18 @@ def _funasr(
     model_root: str | Path | None = None,
     local_files_only: bool = True,
     language: str = "auto",
+    vad_strategy: str = "funasr_fsmn",
+    temp_dir: str | Path | None = None,
 ) -> list[dict]:
     model_source = resolve_modelscope_model_source(model_root, model_name, local_files_only=local_files_only)
-    vad_source = resolve_modelscope_model_source(model_root, "fsmn-vad", local_files_only=local_files_only)
     is_sensevoice = _is_sensevoice_model(model_name, model_source)
+    normalized_vad_strategy = str(vad_strategy or "funasr_fsmn").replace("-", "_").casefold()
+    use_silero = is_sensevoice and normalized_vad_strategy in {"silero", "silero_12s", "silero_external"}
+    vad_source = None if use_silero else resolve_modelscope_model_source(
+        model_root,
+        "fsmn-vad",
+        local_files_only=local_files_only,
+    )
     punc_source = None if is_sensevoice else resolve_modelscope_model_source(
         model_root, "ct-punc", local_files_only=local_files_only
     )
@@ -109,11 +287,20 @@ def _funasr(
 
     model_kwargs = {
         "model": model_source,
-        "vad_model": vad_source,
         "device": device,
         "disable_update": True,
     }
+    if vad_source is not None:
+        model_kwargs["vad_model"] = vad_source
     if is_sensevoice:
+        if use_silero:
+            return _sensevoice_silero(
+                audio_path,
+                model_kwargs,
+                language=language,
+                local_files_only=local_files_only,
+                temp_dir=temp_dir,
+            )
         model_kwargs["vad_kwargs"] = {"max_single_segment_time": 30000}
     else:
         model_kwargs["punc_model"] = punc_source
@@ -356,6 +543,8 @@ def build_asr_index(
                     model_root=funasr_model_dir or str(Path(model_dir).parent / "funasr"),
                     local_files_only=model_local_files_only,
                     language=requested_language,
+                    vad_strategy=vad_strategy,
+                    temp_dir=Path(working_dir) / "asr_silero_clips",
                 )
                 raw_items = raw_items_from_chunks(model_chunks, source="funasr")
                 used_engine = "funasr"
@@ -393,6 +582,7 @@ def build_asr_index(
                 local_files_only=model_local_files_only,
             )
             raw_items = raw_items_from_chunks(model_chunks, source="faster_whisper")
+            raw_items = apply_safe_raw_split(raw_items)
             used_engine = "faster-whisper"
             task = str(whisper_metadata.get("task") or task)
             detected_language = str(whisper_metadata.get("detected_language") or "")

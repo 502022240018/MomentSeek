@@ -130,7 +130,7 @@ dev.cpu / dev.cuda -> deploy/models/dev-full.models.json
 models/
 ```
 
-本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。ASR 默认是 `ASR_ENGINE=funasr` + `ASR_ZH_MODEL=iic/SenseVoiceSmall`，本地目录约定为 `models/funasr/iic/SenseVoiceSmall`，并配套 `models/funasr/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch` 和 `models/funasr/iic/punc_ct-transformer_cn-en-common-vocab471067-large`。需要更强多语言或更好效果时，可切到 `ASR_ENGINE=faster-whisper` + `ASR_MODEL=turbo`，本地 snapshot 目录约定为 `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。其他模型条目按 `docs/MODELS.md` 的目录约定准备。
+本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。ASR 默认是 `ASR_ENGINE=funasr` + `ASR_ZH_MODEL=iic/SenseVoiceSmall` + `ASR_VAD_STRATEGY=silero_12s`，本地目录约定为 `models/funasr/iic/SenseVoiceSmall`，并需要 Python 依赖 `silero-vad`。`models/funasr/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch` 仍保留为 `ASR_VAD_STRATEGY=funasr_fsmn` fallback；`ct-punc` 用于非 SenseVoice FunASR 路径。需要更强多语言或更好效果时，可切到 `ASR_ENGINE=faster-whisper` + `ASR_MODEL=turbo`，本地 snapshot 目录约定为 `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。其他模型条目按 `docs/MODELS.md` 的目录约定准备。
 
 ## 启动后端
 

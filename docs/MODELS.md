@@ -28,7 +28,7 @@ scripts/bootstrap_dev.ps1 -Profile dev.cpu -DownloadModels
 scripts/bootstrap_dev.sh dev.cpu --download
 ```
 
-没有 `-DownloadModels` 或 `--download` 时，校验脚本只检查已有缓存并写 lock，不主动下载。即使传入下载开关，非 Hugging Face 条目也可能需要先按库要求准备依赖或缓存。ASR 默认使用 `ASR_ENGINE=funasr` + `ASR_ZH_MODEL=iic/SenseVoiceSmall`，本地目录约定是 `models/funasr/iic/SenseVoiceSmall`，并配套 `fsmn-vad`、`ct-punc` 等 FunASR 资源。需要更强多语言或更好效果时，可切到 `ASR_ENGINE=faster-whisper` + `ASR_MODEL=turbo`，本地 snapshot 目录约定是 `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。
+没有 `-DownloadModels` 或 `--download` 时，校验脚本只检查已有缓存并写 lock，不主动下载。即使传入下载开关，非 Hugging Face 条目也可能需要先按库要求准备依赖或缓存。ASR 默认使用 `ASR_ENGINE=funasr` + `ASR_ZH_MODEL=iic/SenseVoiceSmall` + `ASR_VAD_STRATEGY=silero_12s`，本地目录约定是 `models/funasr/iic/SenseVoiceSmall`，并通过 `silero-vad` 做外置 VAD。`fsmn-vad` 保留为 `ASR_VAD_STRATEGY=funasr_fsmn` fallback；`ct-punc` 用于非 SenseVoice FunASR 路径。需要更强多语言或更好效果时，可切到 `ASR_ENGINE=faster-whisper` + `ASR_MODEL=turbo`，本地 snapshot 目录约定是 `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。
 
 ## Ascend Staging/Prod 模型
 

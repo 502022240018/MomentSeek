@@ -102,7 +102,7 @@ asr_engine = funasr
 asr_zh_model = iic/SenseVoiceSmall
 asr_model = turbo
 asr_language = auto
-asr_vad_strategy = funasr_fsmn
+asr_vad_strategy = silero_12s
 asr_semantic_model = sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 asr_semantic_device = cpu
 
@@ -140,9 +140,13 @@ query -> SigLIP2 query embedding
 
 ```text
 audio_extract
+-> SenseVoiceSmall + Silero 12s external VAD by default
+   or faster-whisper turbo + builtin VAD when explicitly selected
 -> model_transcribe
 -> raw_transcript parser
+-> safe raw split for timestamp/punctuation or long raw items
 -> retrieval_chunk_builder
+   final merge window = 8/12/15 seconds
 -> MiniLM semantic embedding
 -> asr.npz
 ```

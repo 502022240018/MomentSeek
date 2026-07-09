@@ -210,6 +210,67 @@ def test_sensevoice_funasr_uses_timestamp_flags_without_external_punc(tmp_path, 
     ]
 
 
+def test_sensevoice_silero_strategy_uses_external_vad_groups(tmp_path, monkeypatch):
+    calls = {"generate": []}
+
+    def fake_resolver(_root, model_name, *, local_files_only=True):
+        return {
+            "iic/SenseVoiceSmall": "/models/funasr/sensevoice",
+            "fsmn-vad": "/models/funasr/vad",
+            "ct-punc": "/models/funasr/punc",
+        }[model_name]
+
+    class FakeAutoModel:
+        def __init__(self, **kwargs):
+            calls["init"] = kwargs
+
+        def generate(self, **kwargs):
+            calls["generate"].append(kwargs)
+            if "0000" in str(kwargs["input"]):
+                return [{"text": "first sentence.", "timestamp": [[0, 300], [400, 700], [800, 1100], [1200, 1500], [1600, 1900], [2000, 2300], [2400, 2700], [2800, 3100], [3200, 3500], [3600, 3900], [4000, 4300], [4400, 4700], [4800, 5100]]}]
+            return [{"text": "second sentence.", "timestamp": [[0, 300], [400, 700], [800, 1100], [1200, 1500], [1600, 1900], [2000, 2300], [2400, 2700], [2800, 3100], [3200, 3500], [3600, 3900], [4000, 4300], [4400, 4700], [4800, 5100], [5200, 5500]]}]
+
+    def fake_get_speech_timestamps(_audio, _model, **_kwargs):
+        return [
+            {"start": 0, "end": 6 * 16000},
+            {"start": int(6.5 * 16000), "end": 11 * 16000},
+            {"start": 15 * 16000, "end": 19 * 16000},
+        ]
+
+    fake_funasr = types.SimpleNamespace(AutoModel=FakeAutoModel)
+    fake_silero = types.SimpleNamespace(
+        load_silero_vad=lambda: object(),
+        get_speech_timestamps=fake_get_speech_timestamps,
+    )
+    fake_postprocess = types.SimpleNamespace(rich_transcription_postprocess=lambda text: text)
+    monkeypatch.setitem(sys.modules, "funasr", fake_funasr)
+    monkeypatch.setitem(sys.modules, "silero_vad", fake_silero)
+    monkeypatch.setitem(sys.modules, "funasr.utils", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "funasr.utils.postprocess_utils", fake_postprocess)
+    monkeypatch.setattr(asr, "resolve_modelscope_model_source", fake_resolver)
+    monkeypatch.setattr(asr, "load_wav_mono", lambda _path: np.zeros((20 * 16000,), dtype=np.float32))
+
+    chunks = asr._funasr(
+        str(tmp_path / "audio.wav"),
+        "iic/SenseVoiceSmall",
+        "cuda",
+        model_root=tmp_path / "models" / "funasr",
+        local_files_only=True,
+        language="zh",
+        vad_strategy="silero_12s",
+        temp_dir=tmp_path / "clips",
+    )
+
+    assert calls["init"]["model"] == "/models/funasr/sensevoice"
+    assert "vad_model" not in calls["init"]
+    assert len(calls["generate"]) == 2
+    assert all(call["merge_vad"] is False for call in calls["generate"])
+    assert all(call["output_timestamp"] is True for call in calls["generate"])
+    assert chunks[0]["start_ms"] == 0
+    assert chunks[1]["start_ms"] == 15000
+    assert [chunk["text"] for chunk in chunks] == ["first sentence.", "second sentence."]
+
+
 def test_funasr_timestamped_text_parser_returns_raw_item_without_duration_split():
     text = "hello world. next part."
     timed = [char for char in text if char.isalnum()]
@@ -425,7 +486,7 @@ def test_sidecar_asr_index_postprocesses_short_fragments_and_preserves_schema(tm
     assert result["postprocess_stats"]["merged_chunks"] == 1
 
 
-def test_sidecar_asr_pipeline_repairs_cjk_boundary_and_keeps_npz_schema(tmp_path, monkeypatch):
+def test_sidecar_asr_pipeline_does_not_repair_cjk_boundary_across_gap(tmp_path, monkeypatch):
     sidecar = tmp_path / "broken.srt"
     sidecar.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\n孤\n\n"
@@ -435,11 +496,11 @@ def test_sidecar_asr_pipeline_repairs_cjk_boundary_and_keeps_npz_schema(tmp_path
 
     def fake_semantic_arrays(**kwargs):
         chunks = kwargs["chunks"]
-        assert [chunk["text"] for chunk in chunks] == ["孤独敏感又倔强。"]
+        assert [chunk["text"] for chunk in chunks] == ["孤", "独敏感又倔强。"]
         return {
-            "embeddings": np.asarray([[1.0, 0.0]], dtype=np.float16),
-            "embedding_chunk_indices": np.asarray([0], dtype=np.int32),
-            "semantic_chunks": 1,
+            "embeddings": np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float16),
+            "embedding_chunk_indices": np.asarray([0, 1], dtype=np.int32),
+            "semantic_chunks": 2,
             "semantic_model": "fake-semantic",
             "semantic_device": "cpu",
             "semantic_status": "complete",
@@ -469,10 +530,11 @@ def test_sidecar_asr_pipeline_repairs_cjk_boundary_and_keeps_npz_schema(tmp_path
             "embeddings",
             "embedding_chunk_indices",
         }
-        assert data["texts"].tolist() == ["孤独敏感又倔强。"]
+        assert data["texts"].tolist() == ["孤", "独敏感又倔强。"]
     assert result["raw_items"] == 2
-    assert result["retrieval_chunks"] == 1
-    assert result["chunk_builder_stats"]["word_boundary_repairs"] == 1
+    assert result["retrieval_chunks"] == 2
+    assert result["chunk_builder_stats"]["word_boundary_repairs"] == 0
+    assert result["chunk_builder_stats"]["fake_gap_repairs"] == 0
 
 
 def test_settings_default_asr_language_is_auto():
@@ -483,4 +545,4 @@ def test_settings_default_asr_language_is_auto():
     assert settings.asr_language == "auto"
     assert settings.asr_debug_artifacts is False
     assert settings.asr_save_raw_transcript is False
-    assert settings.asr_vad_strategy == "funasr_fsmn"
+    assert settings.asr_vad_strategy == "silero_12s"

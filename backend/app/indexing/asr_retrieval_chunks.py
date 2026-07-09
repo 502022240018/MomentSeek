@@ -9,13 +9,13 @@ from app.indexing.asr_text import normalize_asr_text, normalize_search_text, sem
 
 @dataclass(frozen=True)
 class RetrievalChunkConfig:
-    normal_gap_ms: int = 700
-    short_gap_ms: int = 1800
-    same_bucket_gap_ms: int = 1800
+    normal_gap_ms: int = 500
+    short_gap_ms: int = 1000
+    same_bucket_gap_ms: int = 1000
     false_gap_repair_ms: int = 8000
-    target_max_duration_ms: int = 18000
-    soft_max_duration_ms: int = 25000
-    hard_max_duration_ms: int = 35000
+    target_max_duration_ms: int = 8000
+    soft_max_duration_ms: int = 12000
+    hard_max_duration_ms: int = 15000
     short_text_chars: int = 8
     max_text_chars: int = 180
     bucket_ms: int = 5000
@@ -109,9 +109,7 @@ def _join_text(left_text: str, right_text: str, *, boundary_repair: bool) -> str
         return right
     if not right:
         return left
-    if boundary_repair and _is_cjk(left[-1]) and _is_cjk(right[0]):
-        return f"{left}{right}"
-    if boundary_repair and left[-1].isalpha() and right[0].isalpha():
+    if _is_cjk(left[-1]) and _is_cjk(right[0]):
         return f"{left}{right}"
     if _ends_soft_punctuation(left):
         return f"{left}{right}"
@@ -126,24 +124,14 @@ def _merge_decision(
 ) -> tuple[bool, bool, list[str]]:
     gap_ms = max(0, item.start_ms - current.end_ms)
     candidate_duration_ms = max(current.end_ms, item.end_ms) - current.start_ms
-    cjk_repair = _needs_cjk_boundary_repair(current.text, item.text)
-    latin_repair = _needs_latin_boundary_repair(current.text, item.text)
-    boundary_repair = cjk_repair or latin_repair
+    boundary_repair = False
     flags: list[str] = []
-    if cjk_repair:
-        flags.append("cjk_boundary_repair")
-    if latin_repair:
-        flags.append("latin_boundary_repair")
-    if gap_ms > config.short_gap_ms and boundary_repair:
-        flags.append("fake_gap_repair")
 
     candidate_text = _join_text(current.text, item.text, boundary_repair=boundary_repair)
     if _compact_length(candidate_text) > config.max_text_chars:
         return False, boundary_repair, flags
     if candidate_duration_ms > config.hard_max_duration_ms:
         return False, boundary_repair, flags
-    if boundary_repair and gap_ms <= config.false_gap_repair_ms:
-        return True, boundary_repair, flags
     if _ends_sentence(current.text):
         return False, boundary_repair, flags
     if _is_short_text(current.text, config) or _is_short_text(item.text, config):

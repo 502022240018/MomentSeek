@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     asr_zh_model: str = "iic/SenseVoiceSmall"
     asr_device: str = "auto"
     asr_language: str = "auto"
-    asr_vad_strategy: str = "funasr_fsmn"
+    asr_vad_strategy: str = "silero_12s"
     asr_debug_artifacts: bool = False
     asr_save_raw_transcript: bool = False
     asr_model_local_files_only: bool = True
