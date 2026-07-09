@@ -105,7 +105,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             video_path=video_path,
             output_path=str(video_index_dir / "asr.npz"),
             working_dir=str(working_dir),
-            engine=settings.asr_engine,
+            engine=str(options.get("asr_engine", settings.asr_engine)),
             model_name=str(options.get("asr_model", settings.asr_model)),
             device=resolve_asr_device(settings.asr_device, settings.cuda_enabled, settings.npu_enabled, settings.npu_device_id),
             model_dir=str(settings.app_model_dir / "whisper"),

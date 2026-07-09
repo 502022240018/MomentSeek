@@ -15,6 +15,7 @@ class IndexRequest(BaseModel):
     visual_shot_threshold: float | None = Field(default=None, gt=0, le=1)
     face_sample_fps: float | None = Field(default=None, gt=0, le=15)
     ocr_sample_fps: float | None = Field(default=None, gt=0, le=5)
+    asr_engine: str | None = None
     asr_model: str | None = None
     asr_language: str | None = None
 
@@ -101,6 +102,19 @@ class IndexRequest(BaseModel):
         allowed = {"tiny", "base", "small", "medium", "large", "large-v3", "turbo", "large-v3-turbo"}
         if normalized not in allowed:
             raise ValueError("asr_model 只能是 tiny、base、small、medium、large、large-v3、turbo、large-v3-turbo")
+        return normalized
+
+    @field_validator("asr_engine")
+    @classmethod
+    def validate_asr_engine(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower().replace("_", "-")
+        aliases = {"fasterwhisper": "faster-whisper"}
+        normalized = aliases.get(normalized, normalized)
+        allowed = {"auto", "whisper", "funasr", "faster-whisper"}
+        if normalized not in allowed:
+            raise ValueError("asr_engine must be one of: auto, whisper, funasr, faster-whisper")
         return normalized
 
     @field_validator("asr_language")

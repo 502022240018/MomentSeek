@@ -485,3 +485,22 @@ def test_index_request_accepts_visual_shot_segment_options():
         assert "visual_shot_threshold" in str(exc)
     else:
         raise AssertionError("invalid visual_shot_threshold should fail validation")
+
+
+def test_index_request_accepts_asr_engine_override():
+    from pydantic import ValidationError
+
+    from app.schemas import IndexRequest
+
+    request = IndexRequest(asr_engine="faster_whisper", asr_language="auto", asr_model="turbo")
+
+    assert request.asr_engine == "faster-whisper"
+    assert request.asr_language == "auto"
+    assert request.asr_model == "turbo"
+
+    try:
+        IndexRequest(asr_engine="sensevoice")
+    except ValidationError as exc:
+        assert "asr_engine" in str(exc)
+    else:
+        raise AssertionError("invalid asr_engine should fail validation")

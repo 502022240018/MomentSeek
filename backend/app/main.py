@@ -279,6 +279,7 @@ def create_index_job(video_id: str, request: IndexRequest = Body(default_factory
             "visual_shot_threshold": request.visual_shot_threshold,
             "face_sample_fps": request.face_sample_fps,
             "ocr_sample_fps": request.ocr_sample_fps,
+            "asr_engine": request.asr_engine,
             "asr_model": request.asr_model,
             "asr_language": request.asr_language,
         }.items() if value is not None
