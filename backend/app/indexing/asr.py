@@ -301,6 +301,7 @@ def build_asr_index(
     detected_language = ""
     task = "transcribe"
     raw_parser_stats: dict[str, int] = {}
+    tag_source = ""
 
     if sidecar_path:
         raw_items = raw_items_from_chunks(load_sidecar(sidecar_path), source="sidecar")
@@ -359,6 +360,8 @@ def build_asr_index(
                 raw_items = raw_items_from_chunks(model_chunks, source="funasr")
                 used_engine = "funasr"
                 effective_model = funasr_model
+                if _is_sensevoice_model(funasr_model):
+                    tag_source = "sensevoice"
                 if (
                     requested_language == "zh"
                     or "zh" in funasr_model.casefold()
@@ -496,6 +499,7 @@ def build_asr_index(
         "postprocess_strategy": DEFAULT_ASR_POSTPROCESS_STRATEGY,
         "postprocess_stats": postprocess_stats,
         "text_profile": asr_text_profile(chunk.get("text", "") for chunk in chunks),
+        "tag_source": tag_source,
         "schema_version": 3,
         "decode_status": "complete" if chunks else "empty",
     }
@@ -514,6 +518,10 @@ def _save_asr_npz(
     embeddings: np.ndarray,
     embedding_chunk_indices: np.ndarray,
 ) -> None:
+    def utf8_bytes_array(values: list[str]) -> np.ndarray:
+        width = max((len(value.encode("utf-8")) for value in values), default=1)
+        return np.asarray(values, dtype=f"S{width}")
+
     def chunk_time_ms(chunk: dict, ms_key: str, seconds_key: str, legacy_key: str) -> int:
         if ms_key in chunk:
             return int(chunk[ms_key])
@@ -527,10 +535,14 @@ def _save_asr_npz(
         for chunk in chunks
     ], dtype=np.int32).reshape((-1, 2))
     texts = np.asarray([str(chunk.get("text", "")).strip() for chunk in chunks], dtype="U")
+    chunk_emotions = utf8_bytes_array([str(chunk.get("emotion", "")).strip() for chunk in chunks])
+    chunk_audio_events = utf8_bytes_array([str(chunk.get("audio_event", "")).strip() for chunk in chunks])
     atomic_save_npz(
         output_path,
         chunk_times_ms=chunk_times_ms,
         texts=texts,
+        chunk_emotions=chunk_emotions,
+        chunk_audio_events=chunk_audio_events,
         embeddings=np.asarray(embeddings, dtype=np.float16),
         embedding_chunk_indices=np.asarray(embedding_chunk_indices, dtype=np.int32),
     )

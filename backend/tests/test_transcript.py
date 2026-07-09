@@ -409,7 +409,14 @@ def test_sidecar_asr_index_postprocesses_short_fragments_and_preserves_schema(tm
     )
 
     with np.load(tmp_path / "asr.npz", allow_pickle=False) as data:
-        assert set(data.files) == {"chunk_times_ms", "texts", "embeddings", "embedding_chunk_indices"}
+        assert set(data.files) == {
+            "chunk_times_ms",
+            "texts",
+            "chunk_emotions",
+            "chunk_audio_events",
+            "embeddings",
+            "embedding_chunk_indices",
+        }
         assert data["chunk_times_ms"].tolist() == [[0, 1200], [3200, 3700]]
         assert data["texts"].tolist() == ["今天我们聊一本书", "下一段"]
         assert data["embedding_chunk_indices"].tolist() == [0, 1]
@@ -454,7 +461,14 @@ def test_sidecar_asr_pipeline_repairs_cjk_boundary_and_keeps_npz_schema(tmp_path
     )
 
     with np.load(tmp_path / "asr.npz", allow_pickle=False) as data:
-        assert set(data.files) == {"chunk_times_ms", "texts", "embeddings", "embedding_chunk_indices"}
+        assert set(data.files) == {
+            "chunk_times_ms",
+            "texts",
+            "chunk_emotions",
+            "chunk_audio_events",
+            "embeddings",
+            "embedding_chunk_indices",
+        }
         assert data["texts"].tolist() == ["孤独敏感又倔强。"]
     assert result["raw_items"] == 2
     assert result["retrieval_chunks"] == 1

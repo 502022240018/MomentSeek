@@ -87,7 +87,7 @@ def channel_manifest(
             or settings.asr_language
         )
         detected_language = str(result.get("detected_language") or "")
-        return {
+        payload = {
             "file": "asr.npz",
             "engine": str(result.get("engine") or settings.asr_engine),
             "model_key": str(result.get("model") or options.get("asr_model") or settings.asr_model),
@@ -109,6 +109,9 @@ def channel_manifest(
             "postprocess_stats": result.get("postprocess_stats") or {},
             "text_profile": result.get("text_profile") or {},
         }
+        if result.get("tag_source"):
+            payload["tag_source"] = str(result["tag_source"])
+        return payload
     if stage == "ocr":
         semantic_model = settings.asr_semantic_model
         return {

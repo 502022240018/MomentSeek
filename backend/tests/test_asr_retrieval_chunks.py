@@ -12,6 +12,40 @@ def _raw(index: int, start_ms: int, end_ms: int, text: str) -> RawTranscriptItem
     )
 
 
+def test_builder_carries_distinct_asr_metadata_into_merged_chunk():
+    chunks, stats = build_retrieval_chunks(
+        [
+            RawTranscriptItem(
+                item_id=0,
+                start_ms=0,
+                end_ms=800,
+                text="what are y",
+                source="fixture",
+                emotion="neutral",
+                audio_event="speech",
+            ),
+            RawTranscriptItem(
+                item_id=1,
+                start_ms=900,
+                end_ms=1800,
+                text="ou doing",
+                source="fixture",
+                emotion="happy",
+                audio_event="speech|bgm",
+            ),
+        ],
+        config=RetrievalChunkConfig(false_gap_repair_ms=2000),
+    )
+
+    assert stats["word_boundary_repairs"] == 1
+    assert len(chunks) == 1
+    assert chunks[0].text == "what are you doing"
+    assert chunks[0].emotion == "neutral|happy"
+    assert chunks[0].audio_event == "speech|bgm"
+    assert chunks[0].to_search_dict()["emotion"] == "neutral|happy"
+    assert chunks[0].to_search_dict()["audio_event"] == "speech|bgm"
+
+
 def test_builder_repairs_cjk_single_character_boundary_across_false_gap():
     chunks, stats = build_retrieval_chunks(
         [

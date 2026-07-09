@@ -32,6 +32,8 @@ class RawTranscriptItem:
     text: str
     source: str
     unit_id: int | None = None
+    emotion: str = ""
+    audio_event: str = ""
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -44,6 +46,10 @@ class RawTranscriptItem:
         }
         if self.unit_id is not None:
             payload["unit_id"] = int(self.unit_id)
+        if self.emotion:
+            payload["emotion"] = self.emotion
+        if self.audio_event:
+            payload["audio_event"] = self.audio_event
         if self.diagnostics:
             payload["diagnostics"] = dict(self.diagnostics)
         return payload
@@ -57,6 +63,8 @@ class RawTranscriptItem:
             text=str(payload["text"]),
             source=str(payload.get("source") or "unknown"),
             unit_id=None if payload.get("unit_id") is None else int(payload["unit_id"]),
+            emotion=str(payload.get("emotion") or ""),
+            audio_event=str(payload.get("audio_event") or ""),
             diagnostics=dict(payload.get("diagnostics") or {}),
         )
 
@@ -71,6 +79,8 @@ class RetrievalChunk:
     semantic_eligible: bool = True
     semantic_reason: str = "ok"
     quality_flags: list[str] = field(default_factory=list)
+    emotion: str = ""
+    audio_event: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +92,8 @@ class RetrievalChunk:
             "semantic_eligible": bool(self.semantic_eligible),
             "semantic_reason": self.semantic_reason,
             "quality_flags": list(self.quality_flags),
+            "emotion": self.emotion,
+            "audio_event": self.audio_event,
         }
 
     def to_search_dict(self) -> dict[str, Any]:
@@ -95,4 +107,6 @@ class RetrievalChunk:
             "semantic_eligible": bool(self.semantic_eligible),
             "semantic_reason": self.semantic_reason,
             "quality_flags": list(self.quality_flags),
+            "emotion": self.emotion,
+            "audio_event": self.audio_event,
         }

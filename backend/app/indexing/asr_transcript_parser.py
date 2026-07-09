@@ -6,6 +6,59 @@ from typing import Any, Iterable
 from app.indexing.asr_pipeline_types import RawTranscriptItem
 
 
+_SENSEVOICE_TAG_RE = re.compile(r"<\|([^|<>]+)\|>")
+_SENSEVOICE_EMOTION_TAGS = {
+    "neutral": "neutral",
+    "happy": "happy",
+    "sad": "sad",
+    "angry": "angry",
+    "fearful": "fearful",
+    "disgusted": "disgusted",
+    "surprised": "surprised",
+}
+_SENSEVOICE_AUDIO_EVENT_TAGS = {
+    "speech": "speech",
+    "bgm": "bgm",
+    "music": "music",
+    "laughter": "laughter",
+    "applause": "applause",
+    "cry": "cry",
+    "sneeze": "sneeze",
+    "breath": "breath",
+    "cough": "cough",
+    "sing": "sing",
+    "noise": "noise",
+    "silence": "silence",
+}
+
+
+def _dedupe_pipe_labels(labels: Iterable[str]) -> str:
+    seen: list[str] = []
+    for label in labels:
+        for part in str(label or "").split("|"):
+            value = part.strip().casefold()
+            if value and value not in seen:
+                seen.append(value)
+    return "|".join(seen)
+
+
+def _extract_sensevoice_tags(text: str) -> tuple[str, str, str]:
+    raw_text = str(text or "")
+    emotions: list[str] = []
+    audio_events: list[str] = []
+    for tag in _SENSEVOICE_TAG_RE.findall(raw_text):
+        key = re.sub(r"[^a-z0-9]+", "", tag.casefold())
+        if key in _SENSEVOICE_EMOTION_TAGS:
+            emotions.append(_SENSEVOICE_EMOTION_TAGS[key])
+        elif key in _SENSEVOICE_AUDIO_EVENT_TAGS:
+            audio_events.append(_SENSEVOICE_AUDIO_EVENT_TAGS[key])
+    return (
+        _SENSEVOICE_TAG_RE.sub("", raw_text).strip(),
+        _dedupe_pipe_labels(emotions),
+        _dedupe_pipe_labels(audio_events),
+    )
+
+
 def _clean_funasr_text(text: str, is_sensevoice: bool) -> str:
     text = str(text or "").strip()
     if not is_sensevoice:
@@ -36,6 +89,8 @@ def _item_from_seconds(index: int, chunk: dict[str, Any], source: str) -> RawTra
     text = str(chunk.get("text") or "").strip()
     if not text:
         return None
+    emotion = str(chunk.get("emotion") or "").strip()
+    audio_event = str(chunk.get("audio_event") or chunk.get("audio_events") or "").strip()
     if "start_ms" in chunk:
         start_ms = int(chunk.get("start_ms") or 0)
         end_ms = int(chunk.get("end_ms", start_ms) or start_ms)
@@ -48,6 +103,8 @@ def _item_from_seconds(index: int, chunk: dict[str, Any], source: str) -> RawTra
         end_ms=max(start_ms, end_ms),
         text=text,
         source=source,
+        emotion=emotion,
+        audio_event=audio_event,
     )
 
 
@@ -72,6 +129,10 @@ def parse_funasr_raw_transcript(result: object, *, is_sensevoice: bool) -> tuple
         source: str,
         diagnostics: dict[str, Any] | None = None,
     ) -> None:
+        emotion = ""
+        audio_event = ""
+        if is_sensevoice:
+            text, emotion, audio_event = _extract_sensevoice_tags(text)
         cleaned = _clean_funasr_text(text, is_sensevoice)
         if cleaned and end_ms >= start_ms:
             items.append(
@@ -81,6 +142,8 @@ def parse_funasr_raw_transcript(result: object, *, is_sensevoice: bool) -> tuple
                     end_ms=int(end_ms),
                     text=cleaned,
                     source=source,
+                    emotion=emotion,
+                    audio_event=audio_event,
                     diagnostics=diagnostics or {},
                 )
             )

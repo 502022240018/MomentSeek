@@ -18,6 +18,16 @@ def _fake_thumbnail(_image, path: str | Path, **_kwargs) -> None:
     path.write_bytes(b"thumb")
 
 
+def _decode_np_strings(values: np.ndarray) -> list[str]:
+    decoded: list[str] = []
+    for value in values.tolist():
+        if isinstance(value, bytes):
+            decoded.append(value.decode("utf-8"))
+        else:
+            decoded.append(str(value))
+    return decoded
+
+
 def test_visual_index_writes_frame_offsets_and_no_per_segment_payload(tmp_path, monkeypatch):
     from app.indexing import visual
 
@@ -219,9 +229,18 @@ def test_asr_index_writes_chunks_and_sparse_semantic_arrays(tmp_path, monkeypatc
     )
 
     with np.load(tmp_path / "asr.npz", allow_pickle=False) as data:
-        assert set(data.files) == {"chunk_times_ms", "texts", "embeddings", "embedding_chunk_indices"}
+        assert set(data.files) == {
+            "chunk_times_ms",
+            "texts",
+            "chunk_emotions",
+            "chunk_audio_events",
+            "embeddings",
+            "embedding_chunk_indices",
+        }
         assert data["chunk_times_ms"].tolist() == [[1000, 2500], [5000, 7000]]
         assert data["texts"].tolist() == ["hello world", "green field"]
+        assert _decode_np_strings(data["chunk_emotions"]) == ["", ""]
+        assert _decode_np_strings(data["chunk_audio_events"]) == ["", ""]
         assert data["embeddings"].dtype == np.float16
         assert data["embedding_chunk_indices"].tolist() == [1]
     assert result["chunks"] == 2
@@ -359,6 +378,7 @@ def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_
             "semantic_status": "complete",
             "postprocess_stats": {"raw_chunks": 2, "processed_chunks": 2},
             "text_profile": {"chunks": 2, "cjk_chars": 8},
+            "tag_source": "sensevoice",
         },
     )
 
@@ -383,6 +403,7 @@ def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_
     assert payload["channels"]["asr"]["semantic_status"] == "complete"
     assert payload["channels"]["asr"]["postprocess_stats"]["processed_chunks"] == 2
     assert payload["channels"]["asr"]["text_profile"]["cjk_chars"] == 8
+    assert payload["channels"]["asr"]["tag_source"] == "sensevoice"
 
 
 def test_write_stage_manifest_records_optional_visual_shot_metadata(tmp_path):

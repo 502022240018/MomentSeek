@@ -37,6 +37,16 @@ def _compact_length(text: str) -> int:
     return len(normalize_search_text(text))
 
 
+def _merge_labels(*values: str) -> str:
+    labels: list[str] = []
+    for value in values:
+        for part in str(value or "").split("|"):
+            label = part.strip().casefold()
+            if label and label not in labels:
+                labels.append(label)
+    return "|".join(labels)
+
+
 def _last_run_after_punctuation(text: str) -> str:
     stripped = text.rstrip()
     boundary = max(stripped.rfind(mark) for mark in ".!?。！？,;，；、:：")
@@ -171,6 +181,8 @@ def build_retrieval_chunks(
                 text=text,
                 source=item.source,
                 unit_id=item.unit_id,
+                emotion=item.emotion,
+                audio_event=item.audio_event,
                 diagnostics=item.diagnostics,
             )
         )
@@ -189,6 +201,8 @@ def build_retrieval_chunks(
                     end_ms=item.end_ms,
                     text=item.text,
                     source_item_ids=[item.item_id],
+                    emotion=item.emotion,
+                    audio_event=item.audio_event,
                 )
             )
             continue
@@ -202,6 +216,8 @@ def build_retrieval_chunks(
                     end_ms=item.end_ms,
                     text=item.text,
                     source_item_ids=[item.item_id],
+                    emotion=item.emotion,
+                    audio_event=item.audio_event,
                 )
             )
             continue
@@ -214,6 +230,8 @@ def build_retrieval_chunks(
             text=merged_text,
             source_item_ids=[*current.source_item_ids, item.item_id],
             quality_flags=merged_flags,
+            emotion=_merge_labels(current.emotion, item.emotion),
+            audio_event=_merge_labels(current.audio_event, item.audio_event),
         )
         merged_items += 1
         if boundary_repair:
@@ -241,6 +259,8 @@ def build_retrieval_chunks(
                 semantic_eligible=bool(quality.eligible),
                 semantic_reason=quality.reason,
                 quality_flags=chunk.quality_flags,
+                emotion=chunk.emotion,
+                audio_event=chunk.audio_event,
             )
         )
 

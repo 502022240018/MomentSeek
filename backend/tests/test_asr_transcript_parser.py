@@ -1,6 +1,19 @@
 from app.indexing.asr_transcript_parser import parse_funasr_raw_transcript, raw_items_from_chunks
 
 
+def test_sensevoice_tags_become_chunk_metadata_not_retrieval_text():
+    items, diagnostics = parse_funasr_raw_transcript(
+        [{"text": "<|zh|><|HAPPY|><|BGM|><|withitn|>hello world", "start": 120, "end": 980}],
+        is_sensevoice=True,
+    )
+
+    assert diagnostics["raw_items"] == 1
+    assert len(items) == 1
+    assert items[0].text == "hello world"
+    assert items[0].emotion == "happy"
+    assert items[0].audio_event == "bgm"
+
+
 def _timestamps_for_timed_chars(text: str, step_ms: int = 900) -> list[list[int]]:
     timed = [char for char in text if char.strip() and (char.isalnum() or "\u3400" <= char <= "\u9fff")]
     return [[index * step_ms, index * step_ms + 700] for index, _char in enumerate(timed)]
