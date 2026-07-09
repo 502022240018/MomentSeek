@@ -78,3 +78,15 @@ def test_builder_does_not_treat_complete_latin_words_as_word_boundary_break():
 
     assert [chunk.text for chunk in chunks] == ["hello world", "green field"]
     assert stats["word_boundary_repairs"] == 0
+
+
+def test_builder_keeps_space_before_short_complete_latin_word():
+    chunks, stats = build_retrieval_chunks(
+        [
+            _raw(0, 0, 400, "today"),
+            _raw(1, 800, 1200, "we discuss books"),
+        ],
+    )
+
+    assert [chunk.text for chunk in chunks] == ["today we discuss books"]
+    assert stats["word_boundary_repairs"] == 0
