@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     npu_enabled: bool = False
     npu_device_id: int = 0
-    cuda_enabled: bool = True
+    cuda_enabled: bool = False
     ascend_visible_devices: str | None = None
     ascend_rt_visible_devices: str | None = None
     torch_device_backend_autoload: str | None = None
@@ -67,14 +67,14 @@ class Settings(BaseSettings):
     face_sample_fps: float = 2.0
     face_provider: str = "cpu"
 
-    asr_engine: str = "funasr"
-    # Used by ASR_ENGINE=whisper or ASR_ENGINE=faster-whisper. The default pairs
-    # with optional faster-whisper turbo; FunASR/SenseVoiceSmall is the default path.
+    asr_engine: str = "auto"
+    # Used by ASR_ENGINE=whisper or ASR_ENGINE=faster-whisper. In auto mode this
+    # is also the lightweight language probe model and the non-Chinese ASR path.
     asr_model: str = "turbo"
     asr_zh_model: str = "iic/SenseVoiceSmall"
     asr_device: str = "auto"
     asr_language: str = "auto"
-    asr_vad_strategy: str = "funasr_fsmn"
+    asr_vad_strategy: str = "silero_12s"
     asr_debug_artifacts: bool = False
     asr_save_raw_transcript: bool = False
     asr_model_local_files_only: bool = True
@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     ocr_version: str = "PP-OCRv6"
     ocr_det_lang: str = "ch"
     ocr_rec_lang: str = "ch"
-    ocr_model_type: str = "tiny"
+    ocr_model_type: str = "small"
     ocr_sample_fps: float = 0.05
     ocr_decode_height: int = 720
     ocr_min_confidence: float = 0.5
@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     @property
     def frame_cache_dir(self) -> Path:
         return self.app_data_dir / "frame_cache"
+
+    @property
+    def legacy_thumbnail_dir(self) -> Path:
+        """Legacy cache location retained only for cleanup during migration."""
+        return self.app_data_dir / "thumbnails"
 
     @property
     def query_dir(self) -> Path:

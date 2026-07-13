@@ -244,8 +244,8 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
   const [faceSampleFps, setFaceSampleFps] = useState(2);
   const [includeOcr, setIncludeOcr] = useState(false);
   const [ocrSampleFps, setOcrSampleFps] = useState(1.00);
-  const [asrModel, setAsrModel] = useState("small");
-  const [asrLanguage, setAsrLanguage] = useState("zh");
+  const [asrModel, setAsrModel] = useState("turbo");
+  const [asrLanguage, setAsrLanguage] = useState("auto");
   const [uploading, setUploading] = useState(false);
   const useShotSegments = visualSegmentPresets[visualSegmentPreset].strategy === "shot";
   const applyVisualSegmentPreset = (next: VisualSegmentPresetKey) => {
@@ -310,7 +310,7 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
       <div>
         <span className="panel-label">INDEX OPTIONS</span>
         <h2>索引参数</h2>
-        <p>Visual 默认 5fps；OCR 需显式勾选，服务器优先走 NPU/CANN，长视频建议先低采样；ASR 默认 small。</p>
+        <p>Visual 默认 5fps；OCR 需显式勾选，服务器优先走 NPU/CANN，长视频建议先低采样；ASR 默认自动语言路由。</p>
       </div>
       <label>Visual model<select value={visualModel} onChange={event => setVisualModel(event.target.value)}><option value="siglip2-so400m-384">SigLIP2 So400m-384 默认</option><option value="chinese-clip-vit-b16">ChineseCLIP ViT-B/16</option><option value="openclip-vit-b32">OpenCLIP ViT-B/32</option><option value="openclip-vit-b16">OpenCLIP ViT-B/16</option><option value="openclip-vit-l14">OpenCLIP ViT-L/14</option></select></label>
       <label>Visual fps<input type="number" min="0.2" max="10" step="0.5" value={visualSampleFps} onChange={event => setVisualSampleFps(Number(event.target.value))} /></label>
@@ -325,8 +325,8 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
       <label>Face fps<input type="number" min="0.2" max="15" step="0.5" value={faceSampleFps} onChange={event => setFaceSampleFps(Number(event.target.value))} /></label>
       <label className="inline-check"><input type="checkbox" checked={includeOcr} onChange={event => setIncludeOcr(event.target.checked)} />包含 OCR</label>
       <label>OCR fps<input type="number" min="0.90" max="2" step="0.05" value={ocrSampleFps} onChange={event => setOcrSampleFps(Number(event.target.value))} /></label>
-      <label>ASR 模型<select value={asrModel} onChange={event => setAsrModel(event.target.value)}><option value="base">base 更快</option><option value="small">small 推荐</option><option value="medium">medium 更准更慢</option><option value="large-v3">large-v3 高风险</option></select></label>
-      <label>ASR 语言<select value={asrLanguage} onChange={event => setAsrLanguage(event.target.value)}><option value="zh">中文</option><option value="en">English</option><option value="auto">Auto</option></select></label>
+      <label>ASR 模型<select value={asrModel} onChange={event => setAsrModel(event.target.value)}><option value="turbo">turbo 默认</option><option value="small">small 更快</option><option value="medium">medium 更准更慢</option><option value="large-v3">large-v3 高风险</option></select></label>
+      <label>ASR 语言<select value={asrLanguage} onChange={event => setAsrLanguage(event.target.value)}><option value="auto">Auto</option><option value="zh">中文</option><option value="yue">粤语/方言</option><option value="en">English</option><option value="es">Español</option><option value="pt">Português</option></select></label>
     </div>
     <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">LIBRARY</span><h2>视频资产</h2></div><span>{videos.length} items</span></div><div className="asset-list">{videos.map(video => <div className="asset-row" key={video.id}><div className="asset-icon">▶</div><div className="asset-main"><b>{video.name}</b><small>{formatTime(video.duration)} · {video.width}×{video.height} · {video.fps.toFixed(1)} fps</small></div><div className="chips">{video.indexed_modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}</div><span className={`status ${video.status}`}>{statusText(video.status)}</span><div className="asset-actions">{video.status !== "indexing" && <button className="outline" onClick={() => index(video.id)}>{video.indexed_modalities.length ? "重建索引" : "建立索引"}</button>}<button className="outline" onClick={() => rename(video)}>重命名</button><button className="outline danger" disabled={video.status === "indexing"} onClick={() => remove(video)}>删除</button></div></div>)}{!videos.length && <div className="empty-list">还没有视频素材</div>}</div></div>
   </div>;

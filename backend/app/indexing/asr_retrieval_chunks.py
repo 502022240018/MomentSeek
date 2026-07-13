@@ -9,16 +9,16 @@ from app.indexing.asr_text import normalize_asr_text, normalize_search_text, sem
 
 @dataclass(frozen=True)
 class RetrievalChunkConfig:
-    normal_gap_ms: int = 700
-    short_gap_ms: int = 1800
-    same_bucket_gap_ms: int = 1800
-    false_gap_repair_ms: int = 8000
-    target_max_duration_ms: int = 18000
-    soft_max_duration_ms: int = 25000
-    hard_max_duration_ms: int = 35000
+    normal_gap_ms: int = 500
+    short_gap_ms: int = 1000
+    same_bucket_gap_ms: int = 1000
+    target_max_duration_ms: int = 8000
+    soft_max_duration_ms: int = 12000
+    merge_max_duration_ms: int = 12000
     short_text_chars: int = 8
     max_text_chars: int = 180
     bucket_ms: int = 5000
+    same_unit_only: bool = True
 
 
 def _is_cjk(char: str) -> bool:
@@ -47,20 +47,6 @@ def _merge_labels(*values: str) -> str:
     return "|".join(labels)
 
 
-def _last_run_after_punctuation(text: str) -> str:
-    stripped = text.rstrip()
-    boundary = max(stripped.rfind(mark) for mark in ".!?。！？,;，；、:：")
-    return stripped[boundary + 1 :].strip()
-
-
-def _first_run_before_punctuation(text: str) -> str:
-    stripped = text.lstrip()
-    positions = [index for index, char in enumerate(stripped) if char in ".!?。！？,;，；、:："]
-    if not positions:
-        return stripped
-    return stripped[: positions[0]].strip()
-
-
 def _is_short_text(text: str, config: RetrievalChunkConfig) -> bool:
     return _compact_length(text) <= config.short_text_chars
 
@@ -69,49 +55,14 @@ def _same_bucket(left: RetrievalChunk, right: RawTranscriptItem, config: Retriev
     return left.start_ms // config.bucket_ms == right.start_ms // config.bucket_ms
 
 
-def _needs_cjk_boundary_repair(left_text: str, right_text: str) -> bool:
-    if _ends_sentence(left_text):
-        return False
-    left_tail = _last_run_after_punctuation(left_text)
-    right_head = _first_run_before_punctuation(right_text)
-    if not left_tail or not right_head:
-        return False
-    if not _is_cjk(left_tail[-1]) or not _is_cjk(right_head[0]):
-        return False
-    if len(left_tail) <= 4:
-        return True
-    if _ends_soft_punctuation(left_text):
-        return True
-    return False
-
-
-def _needs_latin_boundary_repair(left_text: str, right_text: str) -> bool:
-    left = left_text.rstrip()
-    right = right_text.lstrip()
-    if not left or not right:
-        return False
-    if _ends_sentence(left_text):
-        return False
-
-    def ascii_alpha(char: str) -> bool:
-        return "a" <= char.lower() <= "z"
-
-    if not ascii_alpha(left[-1]) or not ascii_alpha(right[0]):
-        return False
-    left_tail = left.split()[-1]
-    return len(left_tail) <= 3
-
-
-def _join_text(left_text: str, right_text: str, *, boundary_repair: bool) -> str:
+def _join_text(left_text: str, right_text: str) -> str:
     left = left_text.rstrip()
     right = right_text.lstrip()
     if not left:
         return right
     if not right:
         return left
-    if boundary_repair and _is_cjk(left[-1]) and _is_cjk(right[0]):
-        return f"{left}{right}"
-    if boundary_repair and left[-1].isalpha() and right[0].isalpha():
+    if _is_cjk(left[-1]) and _is_cjk(right[0]):
         return f"{left}{right}"
     if _ends_soft_punctuation(left):
         return f"{left}{right}"
@@ -123,40 +74,37 @@ def _merge_decision(
     item: RawTranscriptItem,
     *,
     config: RetrievalChunkConfig,
-) -> tuple[bool, bool, list[str]]:
+    current_unit_id: int | None,
+) -> tuple[bool, list[str]]:
     gap_ms = max(0, item.start_ms - current.end_ms)
     candidate_duration_ms = max(current.end_ms, item.end_ms) - current.start_ms
-    cjk_repair = _needs_cjk_boundary_repair(current.text, item.text)
-    latin_repair = _needs_latin_boundary_repair(current.text, item.text)
-    boundary_repair = cjk_repair or latin_repair
     flags: list[str] = []
-    if cjk_repair:
-        flags.append("cjk_boundary_repair")
-    if latin_repair:
-        flags.append("latin_boundary_repair")
-    if gap_ms > config.short_gap_ms and boundary_repair:
-        flags.append("fake_gap_repair")
 
-    candidate_text = _join_text(current.text, item.text, boundary_repair=boundary_repair)
+    if (
+        config.same_unit_only
+        and current_unit_id is not None
+        and item.unit_id is not None
+        and current_unit_id != item.unit_id
+    ):
+        return False, flags
+    candidate_text = _join_text(current.text, item.text)
     if _compact_length(candidate_text) > config.max_text_chars:
-        return False, boundary_repair, flags
-    if candidate_duration_ms > config.hard_max_duration_ms:
-        return False, boundary_repair, flags
-    if boundary_repair and gap_ms <= config.false_gap_repair_ms:
-        return True, boundary_repair, flags
+        return False, flags
+    if candidate_duration_ms > config.merge_max_duration_ms:
+        return False, flags
     if _ends_sentence(current.text):
-        return False, boundary_repair, flags
+        return False, flags
     if _is_short_text(current.text, config) or _is_short_text(item.text, config):
-        return gap_ms <= config.short_gap_ms, boundary_repair, flags
+        return gap_ms <= config.short_gap_ms, flags
     if gap_ms <= config.normal_gap_ms:
-        return True, boundary_repair, flags
+        return True, flags
     if (
         _same_bucket(current, item, config)
         and candidate_duration_ms <= config.target_max_duration_ms
         and gap_ms <= config.same_bucket_gap_ms
     ):
-        return True, boundary_repair, flags
-    return False, boundary_repair, flags
+        return True, flags
+    return False, flags
 
 
 def build_retrieval_chunks(
@@ -188,9 +136,9 @@ def build_retrieval_chunks(
         )
 
     chunks: list[RetrievalChunk] = []
-    word_boundary_repairs = 0
-    fake_gap_repairs = 0
+    chunk_unit_ids: list[int | None] = []
     merged_items = 0
+    cross_unit_merge_blocks = 0
 
     for item in normalized:
         if not chunks:
@@ -205,10 +153,25 @@ def build_retrieval_chunks(
                     audio_event=item.audio_event,
                 )
             )
+            chunk_unit_ids.append(item.unit_id)
             continue
         current = chunks[-1]
-        allowed, boundary_repair, flags = _merge_decision(current, item, config=config)
+        current_unit_id = chunk_unit_ids[-1]
+        cross_unit = (
+            config.same_unit_only
+            and current_unit_id is not None
+            and item.unit_id is not None
+            and current_unit_id != item.unit_id
+        )
+        allowed, flags = _merge_decision(
+            current,
+            item,
+            config=config,
+            current_unit_id=current_unit_id,
+        )
         if not allowed:
+            if cross_unit:
+                cross_unit_merge_blocks += 1
             chunks.append(
                 RetrievalChunk(
                     chunk_id=len(chunks),
@@ -220,8 +183,9 @@ def build_retrieval_chunks(
                     audio_event=item.audio_event,
                 )
             )
+            chunk_unit_ids.append(item.unit_id)
             continue
-        merged_text = _join_text(current.text, item.text, boundary_repair=boundary_repair)
+        merged_text = _join_text(current.text, item.text)
         merged_flags = list(dict.fromkeys([*current.quality_flags, *flags]))
         chunks[-1] = RetrievalChunk(
             chunk_id=current.chunk_id,
@@ -234,21 +198,24 @@ def build_retrieval_chunks(
             audio_event=_merge_labels(current.audio_event, item.audio_event),
         )
         merged_items += 1
-        if boundary_repair:
-            word_boundary_repairs += 1
-        if "fake_gap_repair" in flags:
-            fake_gap_repairs += 1
 
     final_chunks: list[RetrievalChunk] = []
     semantic_ineligible = 0
     long_chunks = 0
+    low_boundary_chunks = 0
     for chunk in chunks:
-        quality = semantic_text_quality(chunk.text)
         duration_ms = chunk.end_ms - chunk.start_ms
+        quality = semantic_text_quality(chunk.text, duration_ms=duration_ms)
+        quality_flags = list(chunk.quality_flags)
+        if not _ends_sentence(chunk.text):
+            quality_flags.append("non_terminal_boundary")
+            low_boundary_chunks += 1
         if duration_ms > config.soft_max_duration_ms:
             long_chunks += 1
+            quality_flags.append("long_chunk")
         if not quality.eligible:
             semantic_ineligible += 1
+            quality_flags.append(f"embedding_ineligible:{quality.reason}")
         final_chunks.append(
             RetrievalChunk(
                 chunk_id=len(final_chunks),
@@ -258,7 +225,7 @@ def build_retrieval_chunks(
                 source_item_ids=chunk.source_item_ids,
                 semantic_eligible=bool(quality.eligible),
                 semantic_reason=quality.reason,
-                quality_flags=chunk.quality_flags,
+                quality_flags=list(dict.fromkeys(quality_flags)),
                 emotion=chunk.emotion,
                 audio_event=chunk.audio_event,
             )
@@ -270,8 +237,8 @@ def build_retrieval_chunks(
         "retrieval_chunks": len(final_chunks),
         "dropped_empty_items": dropped_empty,
         "merged_items": merged_items,
-        "word_boundary_repairs": word_boundary_repairs,
-        "fake_gap_repairs": fake_gap_repairs,
+        "cross_unit_merge_blocks": cross_unit_merge_blocks,
         "long_chunks": long_chunks,
+        "low_boundary_chunks": low_boundary_chunks,
         "semantic_ineligible_chunks": semantic_ineligible,
     }

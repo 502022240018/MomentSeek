@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from app.indexing.common import atomic_save_npz, normalize
-from app.media import probe_video, read_frames, save_thumbnail
+from app.media import probe_video, read_frames
 from app.model_sources import hf_cached_snapshot_path, offline_env, resolve_hf_model_source
 
 

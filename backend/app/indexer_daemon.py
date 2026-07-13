@@ -25,9 +25,8 @@ from app.settings import Settings, get_settings
 
 def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, pool: ModelPool) -> dict:
     video_index_dir = settings.index_dir / video["id"]
-    thumbnail_dir = settings.thumbnail_dir / video["id"]
     working_dir = video_index_dir / "work"
-    for directory in (video_index_dir, thumbnail_dir, working_dir):
+    for directory in (video_index_dir, working_dir):
         directory.mkdir(parents=True, exist_ok=True)
     video_path = str(settings.resolve_path(video["file_path"]))
 
@@ -51,7 +50,6 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
         result = build_visual_index(
             video_path=video_path,
             output_path=str(video_index_dir / "visual.npz"),
-            thumbnail_dir=str(thumbnail_dir),
             model_name=settings.clip_model,
             pretrained=settings.clip_pretrained,
             sample_fps=float(options.get("visual_sample_fps", settings.visual_sample_fps)),
@@ -83,7 +81,6 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
         result = build_face_index(
             video_path=video_path,
             output_path=str(video_index_dir / "face.npz"),
-            thumbnail_dir=str(thumbnail_dir),
             model_name=settings.face_model,
             sample_fps=float(options.get("face_sample_fps", settings.face_sample_fps)),
             provider=settings.face_provider,
@@ -105,7 +102,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             video_path=video_path,
             output_path=str(video_index_dir / "asr.npz"),
             working_dir=str(working_dir),
-            engine=settings.asr_engine,
+            engine=str(options.get("asr_engine", settings.asr_engine)),
             model_name=str(options.get("asr_model", settings.asr_model)),
             device=resolve_asr_device(settings.asr_device, settings.cuda_enabled, settings.npu_enabled, settings.npu_device_id),
             model_dir=str(settings.app_model_dir / "whisper"),
@@ -136,7 +133,6 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
         result = build_ocr_index(
             video_path=video_path,
             output_path=str(video_index_dir / "ocr.npz"),
-            thumbnail_dir=str(thumbnail_dir),
             working_dir=str(working_dir),
             sample_fps=float(options.get("ocr_sample_fps", settings.ocr_sample_fps)),
             decode_height=settings.ocr_decode_height,

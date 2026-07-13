@@ -15,6 +15,7 @@ class IndexRequest(BaseModel):
     visual_shot_threshold: float | None = Field(default=None, gt=0, le=1)
     face_sample_fps: float | None = Field(default=None, gt=0, le=15)
     ocr_sample_fps: float | None = Field(default=None, gt=0, le=5)
+    asr_engine: str | None = None
     asr_model: str | None = None
     asr_language: str | None = None
 
@@ -103,17 +104,42 @@ class IndexRequest(BaseModel):
             raise ValueError("asr_model 只能是 tiny、base、small、medium、large、large-v3、turbo、large-v3-turbo")
         return normalized
 
+    @field_validator("asr_engine")
+    @classmethod
+    def validate_asr_engine(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower().replace("_", "-")
+        aliases = {"fasterwhisper": "faster-whisper"}
+        normalized = aliases.get(normalized, normalized)
+        allowed = {"auto", "whisper", "funasr", "faster-whisper"}
+        if normalized not in allowed:
+            raise ValueError("asr_engine must be one of: auto, whisper, funasr, faster-whisper")
+        return normalized
+
     @field_validator("asr_language")
     @classmethod
     def validate_asr_language(cls, value: str | None) -> str | None:
         if value is None:
             return None
         normalized = value.strip().lower()
-        aliases = {"chinese": "zh", "中文": "zh", "english": "en", "英文": "en"}
+        aliases = {
+            "chinese": "zh",
+            "中文": "zh",
+            "mandarin": "zh",
+            "cantonese": "yue",
+            "粤语": "yue",
+            "english": "en",
+            "英文": "en",
+            "spanish": "es",
+            "西语": "es",
+            "portuguese": "pt",
+            "葡语": "pt",
+        }
         normalized = aliases.get(normalized, normalized)
-        allowed = {"auto", "zh", "en"}
+        allowed = {"auto", "zh", "yue", "en", "es", "pt", "ja", "ko", "fr", "de", "it", "ru"}
         if normalized not in allowed:
-            raise ValueError("asr_language 只能是 auto、zh、en")
+            raise ValueError("asr_language 只能是 auto、zh、yue、en、es、pt、ja、ko、fr、de、it、ru")
         return normalized
 
 

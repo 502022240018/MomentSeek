@@ -35,7 +35,7 @@ def test_retrieval_chunk_exports_legacy_seconds_for_existing_semantic_code():
         source_item_ids=[7, 8],
         semantic_eligible=True,
         semantic_reason="ok",
-        quality_flags=["cjk_boundary_repair"],
+        quality_flags=["long_chunk"],
     )
 
     payload = chunk.to_search_dict()

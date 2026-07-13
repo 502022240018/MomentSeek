@@ -124,7 +124,7 @@ def test_visual_v3_frame_offsets_skip_empty_decode_bucket(tmp_path):
 
     assert results[0]["start_time"] == 15
     assert results[0]["end_time"] == 20
-    assert results[0]["thumbnail_url"] == "/api/thumbnails/video-1/visual_000003.jpg"
+    assert results[0]["thumbnail_url"] == "/api/videos/video-1/frame?time=16.000"
     evidence = results[0]["evidence"][0]
     assert evidence["unit_type"] == "segment"
     assert evidence["unit_id"] == 3
@@ -391,8 +391,9 @@ def test_ocr_v3_search_groups_box_text_by_chunk(tmp_path):
     assert len(results) == 1
     assert results[0]["start_time"] == 5
     assert results[0]["end_time"] == 6
-    assert results[0]["thumbnail_url"] == "/api/thumbnails/video-1/ocr_000000.jpg"
-    assert results[0]["evidence"][0]["text"] == "FIFA WORLD CUP"
+    assert results[0]["thumbnail_url"] == "/api/videos/video-1/frame?time=5.000"
+    assert results[0]["evidence"][0]["text"] == "FIFA"
+    assert results[0]["evidence"][0]["features"]["ocr_frame_text"] == "FIFA WORLD CUP"
     assert results[0]["evidence"][0]["features"]["ocr_score"] == 0.95
 
 
@@ -435,7 +436,7 @@ def test_ocr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
     assert results[0]["evidence"][0]["unit_id"] == 0
 
 
-def test_face_v3_search_uses_track_times_and_row_thumbnail(tmp_path):
+def test_face_v3_search_uses_track_times_and_on_demand_thumbnail(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
     index_dir = _create_video(settings, catalog, name="faces.mp4")
@@ -466,7 +467,7 @@ def test_face_v3_search_uses_track_times_and_row_thumbnail(tmp_path):
 
     assert results[0]["start_time"] == 10
     assert results[0]["end_time"] == 15
-    assert results[0]["thumbnail_url"] == "/api/thumbnails/video-1/face_000000.jpg"
+    assert results[0]["thumbnail_url"] == "/api/videos/video-1/frame?time=12.000"
     assert results[0]["evidence"][0]["unit_type"] == "track"
     assert results[0]["evidence"][0]["best_ms"] == 12000
 

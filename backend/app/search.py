@@ -567,81 +567,33 @@ def _ocr_display_text(
 
 
 
-def _ocr_chunks_from_npz(
-    data,
-    frame_window_ms: int = 800,
-) -> list[dict]:
-    """
-    OCR 新 schema:
-
-    - 不再保存 chunk_times_ms
-    - embedding_chunk_indices: embedding_id -> frame_ms
-    - box_chunk_indices: box_id -> frame_ms
-
-    这里按 frame_ms 重建 frame-level OCR chunks。
-    """
-    required = {"box_chunk_indices", "box_texts", "box_scores", "boxes"}
+def _ocr_chunks_from_npz(data) -> list[dict]:
+    """Load the stable OCR v3 layout while retaining box-level display detail."""
+    required = {"chunk_times_ms", "box_chunk_indices", "box_texts", "box_scores", "boxes"}
     if not required.issubset(set(data.files)):
-        raise ValueError("ocr 索引缺少必要数组，请重跑 OCR 索引")
-
-    if "chunk_times_ms" in data.files:
-        raise ValueError("检测到旧版 OCR 索引 chunk_times_ms，请重跑 OCR 索引生成新版结构")
-
-    box_frame_times = data["box_chunk_indices"].astype(np.int32)
+        raise ValueError("ocr v3 索引缺少必要数组，请重跑 OCR 索引")
+    times = data["chunk_times_ms"].astype(np.int32)
+    box_chunk_indices = data["box_chunk_indices"].astype(np.int32)
     box_texts = _decode_text_array(data["box_texts"])
     box_scores = np.asarray(data["box_scores"], dtype=np.float32)
     boxes = np.asarray(data["boxes"], dtype=np.float32)
-
-    if not (len(box_frame_times) == len(box_texts) == len(box_scores) == len(boxes)):
-        raise ValueError("ocr box 数组长度不一致，请重跑 OCR 索引")
-
-    # 保留首次出现顺序。
-    # ocr.py 保存缩略图时使用 chunk 顺序：ocr_000000.jpg, ocr_000001.jpg ...
-    # box_chunk_indices 也是按 chunk 顺序写入，所以这里不能简单 np.unique 排序。
-    frame_times: list[int] = []
-    seen: set[int] = set()
-    for value in box_frame_times:
-        frame_ms = int(value)
-        if frame_ms not in seen:
-            seen.add(frame_ms)
-            frame_times.append(frame_ms)
-
-    half_window = max(int(frame_window_ms // 2), 1)
-
+    if times.ndim != 2 or times.shape[1] != 3:
+        raise ValueError("ocr v3 chunk_times_ms 必须是 [num_chunks, 3]，请重跑 OCR 索引")
+    if not (len(box_chunk_indices) == len(box_texts) == len(box_scores) == len(boxes)):
+        raise ValueError("ocr v3 box 数组长度不一致，请重跑 OCR 索引")
     chunks: list[dict] = []
-    for chunk_id, frame_ms in enumerate(frame_times):
-        indices = np.flatnonzero(box_frame_times == frame_ms)
-
-        box_text_values: list[str] = []
-        box_score_values: list[float] = []
-
-        for index in indices:
-            text_value = box_texts[int(index)].strip()
-            if not text_value:
-                continue
-            box_text_values.append(text_value)
-            box_score_values.append(float(box_scores[int(index)]))
-
-        frame_text = " ".join(box_text_values)
-
-        start_ms = max(0, frame_ms - half_window)
-        end_ms = frame_ms + half_window
-        if end_ms <= start_ms:
-            end_ms = start_ms + 1
-
+    for chunk_id, row in enumerate(times):
+        indices = np.flatnonzero(box_chunk_indices == chunk_id)
+        box_text_values = [box_texts[int(index)].strip() for index in indices if box_texts[int(index)].strip()]
+        box_score_values = [float(box_scores[int(index)]) for index in indices if box_texts[int(index)].strip()]
         chunks.append({
             "chunk_id": chunk_id,
-            "start_ms": int(start_ms),
-            "end_ms": int(end_ms),
-            "frame_ms": int(frame_ms),
-
-            # 检索仍然使用整帧 OCR 文本。
-            "text": frame_text,
-
-            # 展示阶段使用 box 明细，从里面挑和 query 最相关的文本。
+            "start_ms": int(row[0]),
+            "end_ms": int(row[1]),
+            "frame_ms": int(row[2]),
+            "text": " ".join(box_text_values),
             "ocr_box_texts": box_text_values,
             "ocr_box_scores": box_score_values,
-
             "score": max(box_score_values) if box_score_values else 0.0,
         })
     return chunks
@@ -969,7 +921,7 @@ class SearchEngine:
             if "ocr" in modalities and text and "ocr" in indexed_modalities:
                 _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
                 with np.load(index_file, allow_pickle=False) as data:
-                    semantic_embeddings, embedding_frame_times_ms = _semantic_arrays(data)
+                    semantic_embeddings, embedding_chunk_indices = _semantic_arrays(data)
                     semantic_query = None
 
                     if semantic_embeddings is not None:
@@ -977,10 +929,6 @@ class SearchEngine:
                         semantic_query = self._encode_asr_query(text, model_name)
 
                     ocr_chunks = _ocr_chunks_from_npz(data)
-                    embedding_chunk_indices = _remap_embedding_frame_times_to_chunk_indices(
-                        ocr_chunks,
-                        embedding_frame_times_ms,
-                    )
 
                     candidates.extend(_asr_candidates(
                         ocr_chunks,
@@ -1004,11 +952,6 @@ class SearchEngine:
                 best_by_modality[item.modality] = max(best_by_modality.get(item.modality, -1), item.score)
             denominator = sum(weights.get(name, 1) for name in best_by_modality)
             score = sum(weights.get(name, 1) * value for name, value in best_by_modality.items()) / denominator
-            # Thumbnails are generated on demand from the source video. Pick the
-            # best-hit timestamp of the highest-scoring candidate that has one
-            # (score already encodes modality priority), and let the frame endpoint
-            # seek + cache it. Fall back to the moment's start when no candidate
-            # carries a frame timestamp (e.g. an ASR chunk without frame_ms).
             ranked = sorted(group, key=lambda value: value.score, reverse=True)
             best_ms = next((item.best_ms for item in ranked if item.best_ms is not None), None)
             video_id = group[0].video_id
@@ -1028,7 +971,7 @@ class SearchEngine:
                 end_time=max(item.end_time for item in group),
                 score=score,
                 modalities=sorted(best_by_modality),
-                thumbnail_url=f"/api/videos/{video_id}/frame?ms={int(best_ms)}",
+                thumbnail_url=f"/api/videos/{video_id}/frame?time={best_ms / 1000:.3f}",
                 media_url=f"/api/videos/{video_id}/media",
                 clip_url=f"/api/videos/{video_id}/clip?start={min(item.start_time for item in group):.3f}&end={max(item.end_time for item in group):.3f}",
                 decision=decision,

@@ -81,14 +81,19 @@ ID:
 已完成：
   - Whisper 强制 task="transcribe"，manifest 记录 requested/detected language。
   - ASR raw chunks 写入索引前做文本归一化、短 chunk 合并、低信息 chunk semantic 跳过。
-  - 新增 scripts/asr_postprocess_report.py，可在现有素材上比较 gap_only/bucket_bonus/shot_bonus/conservative/aggressive_short。
-  - 当前默认策略为收紧后的 bucket_bonus。
+  - retrieval_chunk_builder 只在同一 decode unit 内合并，合并结果最长 12s；模型原始完整长句不硬切，只标记 long。
+  - SenseVoiceSmall 默认使用 `silero_12s` 外置 VAD，parser 保留原始文本，timestamp 只负责选择边界。
+  - 2026-07-13：默认 `asr_engine=auto` 对长视频做开头/中段/后段 3 窗口语言投票；中文/方言路由到 SenseVoiceSmall，非中文路由到 faster-whisper turbo。
+  - 2026-07-13：faster-whisper 使用 24s 连续原音频窗口；只对异常无句末窗口执行局部 builtin-VAD fallback。
+  - 2026-07-10：移除正式 retrieval_chunk_builder 中的 CJK/Latin 断词猜测、false gap 修复和 word-boundary repair 计数。
+  - 2026-07-13：semantic eligibility 拒绝纯语气/连接词、过短项和极端不可信文字/时长比，原因写入已有 quality_flags。
+  - 2026-07-13：删除已退出正式路径的 asr_postprocess.py、旧策略报告及其测试；删除未读取的 hard_max_duration_ms，以及与 chunk_builder_stats 重复的 postprocess_strategy/postprocess_stats 元数据。
 后续：
-  - 更多多语种素材上复跑调参报告。
-  - 真实 shot-aware visual segment 稳定后，重新评估 shot_bonus。
-  - 旧 ASR 索引需要 ASR-only 重跑才会应用新后处理。
+  - 启发式规则消融和新素材验证统一跟踪于 RQ-003F，不再恢复旧多策略后处理路径。
+  - 本地 9 个视频已全部 ASR-only 重跑；其他环境的旧 ASR 索引仍需重跑。
 相关实验：
   docs/experiments/asr/2026-07-07-asr-postprocess-tuning.md
+  runtime-server/analysis/asr_dual_path_final_scheme_20260709/
 ```
 
 ```text
@@ -121,13 +126,20 @@ ID:
 已完成：
   1. ASR pipeline 拆为 raw transcript parser 和 retrieval_chunk_builder。
   2. parser 不再按固定 8s/12s 规则生成最终检索 chunk。
-  3. retrieval_chunk_builder 负责 CJK/Latin 边界保护、短碎片合并和 false gap 修复。
+  3. retrieval_chunk_builder 负责短碎片合并、近邻合并、同 5s bucket 内有限合并和低信息 chunk 标记。
   4. asr.npz 默认仍只保存 chunk_times_ms、texts、embeddings、embedding_chunk_indices。
   5. debug 开启时才保存 raw transcript、retrieval chunks 和 repair report。
+  6. 落地双路径方案：SenseVoiceSmall + Silero external VAD 12s；faster-whisper turbo + 24s 连续原音频窗口与异常窗口局部 fallback。
+  7. 2026-07-10 默认自动语言路由：中文/方言走 SenseVoiceSmall，英文/西语/葡语等走 faster-whisper turbo。
+  8. 2026-07-10 SenseVoice parser 支持 word-level timestamp，timestamp 缺失时使用 VAD group bounds 兜底，避免 0 秒 chunk。
+  9. 2026-07-13 SenseVoice word timestamp 不再重拼文本；faster-whisper 直接保留 segment.text。
+  10. 2026-07-13 retrieval chunk 不跨 decode unit 合并，合并上限 12s；完整 raw 长句不硬切。
+  11. 2026-07-13 长视频语言 probe 改为 3 个位置投票，书籍纪录片由错误 `en` 路由恢复为 `zh`。
 仍需观察：
-  - 方言、多语言素材是否需要从手动路由升级为自动模型切换。
   - SenseVoiceSmall 与 faster-whisper turbo 在同一 chunk builder 下的真实检索召回差异。
-  - 是否需要引入轻量分词辅助来减少 CJK 边界修复误合并。
+  - 混合语言视频目前仍按整片主语言路由；未来只有在真实查询评估证明必要时再考虑分段路由。
+  - 完整索引仍保留 4 个 `>12s` 模型原始完整句（最长 19.56s）；它们未找到更可靠边界，因此按“不硬切”原则保留并标记 long。
+  - 暂不做 CJK/Latin 断词猜测和 false gap 修复，优先从模型、VAD、timestamp 与切分策略上减少原始断裂。
 相关文件或实验：
   backend/app/indexing/asr.py
   backend/app/indexing/asr_transcript_parser.py
@@ -135,6 +147,60 @@ ID:
   backend/app/indexing/asr_debug.py
   docs/superpowers/specs/2026-07-09-asr-pipeline-refactor-design.md
   docs/superpowers/plans/2026-07-09-asr-pipeline-refactor.md
+  docs/experiments/asr/2026-07-13-asr-production-chunk-pipeline.md
+```
+
+### RQ-003E ASR semantic 跨视频近分误排
+
+```text
+优先级：P2
+状态：open
+范围：asr/ocr semantic ranking / embedding model evaluation / threshold calibration
+问题或目标：
+  MiniLM 在纯 semantic、跨语言或低分区间会出现弱相关结果与真实结果近分并列。
+  需要测试 multilingual-e5-small 能否在保留 MiniLM 原有模糊语义、近义改写和多语言能力的同时，提高 query -> ASR/OCR chunk 检索质量，再决定是否替换当前 MiniLM。
+影响：
+  中文查询“姆巴佩应该多传球”时，世界杯广告中的真实英文台词在全库 API 排第 2；Top-1 是无明显语义关系的中文综艺短句，两者校准分均约 0.62。
+证据或上下文：
+  2026-07-13 正式 embedding 评估 18 条 query：目标 chunk Top-1/3/5 = 16/18/18；两条 Top-1 失败都在 Top-2。
+下一步：
+  1. 固定当前正式 ASR/OCR chunk 和人工 query 集，只重建候选文本 embedding，不重新转写或修改 chunk，避免混入其他变量。
+  2. 以 paraphrase-multilingual-MiniLM-L12-v2 为基线，优先 A/B 测试 multilingual-e5-small；E5 必须分别使用 `query:` 和 `passage:` 输入格式。若 E5 收益不足，再测试 gte-multilingual-base 作为质量上限候选。
+  3. 同时覆盖近义模糊查询、概括性查询、跨语言查询、ASR 错词样例和字面相似但语义无关的困难负例。
+  4. 分开评估 raw cosine 排序和完整 API 排序，记录 chunk/video Recall@1/3/5、MRR、正负例分数间隔、CPU 建库吞吐、冷热查询延迟、模型常驻内存与索引大小。
+  5. 每个候选模型单独校准 semantic confidence 和 lexical 融合；不得沿用 MiniLM 固定余弦阈值，也不得混用不同模型生成的查询与索引向量。
+  6. 只有当 E5 在固定评估集和新增 holdout 上稳定改善检索，且速度、内存和部署复杂度可接受时，才替换默认模型并重建全部 ASR/OCR semantic embedding；否则继续保留 MiniLM。
+  7. 不要通过继续修改 chunk 切分来掩盖向量排序问题。
+相关文件或实验：
+  backend/app/search.py
+  backend/app/indexing/text_semantic.py
+  runtime-server/analysis/asr_formal_review_eval_20260713_final_v2/REPORT.md
+  docs/experiments/asr/2026-07-13-asr-production-chunk-pipeline.md
+```
+
+### RQ-003F ASR 启发式规则消融与准入
+
+```text
+优先级：P2
+状态：planned
+范围：asr chunk builder / semantic eligibility / faster-whisper fallback
+问题或目标：
+  当前正式文本已可作为稳定基线，但仍包含 same_bucket、gap、连接词过滤和局部 fallback 等经验规则。
+  后续不再根据单个错误样例追加规则，而是量化每条规则的收益、触发范围和误伤风险。
+执行步骤：
+  1. 为每条正式启发式规则统计触发次数、影响的 chunk 数和对应视频/语言分布。
+  2. 分别关闭 same_bucket 合并、连接词过滤及其他可疑规则，做单变量消融，不同时修改多个条件。
+  3. 使用现有人工听查结果和固定 18 条 semantic query 检查边界质量与检索指标是否退化。
+  4. 增加未参与现有参数选择的新语言、新节目类型视频作为 holdout，避免只适配当前 9 条素材。
+  5. 规则只有在当前评估集与 holdout 上都改善，且没有明确误伤时才进入或继续留在正式路径。
+验收原则：
+  最终通用后处理只保留空白/字符规范化、可靠边界合并和极端异常过滤；模型或 adapter 负责其特有输出格式。
+相关文件或实验：
+  backend/app/indexing/asr_retrieval_chunks.py
+  backend/app/indexing/asr_text.py
+  backend/app/indexing/asr.py
+  runtime-server/analysis/asr_formal_review_eval_20260713_final_v2/
+  docs/experiments/asr/2026-07-13-asr-production-chunk-pipeline.md
 ```
 
 ### RQ-003A ASR 错词容错与专有名词召回
@@ -177,7 +243,7 @@ ID:
 范围：asr search quality / transcript reliability
 问题或目标：
   删除中文 initial_prompt 并全量重建 ASR 后，prompt 泄漏已消失，但 Whisper 局部重复幻觉仍存在。
-  当前 bucket_bonus 后处理会合并短碎片，但不会主动删除或降权重复幻觉文本。
+  当前 retrieval_chunk_builder 会有限合并短碎片，但不会主动删除或降权重复幻觉文本。
 影响：
   用户按 ASR 文本检索时，重复幻觉片段可能被错误召回；播放时也会看到不存在或错位的台词。
 证据或上下文：
@@ -196,7 +262,77 @@ ID:
   runtime-server/analysis/asr_rebuild_20260707_all_summary.json
   runtime-server/analysis/asr_full_texts_after_rebuild_20260707/
   backend/app/indexing/asr.py
-  backend/app/indexing/asr_postprocess.py
+  backend/app/indexing/asr_retrieval_chunks.py
+```
+
+### RQ-003D ASR 模型 adapter 边界
+
+```text
+优先级：P2
+状态：open
+范围：asr architecture / model extensibility
+问题或目标：
+  当前 ASR 可用 SenseVoiceSmall/FunASR 和 faster-whisper turbo，未来可能继续更换或增加模型。
+  需要保持平台通用 pipeline 简洁，避免把某个模型的输出格式、tag、timestamp 怪癖或参数补丁扩散到通用检索层。
+影响：
+  如果模型分支继续堆在 backend/app/indexing/asr.py，后续新增模型会让加载、VAD、timestamp、language metadata、tag parser 和 retrieval chunk 逻辑互相干扰。
+  如果过早抽象，也可能在模型实验还没稳定时增加不必要复杂度。
+设计原则：
+  1. 模型特异逻辑只放在 model adapter / parser 层，例如模型加载、VAD 参数、raw output 解析、tag 剥离和必要 metadata 映射。
+  2. 通用层保持模型无关：RawTranscriptItem、retrieval_chunk_builder、semantic embedding、asr.npz schema 和 search 不写某个模型专属分支。
+  3. 当前 schema 的 chunk_emotions/chunk_audio_events 是可选通用增强字段；有能力的模型填值，没有能力的模型写空字符串。
+触发条件：
+  1. asr.py 中新增第三个以上模型分支，或单个模型需要大量专属参数。
+  2. timestamp/tag/language metadata 的解析逻辑开始明显膨胀。
+  3. 测试很难单独覆盖某个模型输出到 RawTranscriptItem 的转换。
+  4. 通用 retrieval chunk 合并逻辑被迫判断具体模型名。
+下一步：
+  触发后把模型调用拆为 backend/app/indexing/asr_adapters/ 下的 sensevoice.py、faster_whisper.py、whisper.py、sidecar.py 等小模块。
+  每个 adapter 输出统一的 raw_items 和少量 metadata，主流程继续只负责 extract audio -> adapter.transcribe -> build_retrieval_chunks -> semantic embedding -> save asr.npz。
+相关文件或实验：
+  backend/app/indexing/asr.py
+  backend/app/indexing/asr_transcript_parser.py
+  backend/app/indexing/asr_retrieval_chunks.py
+  docs/RETRIEVAL_CHANNELS.md
+```
+
+### RQ-003G SenseVoice 情绪/音效标签检索利用
+
+```text
+优先级：P2
+状态：planned
+范围：asr emotion/audio-event metadata / query intent / ranking
+问题或目标：
+  SenseVoice 已为部分 ASR chunk 生成 emotion 和 audio_event 标签，但当前搜索尚未使用。需要先确认各标签在真实视频中的含义和可靠性，再决定如何参与召回、重排和结果解释。
+当前状态：
+  1. asr.npz 已保存 chunk_emotions 和 chunk_audio_events；faster-whisper 路径写空字符串。
+  2. 当前 SenseVoice 使用 Silero 人声 VAD，因此标签主要描述“台词及其伴随声音”，不能覆盖所有纯音乐、纯掌声等无语音片段。
+  3. 标签保持独立结构化 metadata，不拼入 ASR semantic embedding 文本。
+2026-07-13 初轮人工听查：
+  1. 每个实际出现标签抽样 5 条，共 40 条，音频包含 chunk 前后各 2 秒。
+  2. happy 的清晰样本几乎都伴随笑声，更像正向/高唤醒或笑意线索，与 laughter 高度相关。
+  3. angry 约一半不符合字面“愤怒”，可能混入激动、着急、大声或综艺式夸张表达，暂不能作为愤怒硬条件。
+  4. sad 和 surprised 相对准确，可作为中等强度的正向证据。
+  5. 标为 bgm 的样本均能听到 BGM；但 speech 样本也出现实际带 BGM，说明 event 更接近主导标签，speech 不能解释为“没有 BGM”。
+  6. laughter 基本准确，是当前最可靠的音效标签之一。
+暂定使用原则：
+  1. 只奖励明确标签命中，不因标签缺失或其他标签而扣分；缺失表示 unknown，不表示不匹配。
+  2. laughter、bgm 可作为较强正向证据；sad、surprised 作为中等证据；happy 只做弱证据；angry 暂停按字面接入；speech 仅展示。
+  3. happy 与 laughter 等相关线索取最大值或设置统一加分上限，禁止重复累加同一声学现象。
+  4. 查询没有明确情绪/音效意图时，标签不得改变普通文本检索排序。
+  5. 初期只做候选重排和 evidence 展示，不做硬过滤；纯音频事件检索若成为明确需求，再评估独立且不依赖人声 VAD 的 audio-event 通道。
+下一步：
+  1. 再抽 20-30 条 angry，人工区分真愤怒、激动、着急、大声和其他，确认是否应改解释为 high-arousal 候选。
+  2. 从 speech 中抽样至少 20 条检查实际 BGM，估计 bgm 标签漏检率；不能只评估 bgm 阳性精度。
+  3. 扩大 happy 样本，区分真实开心、笑声驱动、兴奋和误判。
+  4. 固定标签 query 与负例，对“不使用标签 / 正向弱加分 / 较强加分”做排序 A/B，再决定正式权重。
+相关文件或实验：
+  backend/app/indexing/asr_transcript_parser.py
+  backend/app/indexing/asr_retrieval_chunks.py
+  backend/app/indexing/asr.py
+  backend/app/search.py
+  runtime-server/analysis/sensevoice_tag_review_20260713/review.html
+  runtime-server/analysis/sensevoice_tag_review_20260713/samples.jsonl
 ```
 
 ### RQ-004 OCR chunk 质量
@@ -216,6 +352,55 @@ ID:
 相关文件或实验：
   backend/app/indexing/ocr.py
   docs/RETRIEVAL_CHANNELS.md
+```
+
+### RQ-005 统一搜索质量回归基线
+
+```text
+优先级：P1
+状态：planned
+范围：retrieval evaluation / quality regression
+问题或目标：
+  Visual、ASR 和 sequence retrieval 已有多份数据集、脚本与实验记录，但尚未形成覆盖核心用户查询的统一固定回归门槛。
+影响：
+  排序、阈值、chunk 或融合策略调整后，容易只改善少量手工样例，同时让其他查询或其他通道退化。
+证据或上下文：
+  当前 eval/visual、eval/asr 和 docs/experiments 已积累可复用资产；ASR 已有固定 semantic query 评估，Visual 仍需要把典型误召查询纳入稳定基线。
+下一步：
+  1. 固定 query、目标视频/时间段、负样本和 train/holdout 划分。
+  2. 统一输出 Recall@K、MRR、Top-K 误召率、阈值通过率和播放时间段重叠指标。
+  3. 先把 RQ-002 的 top1/top3/mean 候选策略做单变量离线对比。
+  4. 为关键指标定义允许波动和回归门槛，并在搜索策略变更时运行。
+相关文件或实验：
+  eval/visual/
+  eval/asr/
+  scripts/visual_clip_eval.py
+  scripts/visual_clip_eval_report.py
+  scripts/asr_eval_report.py
+  docs/experiments/
+```
+
+### RQ-006 Speaker Diarization 与声纹检索
+
+```text
+优先级：P1
+状态：planned
+范围：asr speaker attribution / voiceprint retrieval
+问题或目标：
+  当前 ASR chunk 没有视频内说话人归属，也不能使用参考语音跨视频搜索同一说话人。
+目标方案：
+  1. Diarization 生成视频内 speaker turns，并尽量按可靠 speaker 边界切 ASR retrieval chunk。
+  2. 每个视频内 speaker 从多个高质量语音窗口稳健聚合一个正式声纹 embedding。
+  3. 正式 speaker.npz 只保存 turns、chunk 归属、track embeddings 和有效标记。
+  4. debug 模式把原始 turns、临时样本向量、质量分数和对齐诊断写入独立 debug 产物。
+  5. 第一阶段不建立跨视频永久 Speaker ID；参考语音查询逐视频比较 track embeddings 后全局排序。
+下一步：
+  选择本地离线 diarization/voice embedding 模型，建立评测素材和指标，再按设计文档拆分实现与验证。
+相关文件或实验：
+  docs/superpowers/specs/2026-07-13-speaker-diarization-voiceprint-design.md
+  backend/app/indexing/asr.py
+  backend/app/indexing/asr_pipeline_types.py
+  backend/app/search.py
 ```
 
 ## 2. 性能、资源与推理效率
@@ -266,13 +451,13 @@ ID:
 状态：open
 范围：asr indexing performance
 问题或目标：
-  ASR 默认切到 SenseVoiceSmall/FunASR；ASR 耗时仍受语音密度、VAD、timestamp 对齐和 chunk 切分影响很大。
+  ASR 默认切到 auto 路由；ASR 耗时仍受语言 probe、语音密度、VAD、timestamp 对齐和 chunk 切分影响很大。
 影响：
   长视频或语音密集视频可能由 ASR 主导总耗时。
 证据或上下文：
-  Whisper medium 在共享 NPU 2 上曾 OOM；2026-07-08 实验显示 SenseVoiceSmall 速度快、文本可读性好，但 timestamp/chunk 切分仍需打磨；faster-whisper turbo 作为多语言/高效果备选。
+  Whisper medium 在共享 NPU 2 上曾 OOM；2026-07-08 实验显示 SenseVoiceSmall 速度快、中文/方言文本可读性好；2026-07-10 起非中文默认路由到 faster-whisper turbo，并开启 word timestamp 拆长段。
 下一步：
-  优化 SenseVoice timestamp 对齐、VAD 和 chunk 合并策略；保留 faster-whisper turbo 对特殊语言或高效果场景的可切换路径。
+  继续测量 auto probe、SenseVoice 和 faster-whisper 在真实索引任务里的分阶段耗时；评估是否需要缓存 probe 模型或分段并行。
 相关文件或实验：
   backend/app/indexing/asr.py
   docs/OPERATIONS.md
@@ -349,7 +534,7 @@ ID:
 证据或上下文：
   当前只面向自己和少数同学测试。
 下一步：
-  在更广泛分享前增加 Basic Auth、简单访问密码或 Cloudflare Access。
+  在更广泛分享前增加 Basic Auth、简单访问密码或 Cloudflare Access；同时限制上传类型、文件大小、请求频率和高成本操作权限，并记录关键写操作审计信息。
 相关文件或实验：
   backend/app/main.py
   frontend/src/api.ts
@@ -381,13 +566,13 @@ ID:
 状态：open
 范围：tooling
 问题或目标：
-  需要快速查看每个视频有哪些通道索引、哪些 semantic 文件。
+  需要快速查看每个视频有哪些通道索引、哪些 semantic 文件，以及 schema、模型版本、向量数量和文件可读性。
 影响：
   排查 ASR/OCR/semantic 缺失时需要手动看文件。
 证据或上下文：
   当前服务器 OCR 覆盖不完整，ASR/OCR semantic 也是可选文件。
 下一步：
-  增加索引完整性检查和状态导出脚本。
+  增加索引完整性检查和状态导出脚本；在素材页展示每个通道的 available/missing/stale/corrupt 状态及重建建议。
 相关文件或实验：
   runtime/indexes/
   backend/app/db.py
@@ -406,7 +591,7 @@ ID:
 证据或上下文：
   历史上 face job 出现过 running 但 worker 已不存在。
 下一步：
-  增加安全 cancel 和脚本化 stale-job cleanup。
+  增加安全 cancel、worker 进程归属、API 启动恢复和脚本化 stale-job cleanup；取消时只终止明确属于该 job 的进程。
 相关文件或实验：
   backend/app/worker.py
   backend/app/db.py
@@ -457,4 +642,51 @@ ID:
   docs/DEPLOYMENT.md
   deploy/releases/
   scripts/write_release_manifest.py
+```
+
+### ENG-009 Runtime 容量与缓存治理
+
+```text
+优先级：P1
+状态：open
+范围：storage lifecycle / public access safety
+问题或目标：
+  上传视频、查询图片、缩略图和 preview clip 会持续写入本地 runtime；当前缺少统一的容量配额、缓存淘汰和磁盘水位保护。
+影响：
+  长时间使用或公网误用可能耗尽磁盘；无界上传也会放大解析耗时、模型任务和拒绝服务风险。
+下一步：
+  1. 为视频、字幕和查询图片增加类型、单文件大小和请求体限制。
+  2. 为 clip/query 临时文件定义 TTL/LRU 清理策略和最大容量。
+  3. 创建索引任务和生成 clip 前检查磁盘水位，低空间时拒绝高成本写操作并返回明确错误。
+  4. 在 health 或独立诊断接口暴露 runtime 使用量、缓存量和剩余空间。
+相关文件或实验：
+  backend/app/main.py
+  backend/app/media.py
+  backend/app/settings.py
+  runtime/uploads/
+  runtime/clips/
+```
+
+### ENG-010 Catalog 与 API 可扩展性
+
+```text
+优先级：P2
+状态：open
+范围：catalog / API completeness / scale readiness
+问题或目标：
+  当前视频、任务和人物列表按全量返回，人物库只有创建和查看；SQLite 同步访问适合当前 MVP，但需要明确扩容边界。
+影响：
+  素材和任务数量增长后，列表、轮询和前端渲染成本会上升；人物参考信息错误时缺少修改、删除和重建入口。
+下一步：
+  1. 为 videos/jobs/entities 增加分页、筛选和稳定排序协议。
+  2. 增加人物重命名、删除、替换参考图及 embedding 重建能力。
+  3. 测量 SQLite/NPZ 在目标素材规模下的查询延迟和并发写入，再决定是否迁移到数据库向量存储。
+  4. 保持当前 Search/API 概念稳定，为未来 pgvector、Milvus 或 Qdrant 适配预留存储接口边界。
+相关文件或实验：
+  backend/app/main.py
+  backend/app/db.py
+  backend/app/search.py
+  frontend/src/api.ts
+  frontend/src/main.tsx
+  docs/ARCHITECTURE.md
 ```

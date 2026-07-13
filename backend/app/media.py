@@ -143,6 +143,32 @@ def save_thumbnail(frame: np.ndarray, path: str | Path, max_width: int = 480) ->
         raise OSError(f"缩略图保存失败: {path}")
 
 
+def extract_video_frame(
+    video_path: str | Path,
+    output_path: str | Path,
+    timestamp: float,
+    max_width: int = 480,
+) -> Path:
+    """Extract one browser-friendly JPEG at the requested video timestamp."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(f".{output_path.stem}.{uuid.uuid4().hex}.tmp.jpg")
+    command = [
+        ffmpeg_executable(), "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{max(0.0, float(timestamp)):.3f}", "-i", str(video_path),
+        "-frames:v", "1", "-vf", f"scale='min({max(1, int(max_width))},iw)':-2",
+        "-q:v", "3", str(temp_path),
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        temp_path.replace(output_path)
+    except subprocess.CalledProcessError as exc:
+        temp_path.unlink(missing_ok=True)
+        details = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(f"预览帧导出失败: {details[-1200:]}") from exc
+    return output_path
+
+
 def extract_audio(video_path: str | Path, output_path: str | Path) -> Path:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

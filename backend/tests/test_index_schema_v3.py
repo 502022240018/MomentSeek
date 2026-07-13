@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 
@@ -10,12 +9,6 @@ from app.settings import Settings
 
 def _frame(width: int = 20, height: int = 10) -> np.ndarray:
     return np.zeros((height, width, 3), dtype=np.uint8)
-
-
-def _fake_thumbnail(_image, path: str | Path, **_kwargs) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"thumb")
 
 
 def _decode_np_strings(values: np.ndarray) -> list[str]:
@@ -33,7 +26,6 @@ def test_visual_index_writes_frame_offsets_and_no_per_segment_payload(tmp_path, 
 
     frames = [(1.0, _frame()), (6.0, _frame()), (16.0, _frame())]
     monkeypatch.setattr(visual, "read_frames", lambda *_args, **_kwargs: iter(frames))
-    monkeypatch.setattr(visual, "save_thumbnail", _fake_thumbnail)
 
     class FakeEncoder:
         device = "cpu"
@@ -52,7 +44,6 @@ def test_visual_index_writes_frame_offsets_and_no_per_segment_payload(tmp_path, 
     result = visual.build_visual_index(
         video_path="video.mp4",
         output_path=str(tmp_path / "visual.npz"),
-        thumbnail_dir=str(tmp_path / "thumbs"),
         model_name="ViT-B-32",
         pretrained="openai",
         sample_fps=1.0,
@@ -74,7 +65,6 @@ def test_visual_index_writes_frame_offsets_and_no_per_segment_payload(tmp_path, 
     assert result["segments_with_frames"] == 3
     assert result["empty_segments"] == 1
     assert result["decode_status"] == "partial"
-    assert (tmp_path / "thumbs" / "visual_000003.jpg").exists()
 
 
 def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatch):
@@ -82,7 +72,6 @@ def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatc
 
     frames = [(1.0, _frame()), (3.0, _frame()), (8.0, _frame()), (12.0, _frame())]
     monkeypatch.setattr(visual, "read_frames", lambda *_args, **_kwargs: iter(frames))
-    monkeypatch.setattr(visual, "save_thumbnail", _fake_thumbnail)
     monkeypatch.setattr(
         visual,
         "detect_shot_segments",
@@ -103,7 +92,6 @@ def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatc
     result = visual.build_visual_index(
         video_path="video.mp4",
         output_path=str(tmp_path / "visual.npz"),
-        thumbnail_dir=str(tmp_path / "thumbs"),
         model_name="ViT-B-32",
         pretrained="openai",
         sample_fps=1.0,
@@ -133,7 +121,6 @@ def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatc
     assert result["segments_with_frames"] == 3
     assert result["empty_segments"] == 0
     assert result["decode_status"] == "complete"
-    assert (tmp_path / "thumbs" / "visual_000002.jpg").exists()
 
 
 def test_visual_index_can_use_pyscenedetect_shot_detector(tmp_path, monkeypatch):
@@ -142,7 +129,6 @@ def test_visual_index_can_use_pyscenedetect_shot_detector(tmp_path, monkeypatch)
     frames = [(1.0, _frame()), (3.0, _frame()), (8.0, _frame()), (12.0, _frame())]
     calls: list[str] = []
     monkeypatch.setattr(visual, "read_frames", lambda *_args, **_kwargs: iter(frames))
-    monkeypatch.setattr(visual, "save_thumbnail", _fake_thumbnail)
     monkeypatch.setattr(
         visual,
         "detect_shot_segments",
@@ -168,7 +154,6 @@ def test_visual_index_can_use_pyscenedetect_shot_detector(tmp_path, monkeypatch)
     result = visual.build_visual_index(
         video_path="video.mp4",
         output_path=str(tmp_path / "visual.npz"),
-        thumbnail_dir=str(tmp_path / "thumbs"),
         model_name="ViT-B-32",
         pretrained="openai",
         sample_fps=1.0,
@@ -275,13 +260,11 @@ def test_ocr_index_writes_box_level_arrays_and_chunk_semantics(tmp_path, monkeyp
 
     monkeypatch.setattr(ocr, "_load_ocr", lambda *_args, **_kwargs: (FakeOcr(), {"rec": ["CPUExecutionProvider"]}))
     monkeypatch.setattr(ocr, "read_frames", lambda *_args, **_kwargs: iter([(5.0, _frame())]))
-    monkeypatch.setattr(ocr, "save_thumbnail", _fake_thumbnail)
     monkeypatch.setattr(ocr, "build_text_semantic_arrays", fake_semantic_arrays, raising=False)
 
     result = ocr.build_ocr_index(
         video_path="video.mp4",
         output_path=str(tmp_path / "ocr.npz"),
-        thumbnail_dir=str(tmp_path / "thumbs"),
         working_dir=str(tmp_path / "work"),
         sample_fps=1.0,
         semantic_enabled=True,
@@ -305,10 +288,9 @@ def test_ocr_index_writes_box_level_arrays_and_chunk_semantics(tmp_path, monkeyp
         assert data["embedding_chunk_indices"].tolist() == [0]
     assert result["chunks"] == 1
     assert result["semantic_chunks"] == 1
-    assert (tmp_path / "thumbs" / "ocr_000000.jpg").exists()
 
 
-def test_face_index_writes_track_times_and_row_thumbnails(tmp_path, monkeypatch):
+def test_face_index_writes_track_times_without_precomputed_thumbnails(tmp_path, monkeypatch):
     from app.indexing import faces
 
     class Face:
@@ -324,12 +306,10 @@ def test_face_index_writes_track_times_and_row_thumbnails(tmp_path, monkeypatch)
             return [Face(0.9, [2, 1, 8, 7])]
 
     monkeypatch.setattr(faces, "read_frames", lambda *_args, **_kwargs: iter([(0.0, _frame()), (1.0, _frame())]))
-    monkeypatch.setattr(faces, "save_thumbnail", _fake_thumbnail)
 
     result = faces.build_face_index(
         video_path="video.mp4",
         output_path=str(tmp_path / "face.npz"),
-        thumbnail_dir=str(tmp_path / "thumbs"),
         model_name="buffalo_l",
         sample_fps=1.0,
         provider="cpu",
@@ -344,7 +324,6 @@ def test_face_index_writes_track_times_and_row_thumbnails(tmp_path, monkeypatch)
     assert result["schema_version"] == 3
     assert result["tracks"] == 1
     assert result["decode_status"] == "complete"
-    assert (tmp_path / "thumbs" / "face_000000.jpg").exists()
 
 
 def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_path):
@@ -376,7 +355,7 @@ def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_
             "detected_language": "zh",
             "decode_status": "complete",
             "semantic_status": "complete",
-            "postprocess_stats": {"raw_chunks": 2, "processed_chunks": 2},
+            "chunk_builder_stats": {"raw_items": 2, "retrieval_chunks": 2},
             "text_profile": {"chunks": 2, "cjk_chars": 8},
             "tag_source": "sensevoice",
         },
@@ -401,7 +380,9 @@ def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_
     assert payload["channels"]["asr"]["language"] == "zh"
     assert payload["channels"]["asr"]["semantic_model_key"] == settings.asr_semantic_model
     assert payload["channels"]["asr"]["semantic_status"] == "complete"
-    assert payload["channels"]["asr"]["postprocess_stats"]["processed_chunks"] == 2
+    assert payload["channels"]["asr"]["chunk_builder_stats"]["retrieval_chunks"] == 2
+    assert "postprocess_strategy" not in payload["channels"]["asr"]
+    assert "postprocess_stats" not in payload["channels"]["asr"]
     assert payload["channels"]["asr"]["text_profile"]["cjk_chars"] == 8
     assert payload["channels"]["asr"]["tag_source"] == "sensevoice"
 
@@ -485,3 +466,22 @@ def test_index_request_accepts_visual_shot_segment_options():
         assert "visual_shot_threshold" in str(exc)
     else:
         raise AssertionError("invalid visual_shot_threshold should fail validation")
+
+
+def test_index_request_accepts_asr_engine_override():
+    from pydantic import ValidationError
+
+    from app.schemas import IndexRequest
+
+    request = IndexRequest(asr_engine="faster_whisper", asr_language="auto", asr_model="turbo")
+
+    assert request.asr_engine == "faster-whisper"
+    assert request.asr_language == "auto"
+    assert request.asr_model == "turbo"
+
+    try:
+        IndexRequest(asr_engine="sensevoice")
+    except ValidationError as exc:
+        assert "asr_engine" in str(exc)
+    else:
+        raise AssertionError("invalid asr_engine should fail validation")

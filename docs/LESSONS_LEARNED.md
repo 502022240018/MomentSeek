@@ -182,8 +182,8 @@
   再抽样打开 asr.npz 的 texts，而不是只看搜索结果。
 以后规则：
   Whisper 必须显式 task="transcribe"；
-  asr_engine=auto 且 asr_language=auto 时应走 Whisper 自动识别，不能先走中文 FunASR；
-  ASR manifest 必须记录 task、requested_language、detected_language、postprocess_stats、text_profile；
+  asr_engine=auto 且 asr_language=auto 时应先走 faster-whisper turbo 轻量语言 probe，再按语言路由，不能无条件先走中文 FunASR；
+  ASR manifest 必须记录 task、requested_language、detected_language、chunk_builder_stats、text_profile；
   发现旧索引疑似翻译输出时，优先 ASR-only 重跑，不要直接重跑全部通道。
 相关文档：
   docs/RETRIEVAL_CHANNELS.md
@@ -211,4 +211,72 @@
 相关文档：
   docs/MODELS.md
   docs/DEVELOPMENT.md
+```
+
+## 2026-07-10 本地 Docker 调试不要默认发布式重建
+
+```text
+类别：Docker / local development
+现象：
+  本地只改 ASR 后端和前端默认选项时，运行 docker compose up -d --build 触发 CUDA requirements 重新安装，
+  开始重新下载 700MB+ 的 PyTorch wheel。
+根因：
+  当前 Dockerfile 把依赖安装和源码烘进镜像；requirements 层一旦缓存失效，发布式 build 会重装重依赖。
+影响：
+  普通代码调试被拖成很长的镜像构建，也容易让人误以为“每次改代码都要重新安装所有东西”。
+经验：
+  本地频繁调试应该使用源码挂载的 compose.dev.yml；发布式 build 只用于依赖、Dockerfile 或正式交付镜像变化。
+以后规则：
+  本地开发优先启动：
+    docker compose -f compose.yml -f compose.cuda.yml -f compose.dev.yml --env-file .env up -d --no-build app
+  前端改动先在宿主机 npm run build，让挂载的 frontend/dist 被 FastAPI 读取。
+  只有 requirements、Dockerfile、系统依赖或正式发布镜像变化时，才使用 --build。
+相关文档：
+  docs/DEVELOPMENT.md
+```
+
+## 2026-07-13 开发容器挂载和临时 pip 安装不是一回事
+
+```text
+类别：Docker / local development
+现象：
+  宿主机 ASR 新代码的 149 个测试通过，但容器正式回归仍执行旧 asr.py；
+  使用 compose.dev.yml 重建后，faster-whisper 又从容器中消失。
+根因：
+  原容器没有挂载 backend/app，运行的是旧镜像源码；
+  faster-whisper 曾只临时安装在容器可写层，镜像本身没有该依赖，recreate 后自然丢失。
+影响：
+  宿主机测试和容器真实行为分叉；临时安装造成“之前能跑、重建后不能跑”。
+经验：
+  调试前必须用 docker inspect 检查 backend/app mount；
+  pip show 只能证明当前容器有包，不能证明镜像含有该包。
+以后规则：
+  本地开发固定使用 compose.yml + compose.cuda.yml + compose.dev.yml；
+  Python 依赖必须写入 requirements 并至少构建一次镜像，不能把临时 pip install 当部署结果；
+  代码改动用 reload，只有依赖清单变化才重建镜像。
+相关文档：
+  docs/DEVELOPMENT.md
+  compose.dev.yml
+```
+
+## 2026-07-13 长视频语言不能只探测片头
+
+```text
+类别：ASR / language routing
+现象：
+  全量重建时，中文书籍纪录片被片头 30s 探测成 en，错误路由到 faster-whisper；
+  同一视频主体片段和人工听查都表明主要语言是中文。
+根因：
+  auto route 只采样视频开头，默认假设片头语言等于整片主语言；长视频的片头、预告、音乐或外语引语会破坏该假设。
+影响：
+  可能再次生成与主体语言不一致的文本，损害 lexical 检索、证据展示和用户信任。
+经验：
+  语言识别正确不代表采样策略正确；必须区分“模型判错”和“样本不代表主体”。
+以后规则：
+  短视频可单窗口探测；长视频固定从开头、主体中段和后段取 3 个短窗口投票；
+  票数优先，置信度和只用于同票决胜；manifest 继续记录 detected_language/language_route/route_reason；
+  全量重建时逐条检查最终 engine 和 detected_language，发现异常立即停止后续自动提交。
+相关文档：
+  docs/RETRIEVAL_CHANNELS.md
+  docs/experiments/asr/2026-07-13-asr-production-chunk-pipeline.md
 ```

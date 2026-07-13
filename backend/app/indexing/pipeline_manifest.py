@@ -105,8 +105,6 @@ def channel_manifest(
             "raw_items": result.get("raw_items"),
             "retrieval_chunks": result.get("retrieval_chunks"),
             "chunk_builder_stats": result.get("chunk_builder_stats") or {},
-            "postprocess_strategy": str(result.get("postprocess_strategy") or "bucket_bonus"),
-            "postprocess_stats": result.get("postprocess_stats") or {},
             "text_profile": result.get("text_profile") or {},
         }
         if result.get("tag_source"):

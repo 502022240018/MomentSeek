@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.db import Catalog
 from app.deployment import build_deployment_info
-from app.media import export_preview_clip, extract_frame, probe_video
+from app.media import export_preview_clip, extract_video_frame, probe_video
 from app.schemas import HealthResponse, IndexRequest, VideoRenameRequest
 from app.search import SearchEngine
 from app.settings import get_settings
@@ -99,7 +99,12 @@ def _remove_video_files(video: dict, video_id: str) -> None:
             Path(path).unlink(missing_ok=True)
         except OSError:
             pass
-    for directory in (settings.index_dir / video_id, settings.thumbnail_dir / video_id, settings.clip_cache_dir / video_id, settings.frame_cache_dir / video_id):
+    for directory in (
+        settings.index_dir / video_id,
+        settings.legacy_thumbnail_dir / video_id,
+        settings.clip_cache_dir / video_id,
+        settings.frame_cache_dir / video_id,
+    ):
         shutil.rmtree(directory, ignore_errors=True)
 
 
@@ -266,7 +271,7 @@ async def video_clip(
 @app.get("/api/videos/{video_id}/frame")
 async def video_frame(
     video_id: str,
-    ms: int = Query(..., ge=0),
+    time: float = Query(..., ge=0),
 ):
     video = catalog.get_video(video_id)
     if not video:
@@ -274,15 +279,13 @@ async def video_frame(
     video_path = settings.resolve_path(video["file_path"])
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="视频文件不存在")
-
-    duration_ms = int(round(float(video.get("duration") or 0) * 1000))
-    bounded_ms = min(ms, duration_ms - 1) if duration_ms > 0 else ms
-    bounded_ms = max(0, bounded_ms)
-
-    frame_path = _frame_cache_path(video_id, bounded_ms)
+    duration = float(video.get("duration") or 0)
+    bounded_time = min(time, duration) if duration > 0 else time
+    timestamp_ms = max(0, round(bounded_time * 1000))
+    frame_path = _frame_cache_path(video_id, timestamp_ms)
     if not frame_path.exists() or frame_path.stat().st_size == 0:
         try:
-            await run_in_threadpool(extract_frame, video_path, frame_path, bounded_ms)
+            await run_in_threadpool(extract_video_frame, video_path, frame_path, bounded_time)
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
     return FileResponse(
@@ -313,6 +316,7 @@ def create_index_job(video_id: str, request: IndexRequest = Body(default_factory
             "visual_shot_threshold": request.visual_shot_threshold,
             "face_sample_fps": request.face_sample_fps,
             "ocr_sample_fps": request.ocr_sample_fps,
+            "asr_engine": request.asr_engine,
             "asr_model": request.asr_model,
             "asr_language": request.asr_language,
         }.items() if value is not None

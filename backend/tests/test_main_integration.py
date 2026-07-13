@@ -4,6 +4,7 @@ import sys
 
 from fastapi.testclient import TestClient
 
+from app.db import Catalog
 from app.settings import Settings
 
 
@@ -122,3 +123,69 @@ def test_health_endpoint_serializes_release_manifest_metadata(monkeypatch, tmp_p
     assert body["model_manifest"] == "deploy/models/ascend-prod.models.json"
     assert body["npu_enabled"] is True
     assert body["npu_device_id"] == 0
+
+
+def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
+    import app.indexing.asr as asr
+    import app.stage_runner as stage_runner
+
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        asr_engine="funasr",
+        asr_model="turbo",
+        asr_language="auto",
+        asr_semantic_enabled=False,
+    )
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"fake")
+    video = catalog.create_video({
+        "id": "video-1",
+        "name": "demo.mp4",
+        "file_path": str(video_path),
+        "duration": 1.0,
+        "fps": 25.0,
+        "width": 1920,
+        "height": 1080,
+        "status": "ready",
+    })
+    job = catalog.create_job({
+        "id": "job-1",
+        "video_id": video["id"],
+        "status": "queued",
+        "stage": "queued",
+        "progress": 0,
+        "modalities": ["asr"],
+        "options": {"asr_engine": "faster-whisper", "asr_model": "turbo", "asr_language": "auto"},
+    })
+    captured = {}
+
+    def fake_build_asr_index(**kwargs):
+        captured.update(kwargs)
+        return {
+            "engine": kwargs["engine"],
+            "model": kwargs["model_name"],
+            "requested_language": kwargs["language"],
+            "detected_language": "en",
+            "language": "en",
+            "task": "transcribe",
+            "raw_items": 0,
+            "retrieval_chunks": 0,
+            "chunk_builder_stats": {},
+            "text_profile": {},
+            "decode_status": "empty",
+            "semantic_status": "disabled",
+        }
+
+    monkeypatch.setattr(stage_runner, "get_settings", lambda: settings)
+    monkeypatch.setattr(asr, "build_asr_index", fake_build_asr_index)
+
+    result = stage_runner.run("asr", job["id"])
+
+    assert result["engine"] == "faster-whisper"
+    assert captured["engine"] == "faster-whisper"
+    assert captured["model_name"] == "turbo"
+    assert captured["language"] == "auto"

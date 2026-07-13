@@ -526,17 +526,17 @@ def build_ocr_index(
         "ocr_error_samples": ocr_error_samples,
         "ocr_elapsed_seconds": round(ocr_elapsed, 3),
         "total_elapsed_seconds": round(time.perf_counter() - started, 3),
-        "schema_version": 4,
+        "schema_version": 3,
         "decode_status": "complete" if decoded_frames else "empty",
     }
     semantic_result: dict
     embeddings: np.ndarray
-    embedding_frame_times_ms: np.ndarray
+    embedding_chunk_indices: np.ndarray
     if not semantic_enabled:
         if semantic_output_path is not None:
             Path(semantic_output_path).unlink(missing_ok=True)
         embeddings = np.empty((0, 0), dtype=np.float16)
-        embedding_frame_times_ms = np.empty((0,), dtype=np.int32)
+        embedding_chunk_indices = np.empty((0,), dtype=np.int32)
         semantic_result = {
             "semantic_chunks": 0,
             "semantic_status": "disabled",
@@ -554,15 +554,9 @@ def build_ocr_index(
             )
 
             embeddings = np.asarray(raw_semantic_result["embeddings"], dtype=np.float16)
-            raw_embedding_chunk_indices = np.asarray(
+            embedding_chunk_indices = np.asarray(
                 raw_semantic_result["embedding_chunk_indices"],
                 dtype=np.int32,
-            )
-
-            embedding_frame_times_ms = _embedding_chunk_indices_to_frame_times(
-                chunks,
-                raw_embedding_chunk_indices,
-                embedding_count=int(embeddings.shape[0]),
             )
 
             semantic_result = {
@@ -575,7 +569,7 @@ def build_ocr_index(
             if semantic_output_path is not None:
                 Path(semantic_output_path).unlink(missing_ok=True)
             embeddings = np.empty((0, 0), dtype=np.float16)
-            embedding_frame_times_ms = np.empty((0,), dtype=np.int32)
+            embedding_chunk_indices = np.empty((0,), dtype=np.int32)
             semantic_result = {
                 "semantic_chunks": 0,
                 "semantic_model": semantic_model,
@@ -586,7 +580,7 @@ def build_ocr_index(
         output_path,
         chunks,
         embeddings,
-        embedding_frame_times_ms,
+        embedding_chunk_indices,
     )
 
     result.update(semantic_result)
@@ -606,28 +600,33 @@ def _save_ocr_npz(
     output_path: str | Path,
     chunks: list[dict],
     embeddings: np.ndarray,
-    embedding_frame_times_ms: np.ndarray,
+    embedding_chunk_indices: np.ndarray,
 ) -> None:
     box_chunk_indices: list[int] = []
     box_texts: list[str] = []
     box_scores: list[float] = []
     boxes: list[np.ndarray] = []
 
-    for chunk in chunks:
+    chunk_times_ms: list[list[int]] = []
+    for chunk_id, chunk in enumerate(chunks):
         frame_shape = tuple(chunk.get("frame_shape") or (1, 1))
         frame_time_ms = int(round(float(chunk.get("frame_time", chunk.get("start_time", 0))) * 1000))
+        chunk_times_ms.append([
+            int(round(float(chunk.get("start_time", 0)) * 1000)),
+            int(round(float(chunk.get("end_time", 0)) * 1000)),
+            frame_time_ms,
+        ])
 
         for item in chunk.get("items", []):
-            # 新 schema：box_chunk_indices 不再保存 chunk_id，而是保存该 box 所在帧的 frame_ms。
-            box_chunk_indices.append(frame_time_ms)
+            box_chunk_indices.append(chunk_id)
             box_texts.append(str(item.get("text", "")).strip())
             box_scores.append(float(item.get("score", 0.0)))
             boxes.append(_normalized_box(item.get("box"), frame_shape))
     atomic_save_npz(
         output_path,
+        chunk_times_ms=np.asarray(chunk_times_ms, dtype=np.int32).reshape((-1, 3)),
         embeddings=np.asarray(embeddings, dtype=np.float16),
-        # 新 schema：embedding_chunk_indices 不再保存 chunk_id，而是保存该 embedding 对应帧的 frame_ms。
-        embedding_chunk_indices=np.asarray(embedding_frame_times_ms, dtype=np.int32).reshape((-1,)),
+        embedding_chunk_indices=np.asarray(embedding_chunk_indices, dtype=np.int32).reshape((-1,)),
         box_chunk_indices=np.asarray(box_chunk_indices, dtype=np.int32),
         box_texts=np.asarray(box_texts, dtype="U"),
         box_scores=np.asarray(box_scores, dtype=np.float32),
