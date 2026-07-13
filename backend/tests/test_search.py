@@ -358,7 +358,36 @@ def test_asr_search_falls_back_to_lexical_when_semantic_query_model_missing(tmp_
     assert results[0]["evidence"][0]["semantic_score"] is None
 
 
-def test_ocr_v3_search_groups_box_text_by_chunk(tmp_path):
+def test_ocr_legacy_v3_requires_rebuild(tmp_path):
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    index_dir = _create_video(settings, catalog, name="legacy.mp4")
+    catalog.update_video("video-1", indexed_modalities=["ocr"])
+    _write_manifest(index_dir, "video-1", {
+        "ocr": {
+            "file": "ocr.npz",
+            "schema_version": 3,
+            "model_key": "PP-OCRv6",
+            "decode_status": "complete",
+            "semantic_status": "disabled",
+        }
+    })
+    np.savez_compressed(
+        index_dir / "ocr.npz",
+        chunk_times_ms=np.asarray([[5000, 6000, 5000]], dtype=np.int32),
+        embeddings=np.empty((0, 0), dtype=np.float16),
+        embedding_chunk_indices=np.empty((0,), dtype=np.int32),
+        box_chunk_indices=np.asarray([0], dtype=np.int32),
+        box_texts=np.asarray(["FIFA"]),
+        box_scores=np.asarray([0.95], dtype=np.float32),
+        boxes=np.zeros((1, 4, 2), dtype=np.float32),
+    )
+
+    with pytest.raises(ValueError, match="缺少帧级数组"):
+        SearchEngine(settings, catalog).search("FIFA", None, ["ocr"], ["video-1"])
+
+
+def test_ocr_v3_search_groups_box_text_by_frame(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
     index_dir = _create_video(settings, catalog, name="match.mp4")
@@ -367,7 +396,8 @@ def test_ocr_v3_search_groups_box_text_by_chunk(tmp_path):
         "ocr": {
             "file": "ocr.npz",
             "engine": "rapidocr",
-            "model_key": "PP-OCRv4",
+            "schema_version": 3,
+            "model_key": "PP-OCRv6",
             "semantic_model_key": "fake-semantic",
             "embedding_space": "minilm-text-semantic",
             "sample_fps": 0.05,
@@ -377,10 +407,11 @@ def test_ocr_v3_search_groups_box_text_by_chunk(tmp_path):
     })
     np.savez_compressed(
         index_dir / "ocr.npz",
-        chunk_times_ms=np.asarray([[5000, 6000, 5000], [40000, 41000, 40000]], dtype=np.int32),
+        frame_times_ms=np.asarray([5000, 40000], dtype=np.int32),
+        frame_windows_ms=np.asarray([[5000, 6000], [40000, 41000]], dtype=np.int32),
         embeddings=np.empty((0, 0), dtype=np.float16),
-        embedding_chunk_indices=np.empty((0,), dtype=np.int32),
-        box_chunk_indices=np.asarray([0, 0, 0, 1], dtype=np.int32),
+        embedding_frame_indices=np.empty((0,), dtype=np.int32),
+        box_frame_indices=np.asarray([0, 0, 0, 1], dtype=np.int32),
         box_texts=np.asarray(["FIFA", "WORLD", "CUP", "UNRELATED"]),
         box_scores=np.asarray([0.95, 0.93, 0.90, 0.91], dtype=np.float32),
         boxes=np.zeros((4, 4, 2), dtype=np.float32),
@@ -397,7 +428,7 @@ def test_ocr_v3_search_groups_box_text_by_chunk(tmp_path):
     assert results[0]["evidence"][0]["features"]["ocr_score"] == 0.95
 
 
-def test_ocr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
+def test_ocr_v3_sparse_semantic_indices_map_embeddings_to_frames(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
     index_dir = _create_video(settings, catalog, name="match.mp4")
@@ -406,7 +437,8 @@ def test_ocr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
         "ocr": {
             "file": "ocr.npz",
             "engine": "rapidocr",
-            "model_key": "PP-OCRv4",
+            "schema_version": 3,
+            "model_key": "PP-OCRv6",
             "semantic_model_key": "fake-semantic",
             "embedding_space": "minilm-text-semantic",
             "sample_fps": 0.05,
@@ -416,10 +448,11 @@ def test_ocr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
     })
     np.savez_compressed(
         index_dir / "ocr.npz",
-        chunk_times_ms=np.asarray([[5000, 6000, 5000], [40000, 41000, 40000]], dtype=np.int32),
+        frame_times_ms=np.asarray([5000, 40000], dtype=np.int32),
+        frame_windows_ms=np.asarray([[5000, 6000], [40000, 41000]], dtype=np.int32),
         embeddings=np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float16),
-        embedding_chunk_indices=np.asarray([0, 1], dtype=np.int32),
-        box_chunk_indices=np.asarray([0, 0, 1], dtype=np.int32),
+        embedding_frame_indices=np.asarray([0, 1], dtype=np.int32),
+        box_frame_indices=np.asarray([0, 0, 1], dtype=np.int32),
         box_texts=np.asarray(["FIFA", "WORLD CUP", "UNRELATED"]),
         box_scores=np.asarray([0.95, 0.93, 0.91], dtype=np.float32),
         boxes=np.zeros((3, 4, 2), dtype=np.float32),

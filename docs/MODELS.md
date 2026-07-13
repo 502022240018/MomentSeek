@@ -76,7 +76,7 @@ models[].required
 visual：SigLIP2、ChineseCLIP 或 OpenCLIP，用于文本/图片搜画面。
 face：InsightFace buffalo_l / ArcFace，用于参考图和人物库检索。
 asr：默认 auto 路由；中文/方言使用 SenseVoiceSmall/FunASR，英文/西语/葡语等使用 faster-whisper turbo。
-ocr：CPU/CUDA 默认使用 RapidOCR PP-OCRv6；Ascend 使用已验证的 PP-OCRv4，用于画面文字检索。
+ocr：CPU、CUDA 和 Ascend 统一使用 RapidOCR PP-OCRv6，用于画面文字检索。
 semantic：sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2，用于 ASR/OCR 语义检索。
 ```
 

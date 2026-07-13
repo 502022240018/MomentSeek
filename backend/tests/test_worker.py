@@ -60,7 +60,7 @@ def test_worker_environment_propagates_indexing_profile_settings(tmp_path):
         asr_model="small",
         asr_semantic_local_files_only=True,
         ocr_device="auto",
-        ocr_version="PP-OCRv4",
+        ocr_version="PP-OCRv6",
     )
 
     environment = worker_environment(settings)
@@ -78,4 +78,4 @@ def test_worker_environment_propagates_indexing_profile_settings(tmp_path):
     assert environment["ASR_MODEL"] == "small"
     assert environment["ASR_SEMANTIC_LOCAL_FILES_ONLY"] == "true"
     assert environment["OCR_DEVICE"] == "auto"
-    assert environment["OCR_VERSION"] == "PP-OCRv4"
+    assert environment["OCR_VERSION"] == "PP-OCRv6"

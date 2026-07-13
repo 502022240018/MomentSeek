@@ -53,9 +53,9 @@
       "required": true
     },
     {
-      "name": "rapidocr_ppocrv4",
+      "name": "rapidocr_ppocrv6",
       "kind": "directory",
-      "id": "PP-OCRv4",
+      "id": "PP-OCRv6",
       "target": "/app/models/rapidocr",
       "required": true
     }

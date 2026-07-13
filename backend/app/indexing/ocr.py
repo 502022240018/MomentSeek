@@ -531,12 +531,12 @@ def build_ocr_index(
     }
     semantic_result: dict
     embeddings: np.ndarray
-    embedding_chunk_indices: np.ndarray
+    embedding_frame_indices: np.ndarray
     if not semantic_enabled:
         if semantic_output_path is not None:
             Path(semantic_output_path).unlink(missing_ok=True)
         embeddings = np.empty((0, 0), dtype=np.float16)
-        embedding_chunk_indices = np.empty((0,), dtype=np.int32)
+        embedding_frame_indices = np.empty((0,), dtype=np.int32)
         semantic_result = {
             "semantic_chunks": 0,
             "semantic_status": "disabled",
@@ -554,7 +554,7 @@ def build_ocr_index(
             )
 
             embeddings = np.asarray(raw_semantic_result["embeddings"], dtype=np.float16)
-            embedding_chunk_indices = np.asarray(
+            embedding_frame_indices = np.asarray(
                 raw_semantic_result["embedding_chunk_indices"],
                 dtype=np.int32,
             )
@@ -569,7 +569,7 @@ def build_ocr_index(
             if semantic_output_path is not None:
                 Path(semantic_output_path).unlink(missing_ok=True)
             embeddings = np.empty((0, 0), dtype=np.float16)
-            embedding_chunk_indices = np.empty((0,), dtype=np.int32)
+            embedding_frame_indices = np.empty((0,), dtype=np.int32)
             semantic_result = {
                 "semantic_chunks": 0,
                 "semantic_model": semantic_model,
@@ -580,7 +580,7 @@ def build_ocr_index(
         output_path,
         chunks,
         embeddings,
-        embedding_chunk_indices,
+        embedding_frame_indices,
     )
 
     result.update(semantic_result)
@@ -600,34 +600,36 @@ def _save_ocr_npz(
     output_path: str | Path,
     chunks: list[dict],
     embeddings: np.ndarray,
-    embedding_chunk_indices: np.ndarray,
+    embedding_frame_indices: np.ndarray,
 ) -> None:
-    box_chunk_indices: list[int] = []
+    box_frame_indices: list[int] = []
     box_texts: list[str] = []
     box_scores: list[float] = []
     boxes: list[np.ndarray] = []
 
-    chunk_times_ms: list[list[int]] = []
-    for chunk_id, chunk in enumerate(chunks):
+    frame_times_ms: list[int] = []
+    frame_windows_ms: list[list[int]] = []
+    for frame_index, chunk in enumerate(chunks):
         frame_shape = tuple(chunk.get("frame_shape") or (1, 1))
         frame_time_ms = int(round(float(chunk.get("frame_time", chunk.get("start_time", 0))) * 1000))
-        chunk_times_ms.append([
+        frame_times_ms.append(frame_time_ms)
+        frame_windows_ms.append([
             int(round(float(chunk.get("start_time", 0)) * 1000)),
             int(round(float(chunk.get("end_time", 0)) * 1000)),
-            frame_time_ms,
         ])
 
         for item in chunk.get("items", []):
-            box_chunk_indices.append(chunk_id)
+            box_frame_indices.append(frame_index)
             box_texts.append(str(item.get("text", "")).strip())
             box_scores.append(float(item.get("score", 0.0)))
             boxes.append(_normalized_box(item.get("box"), frame_shape))
     atomic_save_npz(
         output_path,
-        chunk_times_ms=np.asarray(chunk_times_ms, dtype=np.int32).reshape((-1, 3)),
+        frame_times_ms=np.asarray(frame_times_ms, dtype=np.int32),
+        frame_windows_ms=np.asarray(frame_windows_ms, dtype=np.int32).reshape((-1, 2)),
         embeddings=np.asarray(embeddings, dtype=np.float16),
-        embedding_chunk_indices=np.asarray(embedding_chunk_indices, dtype=np.int32).reshape((-1,)),
-        box_chunk_indices=np.asarray(box_chunk_indices, dtype=np.int32),
+        embedding_frame_indices=np.asarray(embedding_frame_indices, dtype=np.int32).reshape((-1,)),
+        box_frame_indices=np.asarray(box_frame_indices, dtype=np.int32),
         box_texts=np.asarray(box_texts, dtype="U"),
         box_scores=np.asarray(box_scores, dtype=np.float32),
         boxes=np.stack(boxes).astype(np.float32) if boxes else np.empty((0, 4, 2), dtype=np.float32),

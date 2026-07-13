@@ -110,7 +110,7 @@ asr_semantic_device = cpu
 
 ocr_engine = rapidocr
 ocr_sample_fps = 0.05
-ocr_version = PP-OCRv4
+ocr_version = PP-OCRv6
 ocr_semantic_enabled = true
 ```
 

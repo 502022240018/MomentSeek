@@ -114,6 +114,7 @@ def channel_manifest(
         semantic_model = settings.asr_semantic_model
         return {
             "file": "ocr.npz",
+            "schema_version": int(result.get("schema_version") or 3),
             "engine": str(result.get("engine") or settings.ocr_engine),
             "model_key": str(result.get("ocr_version") or settings.ocr_version),
             "semantic_model_key": semantic_model,

@@ -22,7 +22,7 @@ runtime/indexes/{video_id}/
 | `visual` | 默认 5fps，5s bucket；可选 shot-aware segment | SigLIP2/CLIP image-text embedding | `visual.npz` | 默认 5s bucket；可选镜头/子段，按 segment 内最佳帧 MaxSim 排序 |
 | `face` | 默认 1fps | InsightFace `buffalo_l`，ArcFace identity embedding | `face.npz` | 人脸 track |
 | `asr` | ASR 模型 chunk | Whisper/FunASR 文本 + 可选 MiniLM semantic embedding | `asr.npz` | ASR chunk |
-| `ocr` | 后端回退 0.05fps；前端新任务默认 1fps | RapidOCR PP-OCRv6（CPU/CUDA）或 PP-OCRv4（Ascend）文本框 + 可选 MiniLM semantic embedding | `ocr.npz` | OCR sampled-frame chunk |
+| `ocr` | 后端回退 0.05fps；前端新任务默认 1fps | RapidOCR PP-OCRv6（CPU/CUDA/Ascend）文本框 + 可选 MiniLM semantic embedding | `ocr.npz` | OCR sampled-frame |
 
 不同向量空间不能混用：
 
@@ -295,22 +295,23 @@ features
 当前引擎：
 
 ```text
-RapidOCR / PP-OCRv6（CPU/CUDA 默认；Ascend 使用已验证的 PP-OCRv4）
+RapidOCR / PP-OCRv6（CPU/CUDA/Ascend 统一）
 sample_fps = 1.0（前端新任务默认；后端未指定时回退 0.05）
 decode_height = 720
 min_confidence = 0.5
 ```
 
-OCR 的 chunk 是一次 OCR sampled frame/time window；文本与 score 在 box 级保存，chunk 文本在搜索时由该 chunk 的 boxes 拼接得到。
+OCR v3 已重构为 frame-native 格式，不兼容旧 OCR v3；升级后必须重建 OCR 索引。文本与 score 在 box 级保存，帧文本在搜索时由该帧的 boxes 拼接得到。
 
 `ocr.npz` v3：
 
 | 字段 | 类型 / shape | 含义 |
 |---|---|---|
-| `chunk_times_ms` | `[num_chunks, 3] int32` | `[start_ms, end_ms, frame_ms]` |
+| `frame_times_ms` | `[num_frames] int32` | 每个 OCR 采样帧的时间戳 |
+| `frame_windows_ms` | `[num_frames, 2] int32` | 每个采样帧对应的检索窗口 `[start_ms, end_ms]` |
 | `embeddings` | `[num_semantic_chunks, 384] float16` | 可选 MiniLM semantic embedding；不可用时为空数组 |
-| `embedding_chunk_indices` | `[num_semantic_chunks] int32` | 每条 semantic embedding 对应的 chunk 行号 |
-| `box_chunk_indices` | `[num_boxes] int32` | 每个 OCR box 属于哪个 chunk |
+| `embedding_frame_indices` | `[num_semantic_frames] int32` | 每条 semantic embedding 对应的 frame 行号 |
+| `box_frame_indices` | `[num_boxes] int32` | 每个 OCR box 所属的 frame 行号 |
 | `box_texts` | `[num_boxes] str` | OCR box 文本 |
 | `box_scores` | `[num_boxes] float32` | OCR box 置信度 |
 | `boxes` | `[num_boxes, 4, 2] float32` | 归一化到 `[0, 1]` 的四点框 |

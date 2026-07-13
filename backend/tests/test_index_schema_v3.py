@@ -273,19 +273,22 @@ def test_ocr_index_writes_box_level_arrays_and_chunk_semantics(tmp_path, monkeyp
 
     with np.load(tmp_path / "ocr.npz", allow_pickle=False) as data:
         assert set(data.files) == {
-            "chunk_times_ms",
+            "frame_times_ms",
+            "frame_windows_ms",
             "embeddings",
-            "embedding_chunk_indices",
-            "box_chunk_indices",
+            "embedding_frame_indices",
+            "box_frame_indices",
             "box_texts",
             "box_scores",
             "boxes",
         }
-        assert data["chunk_times_ms"].tolist() == [[5000, 6000, 5000]]
-        assert data["box_chunk_indices"].tolist() == [0, 0]
+        assert data["frame_times_ms"].tolist() == [5000]
+        assert data["frame_windows_ms"].tolist() == [[5000, 6000]]
+        assert data["box_frame_indices"].tolist() == [0, 0]
         assert data["box_texts"].tolist() == ["FIFA", "WORLD CUP"]
         assert np.allclose(data["boxes"][1], [[0.5, 0.5], [1.0, 0.5], [1.0, 1.0], [0.5, 1.0]])
-        assert data["embedding_chunk_indices"].tolist() == [0]
+        assert data["embedding_frame_indices"].tolist() == [0]
+    assert result["schema_version"] == 3
     assert result["chunks"] == 1
     assert result["semantic_chunks"] == 1
 
@@ -360,6 +363,14 @@ def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_
             "tag_source": "sensevoice",
         },
     )
+    write_stage_manifest(
+        "ocr",
+        index_dir=index_dir,
+        video=video,
+        options={"ocr_sample_fps": 1.0},
+        settings=settings,
+        result={"ocr_version": "PP-OCRv6", "schema_version": 3, "decode_status": "complete"},
+    )
 
     payload = json.loads((index_dir / "index_manifest.json").read_text(encoding="utf-8"))
     assert payload["schema_version"] == 3
@@ -373,6 +384,8 @@ def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_
         "sample_fps": 5.0,
         "decode_status": "partial",
     }
+    assert payload["channels"]["ocr"]["schema_version"] == 3
+    assert payload["channels"]["ocr"]["model_key"] == "PP-OCRv6"
     assert payload["channels"]["asr"]["file"] == "asr.npz"
     assert payload["channels"]["asr"]["task"] == "transcribe"
     assert payload["channels"]["asr"]["requested_language"] == "auto"

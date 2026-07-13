@@ -568,29 +568,34 @@ def _ocr_display_text(
 
 
 def _ocr_chunks_from_npz(data) -> list[dict]:
-    """Load the stable OCR v3 layout while retaining box-level display detail."""
-    required = {"chunk_times_ms", "box_chunk_indices", "box_texts", "box_scores", "boxes"}
+    """Load the frame-native OCR v3 layout."""
+    required = {"frame_times_ms", "frame_windows_ms", "box_frame_indices", "box_texts", "box_scores", "boxes"}
     if not required.issubset(set(data.files)):
-        raise ValueError("ocr v3 索引缺少必要数组，请重跑 OCR 索引")
-    times = data["chunk_times_ms"].astype(np.int32)
-    box_chunk_indices = data["box_chunk_indices"].astype(np.int32)
+        raise ValueError("ocr v3 索引缺少帧级数组，请重跑 OCR 索引")
+    frame_times = data["frame_times_ms"].astype(np.int32)
+    frame_windows = data["frame_windows_ms"].astype(np.int32)
+    box_frame_indices = data["box_frame_indices"].astype(np.int32)
     box_texts = _decode_text_array(data["box_texts"])
     box_scores = np.asarray(data["box_scores"], dtype=np.float32)
     boxes = np.asarray(data["boxes"], dtype=np.float32)
-    if times.ndim != 2 or times.shape[1] != 3:
-        raise ValueError("ocr v3 chunk_times_ms 必须是 [num_chunks, 3]，请重跑 OCR 索引")
-    if not (len(box_chunk_indices) == len(box_texts) == len(box_scores) == len(boxes)):
+    if frame_times.ndim != 1:
+        raise ValueError("ocr v3 frame_times_ms 必须是一维数组，请重跑 OCR 索引")
+    if frame_windows.ndim != 2 or frame_windows.shape != (len(frame_times), 2):
+        raise ValueError("ocr v3 frame_windows_ms 必须是 [num_frames, 2]，请重跑 OCR 索引")
+    if not (len(box_frame_indices) == len(box_texts) == len(box_scores) == len(boxes)):
         raise ValueError("ocr v3 box 数组长度不一致，请重跑 OCR 索引")
+    if len(box_frame_indices) and np.any((box_frame_indices < 0) | (box_frame_indices >= len(frame_times))):
+        raise ValueError("ocr v3 box_frame_indices 越界，请重跑 OCR 索引")
     chunks: list[dict] = []
-    for chunk_id, row in enumerate(times):
-        indices = np.flatnonzero(box_chunk_indices == chunk_id)
+    for frame_index, frame_ms in enumerate(frame_times):
+        indices = np.flatnonzero(box_frame_indices == frame_index)
         box_text_values = [box_texts[int(index)].strip() for index in indices if box_texts[int(index)].strip()]
         box_score_values = [float(box_scores[int(index)]) for index in indices if box_texts[int(index)].strip()]
         chunks.append({
-            "chunk_id": chunk_id,
-            "start_ms": int(row[0]),
-            "end_ms": int(row[1]),
-            "frame_ms": int(row[2]),
+            "chunk_id": frame_index,
+            "start_ms": int(frame_windows[frame_index, 0]),
+            "end_ms": int(frame_windows[frame_index, 1]),
+            "frame_ms": int(frame_ms),
             "text": " ".join(box_text_values),
             "ocr_box_texts": box_text_values,
             "ocr_box_scores": box_score_values,
@@ -920,8 +925,27 @@ class SearchEngine:
                     ))
             if "ocr" in modalities and text and "ocr" in indexed_modalities:
                 _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
+                if int(channel_manifest.get("schema_version") or 0) != 3:
+                    raise ValueError(f"视频 {video.get('name') or video['id']} 的 OCR 索引不是重构后的 v3，请重跑 OCR 索引")
                 with np.load(index_file, allow_pickle=False) as data:
-                    semantic_embeddings, embedding_chunk_indices = _semantic_arrays(data)
+                    semantic_embeddings = data["embeddings"].astype(np.float32) if "embeddings" in data.files else None
+                    if semantic_embeddings is not None and (
+                        semantic_embeddings.ndim != 2
+                        or semantic_embeddings.shape[0] == 0
+                        or semantic_embeddings.shape[1] == 0
+                    ):
+                        semantic_embeddings = None
+                    embedding_chunk_indices = (
+                        data["embedding_frame_indices"].astype(np.int32)
+                        if "embedding_frame_indices" in data.files else None
+                    )
+                    if semantic_embeddings is not None and embedding_chunk_indices is None:
+                        raise ValueError("ocr v3 索引缺少 embedding_frame_indices，请重跑 OCR 索引")
+                    if (
+                        semantic_embeddings is not None
+                        and len(embedding_chunk_indices) != semantic_embeddings.shape[0]
+                    ):
+                        raise ValueError("ocr v3 semantic 数组长度不一致，请重跑 OCR 索引")
                     semantic_query = None
 
                     if semantic_embeddings is not None:
