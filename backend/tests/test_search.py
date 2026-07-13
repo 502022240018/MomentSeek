@@ -124,7 +124,7 @@ def test_visual_v3_frame_offsets_skip_empty_decode_bucket(tmp_path):
 
     assert results[0]["start_time"] == 15
     assert results[0]["end_time"] == 20
-    assert results[0]["thumbnail_url"] == "/api/thumbnails/video-1/visual_000003.jpg"
+    assert results[0]["thumbnail_url"] == "/api/videos/video-1/frame?time=16.000"
     evidence = results[0]["evidence"][0]
     assert evidence["unit_type"] == "segment"
     assert evidence["unit_id"] == 3

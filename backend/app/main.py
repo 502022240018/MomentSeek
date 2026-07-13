@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.db import Catalog
 from app.deployment import build_deployment_info
-from app.media import export_preview_clip, probe_video
+from app.media import export_preview_clip, extract_video_frame, probe_video
 from app.schemas import HealthResponse, IndexRequest, VideoRenameRequest
 from app.search import SearchEngine
 from app.settings import get_settings
@@ -257,6 +257,29 @@ async def video_clip(
         filename=f"{video_id}_{round(start * 1000)}_{round(bounded_end * 1000)}.mp4",
         content_disposition_type="inline",
     )
+
+
+@app.get("/api/videos/{video_id}/frame")
+async def video_frame(
+    video_id: str,
+    time: float = Query(..., ge=0),
+):
+    video = catalog.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+    video_path = settings.resolve_path(video["file_path"])
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+    duration = float(video.get("duration") or 0)
+    bounded_time = min(time, duration) if duration > 0 else time
+    timestamp_ms = max(0, round(bounded_time * 1000))
+    frame_path = settings.thumbnail_dir / video_id / f"visual_best_{timestamp_ms:012d}.jpg"
+    if not frame_path.exists() or frame_path.stat().st_size == 0:
+        try:
+            await run_in_threadpool(extract_video_frame, video_path, frame_path, bounded_time)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return FileResponse(frame_path, media_type="image/jpeg", content_disposition_type="inline")
 
 
 @app.post("/api/videos/{video_id}/index", status_code=202)

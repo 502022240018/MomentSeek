@@ -731,8 +731,17 @@ class SearchEngine:
                 best_by_modality[item.modality] = max(best_by_modality.get(item.modality, -1), item.score)
             denominator = sum(weights.get(name, 1) for name in best_by_modality)
             score = sum(weights.get(name, 1) * value for name, value in best_by_modality.items()) / denominator
-            best_thumbnail = next((item.thumbnail for item in sorted(group, key=lambda value: value.score, reverse=True) if item.thumbnail), None)
+            thumbnail_candidate = next(
+                (item for item in sorted(group, key=lambda value: value.score, reverse=True) if item.thumbnail),
+                None,
+            )
             video_id = group[0].video_id
+            if thumbnail_candidate and thumbnail_candidate.modality == "visual" and thumbnail_candidate.best_ms is not None:
+                thumbnail_url = f"/api/videos/{video_id}/frame?time={thumbnail_candidate.best_ms / 1000:.3f}"
+            elif thumbnail_candidate:
+                thumbnail_url = f"/api/thumbnails/{video_id}/{thumbnail_candidate.thumbnail}"
+            else:
+                thumbnail_url = None
             group_decisions = {item.decision for item in group}
             decision = next(
                 (name for name in ("strong", "fuzzy", "fallback", "absolute_hit", "semantic_lexical_hit", "semantic_hit", "lexical_hit", "weak") if name in group_decisions),
@@ -746,7 +755,7 @@ class SearchEngine:
                 end_time=max(item.end_time for item in group),
                 score=score,
                 modalities=sorted(best_by_modality),
-                thumbnail_url=(f"/api/thumbnails/{video_id}/{best_thumbnail}" if best_thumbnail else None),
+                thumbnail_url=thumbnail_url,
                 media_url=f"/api/videos/{video_id}/media",
                 clip_url=f"/api/videos/{video_id}/clip?start={min(item.start_time for item in group):.3f}&end={max(item.end_time for item in group):.3f}",
                 decision=decision,
