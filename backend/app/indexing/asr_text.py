@@ -49,6 +49,8 @@ _LEADING_REPEATED_FILLERS_RE = re.compile(
 _SPACE_RE = re.compile(r"\s+")
 _SEARCH_DROP_RE = re.compile(r"[\W_]+", re.UNICODE)
 _FILLER_RE = re.compile(r"^(嗯+|啊+|呃+|额+|哦+|噢+|唉+|诶+|em+|uh+|um+)$", re.IGNORECASE)
+_FILLER_PART_RE = re.compile(r"(?:嗯+|啊+|呃+|额+|哦+|噢+|唉+|诶+|em+|uh+|um+)", re.IGNORECASE)
+_LATIN_WORD_RE = re.compile(r"[a-z0-9]+(?:['’][a-z0-9]+)*", re.IGNORECASE)
 _LOW_INFO_WORDS = {
     "对",
     "是",
@@ -60,6 +62,21 @@ _LOW_INFO_WORDS = {
     "okay",
     "yes",
     "no",
+    "and",
+    "but",
+    "because",
+    "if",
+    "then",
+    "well",
+    "still",
+    "imean",
+    "但是",
+    "所以",
+    "因为",
+    "如果",
+    "然后",
+    "而且",
+    "不过",
 }
 
 
@@ -101,17 +118,26 @@ def normalize_search_text(text: str) -> str:
     return _SEARCH_DROP_RE.sub("", normalized)
 
 
-def semantic_text_quality(text: str) -> SemanticTextQuality:
+def semantic_text_quality(text: str, *, duration_ms: int | None = None) -> SemanticTextQuality:
     normalized = normalize_asr_text(text)
     compact = normalize_search_text(normalized)
     if not compact:
         return SemanticTextQuality(False, "empty")
-    if compact in _LOW_INFO_WORDS or _FILLER_RE.fullmatch(compact):
+    low_info_remainder = compact
+    for token in sorted(_LOW_INFO_WORDS, key=len, reverse=True):
+        low_info_remainder = low_info_remainder.replace(token, "")
+    low_info_remainder = _FILLER_PART_RE.sub("", low_info_remainder)
+    if compact in _LOW_INFO_WORDS or _FILLER_RE.fullmatch(compact) or not low_info_remainder:
         return SemanticTextQuality(False, "filler")
     cjk_chars = sum(1 for character in compact if "\u4e00" <= character <= "\u9fff")
     latin_digits = sum(1 for character in compact if character.isascii() and character.isalnum())
     if cjk_chars + latin_digits < 2:
         return SemanticTextQuality(False, "too_short")
+    if duration_ms is not None and 0 <= duration_ms < 500:
+        latin_words = len(_LATIN_WORD_RE.findall(normalized))
+        speech_units = cjk_chars + latin_words
+        if cjk_chars >= 8 or latin_words >= 6 or speech_units >= 8:
+            return SemanticTextQuality(False, "impossible_text_rate")
     return SemanticTextQuality(True, "ok")
 
 

@@ -123,11 +123,23 @@ class IndexRequest(BaseModel):
         if value is None:
             return None
         normalized = value.strip().lower()
-        aliases = {"chinese": "zh", "中文": "zh", "english": "en", "英文": "en"}
+        aliases = {
+            "chinese": "zh",
+            "中文": "zh",
+            "mandarin": "zh",
+            "cantonese": "yue",
+            "粤语": "yue",
+            "english": "en",
+            "英文": "en",
+            "spanish": "es",
+            "西语": "es",
+            "portuguese": "pt",
+            "葡语": "pt",
+        }
         normalized = aliases.get(normalized, normalized)
-        allowed = {"auto", "zh", "en"}
+        allowed = {"auto", "zh", "yue", "en", "es", "pt", "ja", "ko", "fr", "de", "it", "ru"}
         if normalized not in allowed:
-            raise ValueError("asr_language 只能是 auto、zh、en")
+            raise ValueError("asr_language 只能是 auto、zh、yue、en、es、pt、ja、ko、fr、de、it、ru")
         return normalized
 
 

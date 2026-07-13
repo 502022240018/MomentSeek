@@ -376,7 +376,7 @@ def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_
             "detected_language": "zh",
             "decode_status": "complete",
             "semantic_status": "complete",
-            "postprocess_stats": {"raw_chunks": 2, "processed_chunks": 2},
+            "chunk_builder_stats": {"raw_items": 2, "retrieval_chunks": 2},
             "text_profile": {"chunks": 2, "cjk_chars": 8},
             "tag_source": "sensevoice",
         },
@@ -401,7 +401,9 @@ def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_
     assert payload["channels"]["asr"]["language"] == "zh"
     assert payload["channels"]["asr"]["semantic_model_key"] == settings.asr_semantic_model
     assert payload["channels"]["asr"]["semantic_status"] == "complete"
-    assert payload["channels"]["asr"]["postprocess_stats"]["processed_chunks"] == 2
+    assert payload["channels"]["asr"]["chunk_builder_stats"]["retrieval_chunks"] == 2
+    assert "postprocess_strategy" not in payload["channels"]["asr"]
+    assert "postprocess_stats" not in payload["channels"]["asr"]
     assert payload["channels"]["asr"]["text_profile"]["cjk_chars"] == 8
     assert payload["channels"]["asr"]["tag_source"] == "sensevoice"
 

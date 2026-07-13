@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 import wave
+from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 
 from app.indexing.asr_debug import write_asr_debug_artifacts
 from app.indexing.asr_retrieval_chunks import RetrievalChunkConfig, build_retrieval_chunks
-from app.indexing.asr_text import asr_text_profile
+from app.indexing.asr_text import asr_text_profile, normalize_search_text
 from app.indexing.asr_pipeline_types import RawTranscriptItem
 from app.indexing.asr_transcript_parser import (
     apply_safe_raw_split,
@@ -27,8 +30,13 @@ from app.model_sources import (
 )
 
 
-DEFAULT_ASR_POSTPROCESS_STRATEGY = "bucket_bonus"
 SAMPLE_RATE = 16000
+FASTER_WHISPER_WINDOW_SECONDS = 24.0
+FASTER_WHISPER_WINDOW_JOIN_GAP_SECONDS = 5.0
+FASTER_WHISPER_FALLBACK_SPAN_SECONDS = 12.0
+_CHINESE_ASR_LANGUAGES = {"zh", "zh-cn", "zh-tw", "cmn", "yue", "chinese"}
+_STRONG_PUNCTUATION = (".", "!", "?", "\u3002", "\uff01", "\uff1f")
+_SOFT_PUNCTUATION = (",", ";", ":", "\uff0c", "\uff1b", "\uff1a", "\u3001")
 
 
 def resolve_asr_device(device: str, cuda_enabled: bool = False, npu_enabled: bool = False, npu_device_id: int = 0) -> str:
@@ -88,6 +96,14 @@ def load_sidecar(path: str | Path) -> list[dict]:
 
 def _is_sensevoice_model(model_name: str, model_source: str = "") -> bool:
     return "sensevoice" in f"{model_name} {model_source}".casefold()
+
+
+def _is_auto_language(language: str) -> bool:
+    return not language or language.casefold() == "auto"
+
+
+def _is_chinese_language(language: str) -> bool:
+    return str(language or "").strip().casefold() in _CHINESE_ASR_LANGUAGES
 
 
 def _parse_funasr_chunks(
@@ -170,7 +186,12 @@ def _build_silero_groups(
     }
 
 
-def _offset_raw_items(items: list[RawTranscriptItem], offset_ms: int) -> list[RawTranscriptItem]:
+def _offset_raw_items(
+    items: list[RawTranscriptItem],
+    offset_ms: int,
+    *,
+    unit_id: int | None = None,
+) -> list[RawTranscriptItem]:
     return [
         RawTranscriptItem(
             item_id=index,
@@ -178,7 +199,7 @@ def _offset_raw_items(items: list[RawTranscriptItem], offset_ms: int) -> list[Ra
             end_ms=int(item.end_ms) + offset_ms,
             text=str(item.text),
             source=str(item.source),
-            unit_id=item.unit_id,
+            unit_id=item.unit_id if unit_id is None else unit_id,
             emotion=str(item.emotion or ""),
             audio_event=str(item.audio_event or ""),
             diagnostics=dict(item.diagnostics or {}),
@@ -248,9 +269,17 @@ def _sensevoice_silero(
             result,
             is_sensevoice=True,
             split_timestamp_text=True,
+            fallback_start_ms=0,
+            fallback_end_ms=int(round((end_s - start_s) * 1000)),
         )
         parsed_items = apply_safe_raw_split(parsed_items)
-        raw_items.extend(_offset_raw_items(parsed_items, int(round(start_s * 1000))))
+        raw_items.extend(
+            _offset_raw_items(
+                parsed_items,
+                int(round(start_s * 1000)),
+                unit_id=group_index,
+            )
+        )
         try:
             group_path.unlink(missing_ok=True)
         except OSError:
@@ -366,6 +395,287 @@ def _whisper(
     }
 
 
+def _word_text(value: object) -> str:
+    return str(getattr(value, "word", value) or "").strip()
+
+
+def _word_start(value: object, default: float) -> float:
+    raw = getattr(value, "start", default)
+    return default if raw is None else float(raw)
+
+
+def _word_end(value: object, default: float) -> float:
+    raw = getattr(value, "end", default)
+    return default if raw is None else float(raw)
+
+
+def _join_word_texts(parts: list[str]) -> str:
+    cleaned = [part.strip() for part in parts if part.strip()]
+    if not cleaned:
+        return ""
+    text = " ".join(cleaned)
+    text = re.sub(r"\s+([.,!?;:\uff0c\u3002\uff01\uff1f\uff1b\uff1a\u3001])", r"\1", text)
+    return text.strip()
+
+
+def _split_faster_whisper_segments(
+    segments: Iterable[object],
+    *,
+    max_chunk_seconds: float = 12.0,
+    soft_punctuation_seconds: float = 8.0,
+    speech_gap_seconds: float = 1.5,
+) -> list[dict]:
+    chunks: list[dict] = []
+
+    def append_chunk(start_time: float, end_time: float, text: str) -> None:
+        cleaned = str(text or "").strip()
+        if cleaned:
+            chunks.append({
+                "start_time": float(start_time),
+                "end_time": max(float(start_time), float(end_time)),
+                "text": cleaned,
+            })
+
+    for segment in segments:
+        segment_start = float(getattr(segment, "start", 0.0) or 0.0)
+        segment_end = float(getattr(segment, "end", segment_start) or segment_start)
+        words = list(getattr(segment, "words", None) or [])
+        if not words:
+            append_chunk(segment_start, segment_end, str(getattr(segment, "text", "") or ""))
+            continue
+
+        current_words: list[str] = []
+        current_start: float | None = None
+        current_end: float | None = None
+
+        def flush() -> None:
+            nonlocal current_words, current_start, current_end
+            if current_start is not None and current_end is not None:
+                append_chunk(current_start, current_end, _join_word_texts(current_words))
+            current_words = []
+            current_start = None
+            current_end = None
+
+        for word in words:
+            text = _word_text(word)
+            if not text:
+                continue
+            start_time = _word_start(word, segment_start)
+            end_time = _word_end(word, start_time)
+            if current_end is not None and start_time - current_end > speech_gap_seconds:
+                flush()
+            if current_start is None:
+                current_start = start_time
+            current_end = max(start_time, end_time)
+            current_words.append(text)
+
+            duration = current_end - current_start
+            if text.rstrip().endswith(_STRONG_PUNCTUATION) and duration >= 1.5:
+                flush()
+            elif text.rstrip().endswith(_SOFT_PUNCTUATION) and duration >= soft_punctuation_seconds:
+                flush()
+            elif duration >= max_chunk_seconds:
+                flush()
+
+        flush()
+
+    return chunks
+
+
+def _faster_whisper_vad_options(**kwargs):
+    try:
+        from faster_whisper.vad import VadOptions
+    except Exception:
+        return kwargs
+    return VadOptions(**kwargs)
+
+
+def _build_faster_whisper_windows(
+    audio: np.ndarray,
+    *,
+    cap_seconds: float = FASTER_WHISPER_WINDOW_SECONDS,
+) -> tuple[list[tuple[int, int]], dict[str, float | int]]:
+    from faster_whisper.vad import get_speech_timestamps
+
+    options = _faster_whisper_vad_options(
+        threshold=0.5,
+        min_speech_duration_ms=0,
+        max_speech_duration_s=max(8.0, cap_seconds - 1.0),
+        min_silence_duration_ms=500,
+        speech_pad_ms=400,
+    )
+    speech = get_speech_timestamps(audio, options, sampling_rate=SAMPLE_RATE)
+    windows: list[tuple[int, int]] = []
+    current_start: int | None = None
+    current_end: int | None = None
+    for interval in speech:
+        start = max(0, int(interval["start"]))
+        end = min(len(audio), int(interval["end"]))
+        if end <= start:
+            continue
+        if current_start is None or current_end is None:
+            current_start, current_end = start, end
+            continue
+        gap_seconds = (start - current_end) / SAMPLE_RATE
+        span_seconds = (end - current_start) / SAMPLE_RATE
+        if gap_seconds > FASTER_WHISPER_WINDOW_JOIN_GAP_SECONDS or span_seconds > cap_seconds:
+            windows.append((current_start, current_end))
+            current_start, current_end = start, end
+        else:
+            current_end = end
+    if current_start is not None and current_end is not None:
+        windows.append((current_start, current_end))
+    return windows, {
+        "speech_intervals": len(speech),
+        "windows": len(windows),
+        "source_seconds": round(len(audio) / SAMPLE_RATE, 3),
+        "window_audio_seconds": round(sum(end - start for start, end in windows) / SAMPLE_RATE, 3),
+        "max_window_seconds": round(
+            max(((end - start) / SAMPLE_RATE for start, end in windows), default=0.0),
+            3,
+        ),
+    }
+
+
+def _faster_whisper_segment_row(
+    segment: object,
+    *,
+    offset_seconds: float,
+    unit_id: int,
+) -> dict:
+    local_start = float(getattr(segment, "start", 0.0) or 0.0)
+    local_end = float(getattr(segment, "end", local_start) or local_start)
+    return {
+        "start_time": offset_seconds + local_start,
+        "end_time": offset_seconds + max(local_start, local_end),
+        "text": str(getattr(segment, "text", "") or "").strip(),
+        "unit_id": int(unit_id),
+    }
+
+
+def _longest_unpunctuated_span(rows: Iterable[dict]) -> float:
+    longest = 0.0
+    current_start: float | None = None
+    current_end: float | None = None
+    for row in sorted(rows, key=lambda value: (float(value["start_time"]), float(value["end_time"]))):
+        text = str(row.get("text") or "").strip()
+        if current_start is None:
+            current_start = float(row["start_time"])
+        current_end = float(row["end_time"])
+        longest = max(longest, current_end - current_start)
+        if text.endswith(_STRONG_PUNCTUATION):
+            current_start = None
+            current_end = None
+    return longest
+
+
+def _adjacent_duplicate_count(rows: Iterable[dict]) -> int:
+    texts = [str(row.get("text") or "").strip().casefold() for row in rows]
+    return sum(texts[index] == texts[index - 1] for index in range(1, len(texts)) if texts[index])
+
+
+def _faster_whisper_window_needs_fallback(rows: list[dict]) -> bool:
+    if _longest_unpunctuated_span(rows) > FASTER_WHISPER_FALLBACK_SPAN_SECONDS:
+        return True
+    return any(
+        float(row["end_time"]) - float(row["start_time"]) > 15.0
+        and sum(str(row.get("text") or "").count(mark) for mark in _STRONG_PUNCTUATION) < 2
+        for row in rows
+    )
+
+
+def _accept_faster_whisper_fallback(
+    primary: list[dict],
+    fallback: list[dict],
+    *,
+    window_start_seconds: float,
+    window_end_seconds: float,
+) -> tuple[bool, str]:
+    if not fallback:
+        return False, "empty_fallback"
+    if any(
+        float(row["start_time"]) < window_start_seconds - 0.1
+        or float(row["end_time"]) > window_end_seconds + 0.1
+        or float(row["end_time"]) < float(row["start_time"])
+        for row in fallback
+    ):
+        return False, "timestamp_out_of_window"
+    primary_chars = len("".join(str(row.get("text") or "") for row in primary).replace(" ", ""))
+    fallback_chars = len("".join(str(row.get("text") or "") for row in fallback).replace(" ", ""))
+    if primary_chars and fallback_chars < int(primary_chars * 0.5):
+        return False, "text_coverage_drop"
+    primary_text = normalize_search_text(" ".join(str(row.get("text") or "") for row in primary))
+    fallback_text = normalize_search_text(" ".join(str(row.get("text") or "") for row in fallback))
+    if primary_text and fallback_text and SequenceMatcher(None, primary_text, fallback_text).ratio() < 0.35:
+        return False, "text_content_mismatch"
+    primary_span = _longest_unpunctuated_span(primary)
+    fallback_span = _longest_unpunctuated_span(fallback)
+    if fallback_span >= primary_span - 0.25:
+        return False, "no_boundary_improvement"
+    if _adjacent_duplicate_count(fallback) > _adjacent_duplicate_count(primary) + 1:
+        return False, "repetition_regression"
+    return True, "improved_unpunctuated_span"
+
+
+def _detect_language_with_faster_whisper(
+    audio_path: str,
+    model_name: str,
+    device: str,
+    model_dir: str,
+    *,
+    local_files_only: bool = True,
+    probe_seconds: float = 20.0,
+) -> tuple[str, float]:
+    from faster_whisper import WhisperModel
+
+    model_source = resolve_faster_whisper_model_source(model_dir, model_name, local_files_only=local_files_only)
+    fw_device = "cuda" if str(device).startswith("cuda") else "cpu"
+    compute_type = "float16" if fw_device == "cuda" else "int8"
+    with offline_env(local_files_only):
+        model = WhisperModel(model_source, device=fw_device, compute_type=compute_type)
+    audio = load_wav_mono(audio_path)
+    if audio.size == 0:
+        return "", 0.0
+    max_samples = max(1, int(round(probe_seconds * SAMPLE_RATE)))
+    if len(audio) <= max_samples * 2:
+        probes = [audio[:max_samples]]
+    else:
+        max_start = len(audio) - max_samples
+        starts = [
+            0,
+            int(round(max_start * 0.45)),
+            int(round(max_start * 0.80)),
+        ]
+        probes = [audio[start:start + max_samples] for start in starts]
+
+    votes: dict[str, dict[str, float | int]] = {}
+    for probe_audio in probes:
+        try:
+            language, probability, _all_probabilities = model.detect_language(
+                audio=probe_audio,
+                vad_filter=True,
+                vad_parameters=_faster_whisper_vad_options(min_silence_duration_ms=500),
+                language_detection_segments=1,
+                language_detection_threshold=0.5,
+            )
+        except ValueError:
+            continue
+        normalized = str(language or "").strip().casefold()
+        if not normalized:
+            continue
+        vote = votes.setdefault(normalized, {"count": 0, "probability_sum": 0.0})
+        vote["count"] = int(vote["count"]) + 1
+        vote["probability_sum"] = float(vote["probability_sum"]) + float(probability or 0.0)
+    if not votes:
+        return "", 0.0
+    winner, winning_vote = max(
+        votes.items(),
+        key=lambda item: (int(item[1]["count"]), float(item[1]["probability_sum"])),
+    )
+    average_probability = float(winning_vote["probability_sum"]) / max(1, int(winning_vote["count"]))
+    return winner, average_probability
+
+
 def _faster_whisper(
     audio_path: str,
     model_name: str,
@@ -381,26 +691,93 @@ def _faster_whisper(
     compute_type = "float16" if fw_device == "cuda" else "int8"
     with offline_env(local_files_only):
         model = WhisperModel(model_source, device=fw_device, compute_type=compute_type)
-    transcribe_language = None if not language or language == "auto" else language
-    segments_iter, info = model.transcribe(
-        audio_path,
-        language=transcribe_language,
-        task="transcribe",
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-        condition_on_previous_text=True,
-        beam_size=5,
-    )
-    chunks = [
-        {"start_time": float(item.start), "end_time": float(item.end), "text": str(item.text).strip()}
-        for item in segments_iter
-        if str(item.text).strip()
-    ]
+    audio = load_wav_mono(audio_path)
+    windows, window_stats = _build_faster_whisper_windows(audio)
+    active_language = None if not language or language == "auto" else language
+    detected_language = active_language or ""
+    chunks: list[dict] = []
+    fallback_windows: list[int] = []
+    fallback_rejected: list[dict[str, str | int]] = []
+    decode_seconds = 0.0
+    fallback_decode_seconds = 0.0
+    timestamp_clamps = 0
+
+    for unit_id, (start_sample, end_sample) in enumerate(windows):
+        offset_seconds = start_sample / SAMPLE_RATE
+        window_end_seconds = end_sample / SAMPLE_RATE
+        window_audio = audio[start_sample:end_sample]
+        started = time.perf_counter()
+        segments_iter, info = model.transcribe(
+            window_audio,
+            language=active_language,
+            task="transcribe",
+            vad_filter=False,
+            condition_on_previous_text=True,
+            beam_size=5,
+            word_timestamps=True,
+        )
+        primary = [
+            _faster_whisper_segment_row(segment, offset_seconds=offset_seconds, unit_id=unit_id)
+            for segment in segments_iter
+        ]
+        decode_seconds += time.perf_counter() - started
+        primary = [row for row in primary if str(row["text"]).strip()]
+        if not detected_language:
+            detected_language = str(getattr(info, "language", "") or "")
+            if detected_language:
+                active_language = detected_language
+
+        if _faster_whisper_window_needs_fallback(primary):
+            fallback_started = time.perf_counter()
+            fallback_iter, _fallback_info = model.transcribe(
+                window_audio,
+                language=active_language,
+                task="transcribe",
+                vad_filter=True,
+                vad_parameters=_faster_whisper_vad_options(min_silence_duration_ms=500),
+                condition_on_previous_text=True,
+                beam_size=5,
+                word_timestamps=True,
+            )
+            fallback = [
+                _faster_whisper_segment_row(segment, offset_seconds=offset_seconds, unit_id=unit_id)
+                for segment in fallback_iter
+            ]
+            fallback_decode_seconds += time.perf_counter() - fallback_started
+            fallback = [row for row in fallback if str(row["text"]).strip()]
+            accepted, reason = _accept_faster_whisper_fallback(
+                primary,
+                fallback,
+                window_start_seconds=offset_seconds,
+                window_end_seconds=window_end_seconds,
+            )
+            if accepted:
+                primary = fallback
+                fallback_windows.append(unit_id)
+            else:
+                fallback_rejected.append({"unit_id": unit_id, "reason": reason})
+
+        for row in primary:
+            start_time = max(offset_seconds, float(row["start_time"]))
+            end_time = min(window_end_seconds, max(start_time, float(row["end_time"])))
+            if start_time != float(row["start_time"]) or end_time != float(row["end_time"]):
+                timestamp_clamps += 1
+            chunks.append({**row, "start_time": start_time, "end_time": end_time})
+
+    chunks.sort(key=lambda row: (float(row["start_time"]), float(row["end_time"])))
     return chunks, {
         "task": "transcribe",
         "requested_language": language or "auto",
-        "detected_language": str(getattr(info, "language", "") or ""),
+        "detected_language": detected_language,
         "compute_type": compute_type,
+        "word_timestamps": True,
+        "vad_strategy": "contiguous_24s_local_fallback",
+        "window_stats": window_stats,
+        "decode_seconds": round(decode_seconds, 3),
+        "fallback_decode_seconds": round(fallback_decode_seconds, 3),
+        "fallback_windows": fallback_windows,
+        "fallback_rejected": fallback_rejected,
+        "timestamp_clamps": timestamp_clamps,
     }
 
 
@@ -417,30 +794,6 @@ def load_wav_mono(path: str | Path) -> np.ndarray:
     return data.astype(np.float32) / 32768.0
 
 
-def _fixed_bucket_segment_ids(chunks: list[dict], bucket_ms: int = 5000) -> list[int]:
-    ids: list[int] = []
-    for chunk in chunks:
-        if "start_ms" in chunk:
-            start_ms = int(chunk["start_ms"])
-        else:
-            start_ms = int(round(float(chunk.get("start_time", chunk.get("start", 0))) * 1000))
-        ids.append(max(0, start_ms // bucket_ms))
-    return ids
-
-
-def _empty_postprocess_stats() -> dict[str, int]:
-    return {
-        "raw_chunks": 0,
-        "normalized_chunks": 0,
-        "processed_chunks": 0,
-        "dropped_empty_chunks": 0,
-        "merged_chunks": 0,
-        "cross_segment_merges": 0,
-        "semantic_ineligible_chunks": 0,
-        "long_low_info_chunks": 0,
-    }
-
-
 def _empty_chunk_builder_stats() -> dict[str, int]:
     return {
         "raw_items": 0,
@@ -448,9 +801,9 @@ def _empty_chunk_builder_stats() -> dict[str, int]:
         "retrieval_chunks": 0,
         "dropped_empty_items": 0,
         "merged_items": 0,
-        "word_boundary_repairs": 0,
-        "fake_gap_repairs": 0,
+        "cross_unit_merge_blocks": 0,
         "long_chunks": 0,
+        "low_boundary_chunks": 0,
         "semantic_ineligible_chunks": 0,
     }
 
@@ -489,6 +842,8 @@ def build_asr_index(
     task = "transcribe"
     raw_parser_stats: dict[str, int] = {}
     tag_source = ""
+    language_route = ""
+    route_reason = ""
 
     if sidecar_path:
         raw_items = raw_items_from_chunks(load_sidecar(sidecar_path), source="sidecar")
@@ -519,8 +874,6 @@ def build_asr_index(
                 "vad_strategy": vad_strategy,
                 "raw_parser_stats": {},
                 "chunk_builder_stats": empty_chunk_builder_stats,
-                "postprocess_strategy": DEFAULT_ASR_POSTPROCESS_STRATEGY,
-                "postprocess_stats": _empty_postprocess_stats(),
                 "text_profile": asr_text_profile([]),
                 "schema_version": 3,
                 "decode_status": "empty",
@@ -529,12 +882,38 @@ def build_asr_index(
                 "warning": "no audio stream found",
             }
 
-        # Chinese transcription quality: prefer FunASR/Paraformer only when the
-        # request explicitly asks for Chinese, or when FunASR is explicitly chosen.
-        # True language auto needs Whisper's language detection.
         normalized_engine = engine.replace("_", "-").casefold()
-        prefer_funasr = normalized_engine == "funasr" or (normalized_engine == "auto" and requested_language == "zh")
-        if prefer_funasr:
+        route_engine = normalized_engine
+        if normalized_engine == "auto":
+            if _is_auto_language(requested_language):
+                probe_language, probe_probability = _detect_language_with_faster_whisper(
+                    str(audio_path),
+                    model_name,
+                    device,
+                    faster_whisper_model_dir or str(Path(model_dir).parent / "faster-whisper"),
+                    local_files_only=model_local_files_only,
+                )
+                detected_language = probe_language
+                if _is_chinese_language(probe_language):
+                    route_engine = "funasr"
+                else:
+                    route_engine = "faster-whisper"
+                language_route = f"auto:probe={probe_language or 'unknown'}->{route_engine}"
+                route_reason = f"auto language probe probability={probe_probability:.3f}"
+            elif _is_chinese_language(requested_language):
+                route_engine = "funasr"
+                language_route = "auto:explicit-zh->funasr"
+                route_reason = "explicit Chinese ASR language"
+            else:
+                route_engine = "faster-whisper"
+                language_route = f"auto:explicit-{requested_language}->faster-whisper"
+                route_reason = "explicit non-Chinese ASR language"
+
+        decode_language = requested_language
+        if normalized_engine == "auto" and _is_auto_language(requested_language) and detected_language:
+            decode_language = detected_language
+
+        if route_engine == "funasr":
             try:
                 model_chunks = _funasr(
                     str(audio_path),
@@ -552,40 +931,46 @@ def build_asr_index(
                 if _is_sensevoice_model(funasr_model):
                     tag_source = "sensevoice"
                 if (
-                    requested_language == "zh"
+                    detected_language
+                    or requested_language == "zh"
                     or "zh" in funasr_model.casefold()
                     or "paraformer" in funasr_model.casefold()
                 ):
-                    detected_language = "zh"
+                    detected_language = detected_language or "zh"
             except Exception:
-                if engine == "funasr":
+                if normalized_engine == "funasr":
                     raise
-                model_chunks, whisper_metadata = _whisper(
-                    str(audio_path),
-                    model_name,
-                    device,
-                    model_dir,
-                    requested_language,
+                model_chunks, whisper_metadata = _faster_whisper(
+                    audio_path=str(audio_path),
+                    model_name=model_name,
+                    device=device,
+                    model_dir=faster_whisper_model_dir or str(Path(model_dir).parent / "faster-whisper"),
+                    language=decode_language,
                     local_files_only=model_local_files_only,
                 )
-                raw_items = raw_items_from_chunks(model_chunks, source="whisper")
-                used_engine = "whisper"
+                raw_items = raw_items_from_chunks(model_chunks, source="faster_whisper")
+                used_engine = "faster-whisper"
                 task = str(whisper_metadata.get("task") or task)
                 detected_language = str(whisper_metadata.get("detected_language") or "")
-        elif normalized_engine == "faster-whisper":
+                vad_strategy = str(whisper_metadata.get("vad_strategy") or vad_strategy)
+                language_route = language_route or "auto:funasr-fallback->faster-whisper"
+                route_reason = route_reason or "FunASR route failed; fell back to faster-whisper"
+        elif route_engine == "faster-whisper":
             model_chunks, whisper_metadata = _faster_whisper(
-                str(audio_path),
-                model_name,
-                device,
-                faster_whisper_model_dir or str(Path(model_dir).parent / "faster-whisper"),
-                requested_language,
+                audio_path=str(audio_path),
+                model_name=model_name,
+                device=device,
+                model_dir=faster_whisper_model_dir or str(Path(model_dir).parent / "faster-whisper"),
+                language=decode_language,
                 local_files_only=model_local_files_only,
             )
             raw_items = raw_items_from_chunks(model_chunks, source="faster_whisper")
-            raw_items = apply_safe_raw_split(raw_items)
             used_engine = "faster-whisper"
             task = str(whisper_metadata.get("task") or task)
             detected_language = str(whisper_metadata.get("detected_language") or "")
+            vad_strategy = str(whisper_metadata.get("vad_strategy") or vad_strategy)
+            language_route = language_route or f"{used_engine}:{detected_language or requested_language}"
+            route_reason = route_reason or ("explicit language" if requested_language != "auto" else "explicit faster-whisper engine")
         else:
             model_chunks, whisper_metadata = _whisper(
                 str(audio_path),
@@ -599,22 +984,14 @@ def build_asr_index(
             used_engine = "whisper"
             task = str(whisper_metadata.get("task") or task)
             detected_language = str(whisper_metadata.get("detected_language") or "")
+            language_route = language_route or f"{used_engine}:{detected_language or requested_language}"
+            route_reason = route_reason or ("explicit language" if requested_language != "auto" else "explicit whisper engine")
 
     retrieval_chunks, chunk_builder_stats = build_retrieval_chunks(
         raw_items,
         config=RetrievalChunkConfig(),
     )
     chunks = [chunk.to_search_dict() for chunk in retrieval_chunks]
-    postprocess_stats = {
-        "raw_chunks": len(raw_items),
-        "normalized_chunks": chunk_builder_stats["normalized_items"],
-        "processed_chunks": len(chunks),
-        "dropped_empty_chunks": chunk_builder_stats["dropped_empty_items"],
-        "merged_chunks": chunk_builder_stats["merged_items"],
-        "cross_segment_merges": 0,
-        "semantic_ineligible_chunks": chunk_builder_stats["semantic_ineligible_chunks"],
-        "long_low_info_chunks": chunk_builder_stats["long_chunks"],
-    }
 
     if not semantic_enabled:
         if semantic_target is not None:
@@ -681,13 +1058,11 @@ def build_asr_index(
         "task": task,
         "requested_language": requested_language,
         "detected_language": detected_language,
-        "language_route": f"{used_engine}:{detected_language or requested_language}",
-        "route_reason": "explicit language" if requested_language != "auto" else "default auto language",
+        "language_route": language_route or f"{used_engine}:{detected_language or requested_language}",
+        "route_reason": route_reason or ("explicit language" if requested_language != "auto" else "default auto language"),
         "vad_strategy": vad_strategy,
         "raw_parser_stats": raw_parser_stats,
         "chunk_builder_stats": chunk_builder_stats,
-        "postprocess_strategy": DEFAULT_ASR_POSTPROCESS_STRATEGY,
-        "postprocess_stats": postprocess_stats,
         "text_profile": asr_text_profile(chunk.get("text", "") for chunk in chunks),
         "tag_source": tag_source,
         "schema_version": 3,

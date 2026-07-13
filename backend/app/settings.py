@@ -67,9 +67,9 @@ class Settings(BaseSettings):
     face_sample_fps: float = 2.0
     face_provider: str = "cpu"
 
-    asr_engine: str = "funasr"
-    # Used by ASR_ENGINE=whisper or ASR_ENGINE=faster-whisper. The default pairs
-    # with optional faster-whisper turbo; FunASR/SenseVoiceSmall is the default path.
+    asr_engine: str = "auto"
+    # Used by ASR_ENGINE=whisper or ASR_ENGINE=faster-whisper. In auto mode this
+    # is also the lightweight language probe model and the non-Chinese ASR path.
     asr_model: str = "turbo"
     asr_zh_model: str = "iic/SenseVoiceSmall"
     asr_device: str = "auto"

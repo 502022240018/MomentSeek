@@ -175,7 +175,6 @@ def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
             "raw_items": 0,
             "retrieval_chunks": 0,
             "chunk_builder_stats": {},
-            "postprocess_stats": {},
             "text_profile": {},
             "decode_status": "empty",
             "semantic_status": "disabled",

@@ -56,4 +56,4 @@ def test_sidecar_asr_index_postprocesses_ascii_fragments_and_preserves_schema(tm
         assert data["embedding_chunk_indices"].tolist() == [0, 1]
     assert result["raw_chunks"] == 3
     assert result["chunks"] == 2
-    assert result["postprocess_stats"]["merged_chunks"] == 1
+    assert result["chunk_builder_stats"]["merged_items"] == 1
