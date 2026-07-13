@@ -124,6 +124,7 @@ staging/prod 验证时应把这些字段与 `docs/DEPLOYMENT.md` 中的 release 
 | `DELETE` | `/api/videos/{video_id}` | `main.py::delete_video` | 删除视频、索引、缩略图、任务 | `api.ts::deleteVideo` | `db.py`, runtime 清理 |
 | `GET` | `/api/videos/{video_id}/media` | `main.py::video_media` | 原视频流式播放 | 播放器/结果卡 | `runtime/uploads` |
 | `GET` | `/api/videos/{video_id}/clip` | `main.py::video_clip` | 生成/返回命中时间段 clip | 播放器/结果卡 | `media.py`, `runtime/clips` |
+| `GET` | `/api/videos/{video_id}/frame` | `main.py::video_frame` | 按时间生成/返回 Visual 最相似命中帧 | 搜索结果预览图 | `media.py`, `runtime/thumbnails` |
 | `POST` | `/api/videos/{video_id}/index` | `main.py::create_index_job` | 创建索引任务 | `api.ts::indexVideo` | `schemas.py`, `db.py`, `worker.py` |
 | `GET` | `/api/jobs` | `main.py::list_jobs` | 任务列表，可按 video 过滤 | `api.ts::jobs` | `db.py` |
 | `GET` | `/api/jobs/{job_id}` | `main.py::get_job` | 任务详情、失败信息、日志上下文 | UI 轮询/详情 | `db.py` |

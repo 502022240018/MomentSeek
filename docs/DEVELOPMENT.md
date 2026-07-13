@@ -28,6 +28,37 @@ deploy/env/dev.cuda.example
 
 Docker GPU 演示或服务器 runtime 本地接管见 `docs/LOCAL_GPU_MIGRATION.md`。该流程把服务器数据同步到 `runtime-server/`，避免覆盖本地开发用 `runtime/`。
 
+## 本地 Docker 开发模式
+
+本地频繁调试时使用 `compose.dev.yml`，不要每次都运行发布式 `--build`。开发模式沿用已有镜像里的 Python/Node 依赖，但把宿主机源码挂进容器：
+
+```text
+backend/app -> /app/backend/app
+frontend/dist -> /app/backend/app/static
+```
+
+后端 Python 修改会由 `uvicorn --reload` 自动重载；前端修改后在宿主机运行一次 `npm run build`，刷新浏览器即可看到新的静态文件。只有 requirements、Dockerfile、系统依赖或正式发布镜像变化时，才需要重新 `--build`。
+
+CUDA 本地开发启动：
+
+```powershell
+docker compose -f compose.yml -f compose.cuda.yml -f compose.dev.yml --env-file .env up -d --no-build app
+```
+
+CPU 本地开发启动：
+
+```powershell
+docker compose -f compose.yml -f compose.dev.yml --env-file .env up -d --no-build app
+```
+
+前端静态文件更新：
+
+```powershell
+Push-Location frontend; npm run build; Pop-Location
+```
+
+如果浏览器看起来还是旧界面，先确认本地容器是否使用了 `compose.dev.yml`，再确认 `frontend/dist` 的构建时间和浏览器缓存。
+
 ## Windows 快速启动
 
 在仓库根目录运行。只有 `.env` 不存在时才复制示例文件；如果 `.env` 已存在，不要直接覆盖，先比较当前 `.env` 和目标 example，再手动合并需要的差异。
@@ -130,7 +161,7 @@ dev.cpu / dev.cuda -> deploy/models/dev-full.models.json
 models/
 ```
 
-本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。ASR 默认是 `ASR_ENGINE=funasr` + `ASR_ZH_MODEL=iic/SenseVoiceSmall` + `ASR_VAD_STRATEGY=silero_12s`，本地目录约定为 `models/funasr/iic/SenseVoiceSmall`，并需要 Python 依赖 `silero-vad`。`models/funasr/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch` 仍保留为 `ASR_VAD_STRATEGY=funasr_fsmn` fallback；`ct-punc` 用于非 SenseVoice FunASR 路径。需要更强多语言或更好效果时，可切到 `ASR_ENGINE=faster-whisper` + `ASR_MODEL=turbo`，本地 snapshot 目录约定为 `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。其他模型条目按 `docs/MODELS.md` 的目录约定准备。
+本地开发不要求每次启动都重新下载。bootstrap 会优先校验已有缓存，并写出 models lock；缺失 Hugging Face 模型时，只有显式传入 `-DownloadModels` 或 `--download` 才会尝试下载。ASR 默认是 `ASR_ENGINE=auto` + `ASR_MODEL=turbo` + `ASR_ZH_MODEL=iic/SenseVoiceSmall` + `ASR_VAD_STRATEGY=silero_12s`：先用 faster-whisper turbo 做轻量语言 probe，中文/方言走 SenseVoiceSmall，非中文走 faster-whisper turbo。SenseVoice 本地目录约定为 `models/funasr/iic/SenseVoiceSmall`，并需要 Python 依赖 `silero-vad`；faster-whisper turbo 本地 snapshot 目录约定为 `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。`models/funasr/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch` 仍保留为 `ASR_VAD_STRATEGY=funasr_fsmn` fallback；`ct-punc` 用于非 SenseVoice FunASR 路径。其他模型条目按 `docs/MODELS.md` 的目录约定准备。
 
 ## 启动后端
 

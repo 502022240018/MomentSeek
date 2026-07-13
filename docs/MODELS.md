@@ -28,7 +28,7 @@ scripts/bootstrap_dev.ps1 -Profile dev.cpu -DownloadModels
 scripts/bootstrap_dev.sh dev.cpu --download
 ```
 
-没有 `-DownloadModels` 或 `--download` 时，校验脚本只检查已有缓存并写 lock，不主动下载。即使传入下载开关，非 Hugging Face 条目也可能需要先按库要求准备依赖或缓存。ASR 默认使用 `ASR_ENGINE=funasr` + `ASR_ZH_MODEL=iic/SenseVoiceSmall` + `ASR_VAD_STRATEGY=silero_12s`，本地目录约定是 `models/funasr/iic/SenseVoiceSmall`，并通过 `silero-vad` 做外置 VAD。`fsmn-vad` 保留为 `ASR_VAD_STRATEGY=funasr_fsmn` fallback；`ct-punc` 用于非 SenseVoice FunASR 路径。需要更强多语言或更好效果时，可切到 `ASR_ENGINE=faster-whisper` + `ASR_MODEL=turbo`，本地 snapshot 目录约定是 `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。
+没有 `-DownloadModels` 或 `--download` 时，校验脚本只检查已有缓存并写 lock，不主动下载。即使传入下载开关，非 Hugging Face 条目也可能需要先按库要求准备依赖或缓存。ASR 默认使用 `ASR_ENGINE=auto` + `ASR_MODEL=turbo` + `ASR_ZH_MODEL=iic/SenseVoiceSmall` + `ASR_VAD_STRATEGY=silero_12s`：先用 faster-whisper turbo 做轻量语言 probe，中文/方言走 SenseVoiceSmall，非中文走 faster-whisper turbo。SenseVoice 本地目录约定是 `models/funasr/iic/SenseVoiceSmall`，并通过 `silero-vad` 做外置 VAD；faster-whisper turbo 本地 snapshot 目录约定是 `models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo`。`fsmn-vad` 保留为 `ASR_VAD_STRATEGY=funasr_fsmn` fallback；`ct-punc` 用于非 SenseVoice FunASR 路径。
 
 ## Ascend Staging/Prod 模型
 
@@ -75,7 +75,7 @@ models[].required
 ```text
 visual：SigLIP2、ChineseCLIP 或 OpenCLIP，用于文本/图片搜画面。
 face：InsightFace buffalo_l / ArcFace，用于参考图和人物库检索。
-asr：默认 SenseVoiceSmall/FunASR，用于中文和多语种语音转写检索；可选 faster-whisper turbo 作为多语言/高效果备选。
+asr：默认 auto 路由；中文/方言使用 SenseVoiceSmall/FunASR，英文/西语/葡语等使用 faster-whisper turbo。
 ocr：RapidOCR PP-OCRv4，用于画面文字检索。
 semantic：sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2，用于 ASR/OCR 语义检索。
 ```

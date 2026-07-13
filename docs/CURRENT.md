@@ -1,6 +1,6 @@
 # MomentSeek 当前状态
 
-更新时间：2026-07-09
+更新时间：2026-07-13
 
 ## 项目位置
 
@@ -43,15 +43,17 @@ NPU_ENABLED=false
 VISUAL_HF_CACHE_DIR=/app/runtime/hf_cache
 ```
 
-2026-07-07 验证结果：
+2026-07-13 验证结果：
 
 ```text
 本地 /api/health：status=ok, env_profile=dev.cuda, cuda_enabled=true
-本地 /api/videos：8 个视频
-本地 ASR 搜索“新疆美食”：返回命中
-本地 visual 搜索“烤包子”：返回命中
-公网 /api/health：status=ok
-公网 /api/videos：8 个视频
+本地 /api/videos：9 个视频，全部 ready，全部有 ASR v3 索引
+本地 /api/jobs：active_count=0
+ASR NPZ：9/9 可读取 chunk_times_ms、texts、384-d embeddings、embedding_chunk_indices
+ASR API 搜索：6 条中文、西语和英文查询的目标视频均为 Top-1
+后端测试：149 passed（已删除 6 个仅覆盖旧 asr_postprocess/旧报告的死路径测试）
+最终回归：runtime-server/analysis/asr_formal_regression_20260713_final/
+最终听查/检索评估：runtime-server/analysis/asr_formal_review_eval_20260713_final_v2/
 ```
 
 当前 quick tunnel 地址是临时地址，失效后需要重新启动 cloudflared：
@@ -98,7 +100,7 @@ face_provider = cann
 face_sample_fps = 1.0
 face_decode_height = 720
 
-asr_engine = funasr
+asr_engine = auto
 asr_zh_model = iic/SenseVoiceSmall
 asr_model = turbo
 asr_language = auto
@@ -140,16 +142,22 @@ query -> SigLIP2 query embedding
 
 ```text
 audio_extract
--> SenseVoiceSmall + Silero 12s external VAD by default
-   or faster-whisper turbo + builtin VAD when explicitly selected
+-> auto language probe with faster-whisper turbo
+   短视频单窗口；长视频在开头/中段/后段做 3 窗口投票
+   -> zh/yue/cmn: SenseVoiceSmall + Silero 12s external VAD
+   -> en/es/pt/etc: faster-whisper turbo + 24s contiguous original-audio windows
 -> model_transcribe
--> raw_transcript parser
--> safe raw split for timestamp/punctuation or long raw items
--> retrieval_chunk_builder
-   final merge window = 8/12/15 seconds
+   SenseVoice：原始文本优先，timestamp 只负责选择安全边界
+   faster-whisper：异常无句末窗口才局部 builtin-VAD fallback
+-> unit-aware retrieval_chunk_builder
+   不跨 decode window 合并，合并后最长 12s，不硬切模型完整长句
+-> semantic eligibility
+   纯语气/连接词、过短项、明显不可信文字/时长比不生成 embedding
 -> MiniLM semantic embedding
 -> asr.npz
 ```
+
+2026-07-13 已使用上述正式路径重建本地全部 9 个视频的 ASR 索引。最终路由：5 个中文长视频和 1 个方言视频走 SenseVoice，世界杯广告与比赛集锦走英文 faster-whisper，球星牛奶广告走西语 faster-whisper。书籍纪录片曾因只探测片头 30s 被误判为英文，改成多位置投票后已重建为 `funasr / zh`。
 
 默认 `asr.npz` 不保存 raw transcript，只保留检索需要字段。需要排查 ASR 切分问题时，开启 `ASR_DEBUG_ARTIFACTS=true` 和 `ASR_SAVE_RAW_TRANSCRIPT=true`，debug 文件写入 `runtime/indexes/{video_id}/debug/`。
 
@@ -173,7 +181,7 @@ Quick tunnel 域名不是固定的。前端出现 `failed to fetch` 时，先检
 ## 当前注意事项
 
 - 多人开发与可复制部署方案已设计，第一阶段新增 dev.cpu/dev.cuda/staging.ascend/prod.ascend profile 和 manifest。
-- 当前 metadata/schema 正在切到 v3；部署到服务器后必须安排重跑索引。
+- 本地 9 个视频的 ASR 已全部重跑为 schema v3；其他机器部署后仍需对各自旧索引重跑对应通道。
 - ASR/OCR semantic 索引是可选增强；缺失时会退回 lexical。
 - Visual MaxSim 提高短瞬间召回，但多视频搜索时可能增加误召，见 `docs/ISSUES_AND_ROADMAP.md` 的 `RQ-001`。
 - 首次搜索加载 SigLIP2 可能较慢。
