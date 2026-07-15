@@ -100,6 +100,40 @@ def run(stage: str, job_id: str) -> dict:
             vad_strategy=str(options.get("asr_vad_strategy", settings.asr_vad_strategy)),
         )
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
+        if bool(options.get("asr_speaker_enabled", False)):
+            from app.indexing.speaker import build_speaker_index
+
+            speaker_result = build_speaker_index(
+                video_path=video_path,
+                asr_path=str(video_index_dir / "asr.npz"),
+                output_path=str(video_index_dir / "speaker.npz"),
+                working_dir=str(working_dir),
+                model_repo=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_repo)),
+                model_cache_dir=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_cache_dir)),
+                device=settings.speaker_device,
+            )
+            write_stage_manifest(
+                "speaker", index_dir=video_index_dir, video=video,
+                options=options, settings=settings, result=speaker_result,
+            )
+            result["speaker"] = speaker_result
+        return result
+    if stage == "speaker":
+        from app.indexing.speaker import build_speaker_index
+
+        asr_path = video_index_dir / "asr.npz"
+        if not asr_path.exists():
+            raise RuntimeError("Speaker 索引依赖 ASR，请先构建或在同一任务中选择 ASR")
+        result = build_speaker_index(
+            video_path=video_path,
+            asr_path=str(asr_path),
+            output_path=str(video_index_dir / "speaker.npz"),
+            working_dir=str(working_dir),
+            model_repo=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_repo)),
+            model_cache_dir=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_cache_dir)),
+            device=settings.speaker_device,
+        )
+        write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result
     if stage == "ocr":
         from app.indexing.ocr import build_ocr_index
@@ -137,7 +171,7 @@ def run(stage: str, job_id: str) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=["visual", "face", "asr", "ocr"])
+    parser.add_argument("stage", choices=["visual", "face", "asr", "speaker", "ocr"])
     parser.add_argument("job_id")
     arguments = parser.parse_args()
     result = run(arguments.stage, arguments.job_id)

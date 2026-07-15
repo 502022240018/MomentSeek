@@ -125,6 +125,58 @@ def test_health_endpoint_serializes_release_manifest_metadata(monkeypatch, tmp_p
     assert body["npu_device_id"] == 0
 
 
+def test_create_index_job_queues_only_requested_modalities(monkeypatch, tmp_path):
+    import app.main as main
+
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        indexer_mode="process_exit",
+    )
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    video_path = settings.upload_dir / "video-1.mp4"
+    video_path.write_bytes(b"fake")
+    catalog.create_video({
+        "id": "video-1",
+        "name": "demo.mp4",
+        "file_path": str(video_path),
+        "duration": 10.0,
+        "fps": 25.0,
+        "width": 1920,
+        "height": 1080,
+        "status": "ready",
+    })
+    catalog.update_video("video-1", indexed_modalities=["face", "visual"])
+    launched: list[str] = []
+    monkeypatch.setattr(main, "settings", settings)
+    monkeypatch.setattr(main, "catalog", catalog)
+    monkeypatch.setattr(main, "launch_job", lambda job_id: launched.append(job_id))
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/videos/video-1/index",
+            json={
+                "modalities": ["asr", "ocr", "asr"],
+                "asr_model": "turbo",
+                "asr_language": "auto",
+                "ocr_sample_fps": 1.0,
+            },
+        )
+
+    assert response.status_code == 202
+    job = response.json()
+    assert job["modalities"] == ["asr", "ocr"]
+    assert job["options"] == {
+        "ocr_sample_fps": 1.0,
+        "asr_model": "turbo",
+        "asr_language": "auto",
+    }
+    assert launched == [job["id"]]
+    assert catalog.get_video("video-1")["indexed_modalities"] == ["face", "visual"]
+
+
 def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
     import app.indexing.asr as asr
     import app.stage_runner as stage_runner

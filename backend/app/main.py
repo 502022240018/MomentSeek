@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import time
 import uuid
@@ -20,8 +21,12 @@ from app import __version__
 from app.db import Catalog
 from app.deployment import build_deployment_info
 from app.media import export_preview_clip, extract_video_frame, probe_video
-from app.schemas import HealthResponse, IndexRequest, VideoRenameRequest
+from app.schemas import (
+    EntityUpdateRequest, HealthResponse, IndexRequest, SpeakerUpdateRequest, UtteranceUpdateRequest,
+    VideoRenameRequest, VoiceOnlyEntityRequest, VoiceSampleRequest, VoiceSearchRequest,
+)
 from app.search import SearchEngine
+from app.speaker_service import video_speakers, voice_search, voice_search_vectors
 from app.settings import get_settings
 from app.worker import launch_job, subprocess_environment
 
@@ -180,7 +185,10 @@ async def upload_video(
 
 @app.get("/api/videos")
 def list_videos() -> list[dict]:
-    return catalog.list_videos()
+    videos = catalog.list_videos()
+    for video in videos:
+        video["speaker_indexed"] = (settings.index_dir / video["id"] / "speaker.npz").exists()
+    return videos
 
 
 @app.get("/api/videos/{video_id}")
@@ -189,6 +197,7 @@ def get_video(video_id: str) -> dict:
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
     video["jobs"] = catalog.list_jobs(video_id)
+    video["speaker_indexed"] = (settings.index_dir / video_id / "speaker.npz").exists()
     return video
 
 
@@ -229,6 +238,89 @@ def video_media(video_id: str):
         filename=video["name"],
         content_disposition_type="inline",
     )
+
+
+@app.get("/api/videos/{video_id}/speakers")
+def get_video_speakers(video_id: str) -> dict:
+    if not catalog.get_video(video_id):
+        raise HTTPException(status_code=404, detail="视频不存在")
+    try:
+        return video_speakers(settings.index_dir, catalog, video_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/api/videos/{video_id}/speakers/{track_id}")
+def update_video_speaker(video_id: str, track_id: int, request: SpeakerUpdateRequest) -> dict:
+    if not catalog.get_video(video_id):
+        raise HTTPException(status_code=404, detail="视频不存在")
+    catalog.upsert_video_speaker(video_id, track_id, **request.model_dump())
+    return get_video_speakers(video_id)
+
+
+@app.patch("/api/videos/{video_id}/utterances/{utterance_index}")
+def update_video_utterance(video_id: str, utterance_index: int, request: UtteranceUpdateRequest) -> dict:
+    if not catalog.get_video(video_id):
+        raise HTTPException(status_code=404, detail="视频不存在")
+    catalog.upsert_utterance_override(
+        video_id, utterance_index, request.corrected_track_id, request.searchable
+    )
+    return get_video_speakers(video_id)
+
+
+@app.post("/api/voice-search")
+def search_voice(request: VoiceSearchRequest) -> dict:
+    try:
+        results = voice_search(
+            settings.index_dir, catalog,
+            query_video_id=request.query_video_id,
+            query_utterance_index=request.query_utterance_index,
+            video_ids=request.video_ids,
+            limit=request.limit,
+        )
+    except (FileNotFoundError, ValueError, IndexError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"count": len(results), "results": results}
+
+
+@app.post("/api/voice-search/upload")
+async def search_voice_upload(
+    reference: UploadFile = File(...),
+    video_ids: str | None = Form(default=None),
+    limit: int = Form(default=50),
+) -> dict:
+    from app.indexing.speaker import encode_voice_query
+
+    source_path = settings.query_dir / f"{uuid.uuid4().hex}{_safe_suffix(reference.filename, '.wav')}"
+    wav_path = source_path.with_suffix(".voice.wav")
+    await run_in_threadpool(_save_upload, reference, source_path)
+    try:
+        process = await run_in_threadpool(
+            subprocess.run,
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source_path),
+             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav_path)],
+            capture_output=True, text=True,
+        )
+        if process.returncode != 0:
+            raise ValueError(process.stderr.strip() or "无法读取上传声音")
+        vectors = await run_in_threadpool(
+            encode_voice_query, str(wav_path),
+            model_repo=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_repo)),
+            model_cache_dir=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_cache_dir)),
+            device=settings.speaker_device,
+        )
+        results = await run_in_threadpool(
+            voice_search_vectors, settings.index_dir, catalog,
+            query_vectors=vectors,
+            video_ids=json.loads(video_ids) if video_ids else None,
+            limit=max(1, min(200, limit)),
+        )
+        return {"query_samples": len(vectors), "count": len(results), "results": results}
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        source_path.unlink(missing_ok=True)
+        wav_path.unlink(missing_ok=True)
 
 
 @app.get("/api/videos/{video_id}/clip")
@@ -319,6 +411,7 @@ def create_index_job(video_id: str, request: IndexRequest = Body(default_factory
             "asr_engine": request.asr_engine,
             "asr_model": request.asr_model,
             "asr_language": request.asr_language,
+            "asr_speaker_enabled": request.asr_speaker_enabled,
         }.items() if value is not None
     }
     for suffix in ("json", "srt", "vtt"):
@@ -392,10 +485,103 @@ def list_entities() -> list[dict]:
     return catalog.list_entities()
 
 
+@app.get("/api/entities/{entity_id}")
+def get_entity(entity_id: str) -> dict:
+    entity = catalog.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="人物不存在")
+    entity["voice_samples"] = catalog.list_voice_samples(entity_id)
+    return entity
+
+
+@app.patch("/api/entities/{entity_id}")
+def rename_entity(entity_id: str, request: EntityUpdateRequest) -> dict:
+    try:
+        if not catalog.rename_entity(entity_id, request.name):
+            raise HTTPException(status_code=404, detail="人物不存在")
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="该人物名称已存在") from exc
+    return get_entity(entity_id)
+
+
+@app.delete("/api/entities/{entity_id}")
+def delete_entity(entity_id: str) -> dict:
+    entity = catalog.get_entity(entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="人物不存在")
+    paths = [entity.get("reference_path"), entity.get("embedding_path")]
+    paths.extend(sample.get("embedding_path") for sample in catalog.list_voice_samples(entity_id))
+    if not catalog.delete_entity(entity_id):
+        raise HTTPException(status_code=404, detail="人物不存在")
+    for value in paths:
+        if value:
+            Path(value).unlink(missing_ok=True)
+    shutil.rmtree(settings.app_data_dir / "entities" / entity_id, ignore_errors=True)
+    return {"status": "deleted", "id": entity_id}
+
+
+@app.post("/api/entities/voice-only", status_code=201)
+def create_voice_only_entity(request: VoiceOnlyEntityRequest) -> dict:
+    try:
+        return catalog.create_entity({
+            "id": uuid.uuid4().hex, "name": request.name,
+            "reference_path": "", "embedding_path": None,
+        })
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="该人物名称已存在") from exc
+
+
+@app.get("/api/entities/{entity_id}/voice-samples")
+def list_entity_voice_samples(entity_id: str) -> list[dict]:
+    if not catalog.get_entity(entity_id):
+        raise HTTPException(status_code=404, detail="人物不存在")
+    samples = catalog.list_voice_samples(entity_id)
+    for sample in samples:
+        if sample.get("source_video_id") is not None and sample.get("source_utterance_index") is not None:
+            try:
+                view = video_speakers(settings.index_dir, catalog, sample["source_video_id"])
+                utterance = next(
+                    (item for item in view["utterances"] if item["index"] == int(sample["source_utterance_index"])),
+                    None,
+                )
+                if utterance:
+                    sample["clip_url"] = utterance["clip_url"]
+                    sample["text"] = utterance["text"]
+            except (FileNotFoundError, IndexError, ValueError):
+                pass
+    return samples
+
+
+@app.post("/api/entities/{entity_id}/voice-samples", status_code=201)
+def add_entity_voice_sample(entity_id: str, request: VoiceSampleRequest) -> dict:
+    if not catalog.get_entity(entity_id):
+        raise HTTPException(status_code=404, detail="人物不存在")
+    path = settings.index_dir / request.video_id / "speaker.npz"
+    try:
+        from app.indexing.speaker import load_speaker_index
+        data = load_speaker_index(path)
+        vector = data["utterance_embeddings"][request.utterance_index].astype(np.float32)
+    except (FileNotFoundError, IndexError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="声音片段不存在") from exc
+    sample_id = uuid.uuid4().hex
+    embedding_path = settings.app_data_dir / "entities" / entity_id / "voice" / f"{sample_id}.npz"
+    embedding_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(embedding_path, embedding=vector)
+    sample = catalog.create_voice_sample({
+        "id": sample_id, "entity_id": entity_id, "source_type": "video_utterance",
+        "source_video_id": request.video_id, "source_utterance_index": request.utterance_index,
+        "audio_path": None, "embedding_path": str(embedding_path),
+        "embedding_space": "3dspeaker-campplus-zh-en-192-v1",
+    })
+    if request.bind_track_id is not None:
+        catalog.bind_speaker_identity(request.video_id, request.bind_track_id, entity_id)
+    return sample
+
+
 @app.get("/api/entities/{entity_id}/reference")
 def entity_reference(entity_id: str):
     entity = catalog.get_entity(entity_id)
-    if not entity or not Path(entity["reference_path"]).exists():
+    if not entity or not entity.get("reference_path") or not Path(entity["reference_path"]).is_file():
         raise HTTPException(status_code=404, detail="人物参考图不存在")
     return FileResponse(entity["reference_path"], content_disposition_type="inline")
 

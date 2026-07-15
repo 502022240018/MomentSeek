@@ -43,6 +43,39 @@ CREATE TABLE IF NOT EXISTS entities (
   embedding_path TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS video_speakers (
+  video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  track_id INTEGER NOT NULL,
+  display_name TEXT,
+  representative_utterance_index INTEGER,
+  hidden INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(video_id, track_id)
+);
+CREATE TABLE IF NOT EXISTS utterance_overrides (
+  video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  utterance_index INTEGER NOT NULL,
+  corrected_track_id INTEGER,
+  searchable INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(video_id, utterance_index)
+);
+CREATE TABLE IF NOT EXISTS speaker_identity_bindings (
+  video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  track_id INTEGER NOT NULL,
+  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(video_id, track_id)
+);
+CREATE TABLE IF NOT EXISTS voice_samples (
+  id TEXT PRIMARY KEY,
+  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  source_type TEXT NOT NULL,
+  source_video_id TEXT,
+  source_utterance_index INTEGER,
+  audio_path TEXT,
+  embedding_path TEXT NOT NULL,
+  embedding_space TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -167,7 +200,10 @@ class Catalog:
 
     def list_entities(self) -> list[dict]:
         with self.connect() as connection:
-            rows = connection.execute("SELECT * FROM entities ORDER BY name").fetchall()
+            rows = connection.execute(
+                """SELECT e.*, COUNT(v.id) AS voice_sample_count FROM entities e
+                   LEFT JOIN voice_samples v ON v.entity_id=e.id GROUP BY e.id ORDER BY e.name"""
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def get_entity(self, entity_id: str) -> dict | None:
@@ -175,10 +211,96 @@ class Catalog:
             row = connection.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
         return dict(row) if row else None
 
+    def rename_entity(self, entity_id: str, name: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute("UPDATE entities SET name=? WHERE id=?", (name, entity_id))
+            return cursor.rowcount > 0
+
+    def delete_entity(self, entity_id: str) -> bool:
+        # Foreign keys are not enabled on every legacy connection, so delete
+        # dependent mutable records explicitly.
+        with self.connect() as connection:
+            connection.execute("DELETE FROM speaker_identity_bindings WHERE entity_id=?", (entity_id,))
+            connection.execute("DELETE FROM voice_samples WHERE entity_id=?", (entity_id,))
+            cursor = connection.execute("DELETE FROM entities WHERE id=?", (entity_id,))
+            return cursor.rowcount > 0
+
     def find_entity_in_text(self, text: str) -> dict | None:
         lowered = text.casefold()
         matches = [entity for entity in self.list_entities() if entity["name"].casefold() in lowered]
         return max(matches, key=lambda item: len(item["name"]), default=None)
+
+    def speaker_overlays(self, video_id: str) -> dict:
+        with self.connect() as connection:
+            speakers = connection.execute(
+                "SELECT * FROM video_speakers WHERE video_id=?", (video_id,)
+            ).fetchall()
+            utterances = connection.execute(
+                "SELECT * FROM utterance_overrides WHERE video_id=?", (video_id,)
+            ).fetchall()
+            bindings = connection.execute(
+                "SELECT * FROM speaker_identity_bindings WHERE video_id=?", (video_id,)
+            ).fetchall()
+        return {
+            "speakers": {int(row["track_id"]): dict(row) for row in speakers},
+            "utterances": {int(row["utterance_index"]): dict(row) for row in utterances},
+            "bindings": {int(row["track_id"]): dict(row) for row in bindings},
+        }
+
+    def upsert_video_speaker(self, video_id: str, track_id: int, **values) -> None:
+        display_name = values.get("display_name")
+        representative = values.get("representative_utterance_index")
+        hidden = 1 if values.get("hidden", False) else 0
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO video_speakers(video_id,track_id,display_name,representative_utterance_index,hidden)
+                   VALUES(?,?,?,?,?) ON CONFLICT(video_id,track_id) DO UPDATE SET
+                   display_name=COALESCE(excluded.display_name,video_speakers.display_name),
+                   representative_utterance_index=COALESCE(excluded.representative_utterance_index,video_speakers.representative_utterance_index),
+                   hidden=excluded.hidden""",
+                (video_id, track_id, display_name, representative, hidden),
+            )
+
+    def upsert_utterance_override(
+        self, video_id: str, utterance_index: int, corrected_track_id: int | None, searchable: bool = True
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO utterance_overrides(video_id,utterance_index,corrected_track_id,searchable)
+                   VALUES(?,?,?,?) ON CONFLICT(video_id,utterance_index) DO UPDATE SET
+                   corrected_track_id=excluded.corrected_track_id,searchable=excluded.searchable""",
+                (video_id, utterance_index, corrected_track_id, 1 if searchable else 0),
+            )
+
+    def bind_speaker_identity(self, video_id: str, track_id: int, entity_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO speaker_identity_bindings(video_id,track_id,entity_id) VALUES(?,?,?)
+                   ON CONFLICT(video_id,track_id) DO UPDATE SET entity_id=excluded.entity_id""",
+                (video_id, track_id, entity_id),
+            )
+
+    def create_voice_sample(self, record: dict) -> dict:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO voice_samples(
+                   id,entity_id,source_type,source_video_id,source_utterance_index,audio_path,embedding_path,embedding_space
+                   ) VALUES(:id,:entity_id,:source_type,:source_video_id,:source_utterance_index,:audio_path,:embedding_path,:embedding_space)""",
+                record,
+            )
+        return self.get_voice_sample(record["id"])
+
+    def get_voice_sample(self, sample_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM voice_samples WHERE id=?", (sample_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_voice_samples(self, entity_id: str) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM voice_samples WHERE entity_id=? ORDER BY created_at", (entity_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _decode_video(row: sqlite3.Row) -> dict:

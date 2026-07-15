@@ -20,3 +20,6 @@ eval/visual/**/*.local.json
 eval/visual/**/*.local.jsonl
 eval/visual/**/*.local.ps1
 eval/visual/outputs/
+eval/speaker/**/*.local.json
+eval/speaker/outputs/
+eval/speaker/audio/

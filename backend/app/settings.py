@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     # Hugging Face. Pre-cache/mount the model, or set this false for local dev.
     asr_semantic_local_files_only: bool = True
 
+    speaker_device: str = "cuda"
+    speaker_model_repo: str = "3D-Speaker"
+    speaker_model_cache_dir: str = "3dspeaker-cache"
+
     ocr_engine: str = "rapidocr"
     ocr_device: str = "auto"
     ocr_version: str = "PP-OCRv6"
@@ -138,6 +142,7 @@ class Settings(BaseSettings):
             self.clip_cache_dir,
             self.frame_cache_dir,
             self.query_dir,
+            self.resolve_path(self.app_model_dir / self.speaker_model_cache_dir),
             self.resolve_path(self.visual_hf_cache_dir),
         ):
             directory.mkdir(parents=True, exist_ok=True)

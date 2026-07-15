@@ -17,3 +17,12 @@ sentence-transformers==3.3.1
 rapidocr==3.9.0
 opencc-python-reimplemented==0.1.7
 pypinyin==0.54.0
+# 3D-Speaker diarization and CAM++ voice embedding runtime
+addict==2.4.0
+simplejson==4.1.1
+sortedcontainers==2.4.0
+fastcluster==1.3.0
+umap-learn==0.5.12
+hdbscan==0.8.44
+pyannote.audio==3.3.2
+datasets>=4.4,<6

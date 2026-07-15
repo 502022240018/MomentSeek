@@ -110,6 +110,18 @@ def channel_manifest(
         if result.get("tag_source"):
             payload["tag_source"] = str(result["tag_source"])
         return payload
+    if stage == "speaker":
+        return {
+            "file": "speaker.npz",
+            "schema_version": 1,
+            "diarization_model": str(result.get("diarization_model") or "modelscope/3D-Speaker"),
+            "voice_embedding_model": str(result.get("embedding_model") or "3D-Speaker CAM++"),
+            "embedding_space": str(result.get("embedding_space") or "3dspeaker-campplus-zh-en-192-v1"),
+            "embedding_normalized": True,
+            "utterances": int(result.get("utterances") or 0),
+            "tracks": int(result.get("tracks") or 0),
+            "decode_status": "complete",
+        }
     if stage == "ocr":
         semantic_model = settings.asr_semantic_model
         return {

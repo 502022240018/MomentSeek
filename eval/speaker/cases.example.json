@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "dialogue_zh_001",
+      "media_path": "C:/path/to/video.mp4",
+      "start_seconds": 0,
+      "end_seconds": 120,
+      "language": "zh",
+      "scenario": ["dialogue", "two_or_more_speakers"],
+      "truth_rttm": null
+    }
+  ]
+}

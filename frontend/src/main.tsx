@@ -1,32 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, Entity, Job, SearchResult, Video } from "./api";
+import { api, Entity, Job, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
+import {
+  defaultIndexConfiguration,
+  IndexConfiguration,
+  IndexOptionsPanel,
+  indexActionLabel,
+  toIndexOptions,
+  validateIndexConfiguration,
+} from "./indexing";
 import "./styles.css";
 
 type Page = "overview" | "indexes" | "assets" | "entities" | "search";
-type VisualSegmentPresetKey = "fixed" | "general" | "fast-cut" | "talking-head" | "custom";
-type VisualShotDetector = "simple" | "pyscenedetect_content" | "pyscenedetect_adaptive";
-
-const visualShotDetectorLabels: Record<VisualShotDetector, string> = {
-  simple: "Simple 帧差",
-  pyscenedetect_content: "PySceneDetect Content",
-  pyscenedetect_adaptive: "PySceneDetect Adaptive",
-};
-
-const visualSegmentPresets: Record<VisualSegmentPresetKey, {
-  label: string;
-  strategy: "fixed" | "shot";
-  detector: VisualShotDetector;
-  minSeconds: number;
-  maxSeconds: number;
-  threshold: number;
-}> = {
-  fixed: { label: "固定分段", strategy: "fixed", detector: "simple", minSeconds: 0.8, maxSeconds: 8, threshold: 0.2 },
-  general: { label: "通用镜头", strategy: "shot", detector: "simple", minSeconds: 0.8, maxSeconds: 8, threshold: 0.2 },
-  "fast-cut": { label: "广告 / MV", strategy: "shot", detector: "pyscenedetect_adaptive", minSeconds: 0.5, maxSeconds: 6, threshold: 0.16 },
-  "talking-head": { label: "访谈长镜头", strategy: "shot", detector: "pyscenedetect_content", minSeconds: 1.5, maxSeconds: 12, threshold: 0.28 },
-  custom: { label: "自定义", strategy: "shot", detector: "simple", minSeconds: 0.8, maxSeconds: 8, threshold: 0.2 },
-};
 
 const icons: Record<Page, string> = {
   overview: "⌂",
@@ -115,7 +100,7 @@ function App() {
           {page === "search" && <SearchPage videos={videos} setNotice={setNotice} />}
           {page === "assets" && <AssetsPage videos={videos} refresh={refresh} setNotice={setNotice} />}
           {page === "indexes" && <IndexesPage jobs={jobs} videos={videos} />}
-          {page === "entities" && <EntitiesPage entities={entities} refresh={refresh} setNotice={setNotice} />}
+          {page === "entities" && <EntitiesPage entities={entities} videos={videos} refresh={refresh} setNotice={setNotice} />}
           {page === "overview" && <Overview videos={videos} jobs={jobs} entities={entities} setPage={setPage} />}
         </section>
       </main>
@@ -233,30 +218,8 @@ function PlayerModal({ result, onClose }: { result: SearchResult; onClose: () =>
 function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
   const [videoFile, setVideoFile] = useState<File>();
   const [transcript, setTranscript] = useState<File>();
-  const [visualModel, setVisualModel] = useState("siglip2-so400m-384");
-  const [visualSampleFps, setVisualSampleFps] = useState(5);
-  const [visualSegmentSeconds, setVisualSegmentSeconds] = useState(5);
-  const [visualSegmentPreset, setVisualSegmentPreset] = useState<VisualSegmentPresetKey>("fixed");
-  const [visualMinSegmentSeconds, setVisualMinSegmentSeconds] = useState(0.8);
-  const [visualMaxSegmentSeconds, setVisualMaxSegmentSeconds] = useState(8);
-  const [visualShotDetector, setVisualShotDetector] = useState<VisualShotDetector>("simple");
-  const [visualShotThreshold, setVisualShotThreshold] = useState(0.2);
-  const [faceSampleFps, setFaceSampleFps] = useState(2);
-  const [includeOcr, setIncludeOcr] = useState(false);
-  const [ocrSampleFps, setOcrSampleFps] = useState(1.00);
-  const [asrModel, setAsrModel] = useState("turbo");
-  const [asrLanguage, setAsrLanguage] = useState("auto");
+  const [indexConfiguration, setIndexConfiguration] = useState<IndexConfiguration>(defaultIndexConfiguration);
   const [uploading, setUploading] = useState(false);
-  const useShotSegments = visualSegmentPresets[visualSegmentPreset].strategy === "shot";
-  const applyVisualSegmentPreset = (next: VisualSegmentPresetKey) => {
-    setVisualSegmentPreset(next);
-    if (next === "custom") return;
-    const preset = visualSegmentPresets[next];
-    setVisualMinSegmentSeconds(preset.minSeconds);
-    setVisualMaxSegmentSeconds(preset.maxSeconds);
-    setVisualShotDetector(preset.detector);
-    setVisualShotThreshold(preset.threshold);
-  };
   const upload = async () => {
     if (!videoFile) return setNotice("请先选择视频");
     setUploading(true);
@@ -264,31 +227,13 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
     catch (error) { setNotice(error instanceof Error ? error.message : "上传失败"); }
     finally { setUploading(false); }
   };
-  const index = async (id: string) => {
-    if (useShotSegments && visualMinSegmentSeconds > visualMaxSegmentSeconds) {
-      return setNotice("镜头最短时长不能大于最长时长");
-    }
+  const index = async (video: Video) => {
+    const validationError = validateIndexConfiguration(indexConfiguration);
+    if (validationError) return setNotice(validationError);
     try {
-      const selectedModalities = includeOcr ? ["visual", "face", "asr", "ocr"] : ["visual", "face", "asr"];
-      await api.indexVideo(id, selectedModalities, {
-        visualModel,
-        visualSampleFps,
-        visualSegmentSeconds,
-        visualSegmentStrategy: useShotSegments ? "shot" : "fixed",
-        visualMinSegmentSeconds: useShotSegments ? visualMinSegmentSeconds : undefined,
-        visualMaxSegmentSeconds: useShotSegments ? visualMaxSegmentSeconds : undefined,
-        visualShotDetector: useShotSegments ? visualShotDetector : undefined,
-        visualShotThreshold: useShotSegments ? visualShotThreshold : undefined,
-        faceSampleFps,
-        ocrSampleFps: includeOcr ? ocrSampleFps : undefined,
-        asrModel,
-        asrLanguage,
-      });
+      await api.indexVideo(video.id, indexConfiguration.modalities, toIndexOptions(indexConfiguration));
       await refresh();
-      const segmentLabel = useShotSegments
-        ? `${visualSegmentPresets[visualSegmentPreset].label} ${visualShotDetectorLabels[visualShotDetector]} ${visualMinSegmentSeconds}-${visualMaxSegmentSeconds}s / 阈值 ${visualShotThreshold}`
-        : `固定 ${visualSegmentSeconds}s`;
-      setNotice(`索引任务已进入队列：Visual ${visualModel} · ${visualSampleFps}fps / ${segmentLabel}，Face ${faceSampleFps}fps${includeOcr ? `，OCR ${ocrSampleFps}fps` : ""}，ASR ${asrModel}/${asrLanguage}`);
+      setNotice(`${indexActionLabel(video, indexConfiguration.modalities)}任务已进入队列`);
     }
     catch (error) { setNotice(error instanceof Error ? error.message : "任务创建失败"); }
   };
@@ -305,30 +250,9 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
     try { await api.deleteVideo(video.id); await refresh(); setNotice("已删除视频及其索引"); }
     catch (error) { setNotice(error instanceof Error ? error.message : "删除失败"); }
   };
-  return <div className="stack-page"><div className="upload-panel panel"><div><span className="panel-label">NEW ASSET</span><h2>添加视频素材</h2><p>上传后可一次建立 Face、Visual 和 ASR 三路索引。</p></div><label className="file-line"><input type="file" accept="video/*" onChange={event => setVideoFile(event.target.files?.[0])} /><span>{videoFile?.name || "选择视频文件"}</span><b>浏览</b></label><label className="file-line secondary"><input type="file" accept=".json,.srt,.vtt" onChange={event => setTranscript(event.target.files?.[0])} /><span>{transcript?.name || "可选：已有字幕 JSON / SRT / VTT"}</span><b>添加</b></label><button className="primary compact" onClick={upload} disabled={uploading}>{uploading ? "正在上传…" : "上传素材"}</button></div>
-    <div className="index-options panel">
-      <div>
-        <span className="panel-label">INDEX OPTIONS</span>
-        <h2>索引参数</h2>
-        <p>Visual 默认 5fps；OCR 需显式勾选，服务器优先走 NPU/CANN，长视频建议先低采样；ASR 默认自动语言路由。</p>
-      </div>
-      <label>Visual model<select value={visualModel} onChange={event => setVisualModel(event.target.value)}><option value="siglip2-so400m-384">SigLIP2 So400m-384 默认</option><option value="chinese-clip-vit-b16">ChineseCLIP ViT-B/16</option><option value="openclip-vit-b32">OpenCLIP ViT-B/32</option><option value="openclip-vit-b16">OpenCLIP ViT-B/16</option><option value="openclip-vit-l14">OpenCLIP ViT-L/14</option></select></label>
-      <label>Visual fps<input type="number" min="0.2" max="10" step="0.5" value={visualSampleFps} onChange={event => setVisualSampleFps(Number(event.target.value))} /></label>
-      <label>Visual 分段<select value={visualSegmentPreset} onChange={event => applyVisualSegmentPreset(event.target.value as VisualSegmentPresetKey)}>{(Object.keys(visualSegmentPresets) as VisualSegmentPresetKey[]).map(key => <option key={key} value={key}>{visualSegmentPresets[key].label}</option>)}</select></label>
-      <label>{useShotSegments ? "固定回退秒数" : "Visual 分段秒数"}<input type="number" min="1" max="60" step="1" value={visualSegmentSeconds} onChange={event => setVisualSegmentSeconds(Number(event.target.value))} /></label>
-      {useShotSegments && <>
-        <label>镜头检测器<select value={visualShotDetector} onChange={event => setVisualShotDetector(event.target.value as VisualShotDetector)}>{(Object.keys(visualShotDetectorLabels) as VisualShotDetector[]).map(key => <option key={key} value={key}>{visualShotDetectorLabels[key]}</option>)}</select></label>
-        <label>镜头最短秒数<input type="number" min="0.2" max="30" step="0.1" value={visualMinSegmentSeconds} onChange={event => setVisualMinSegmentSeconds(Number(event.target.value))} /></label>
-        <label>镜头最长秒数<input type="number" min="1" max="60" step="0.5" value={visualMaxSegmentSeconds} onChange={event => setVisualMaxSegmentSeconds(Number(event.target.value))} /></label>
-        <label>切分阈值<input type="number" min="0.05" max="0.6" step="0.01" value={visualShotThreshold} onChange={event => setVisualShotThreshold(Number(event.target.value))} /></label>
-      </>}
-      <label>Face fps<input type="number" min="0.2" max="15" step="0.5" value={faceSampleFps} onChange={event => setFaceSampleFps(Number(event.target.value))} /></label>
-      <label className="inline-check"><input type="checkbox" checked={includeOcr} onChange={event => setIncludeOcr(event.target.checked)} />包含 OCR</label>
-      <label>OCR fps<input type="number" min="0.90" max="2" step="0.05" value={ocrSampleFps} onChange={event => setOcrSampleFps(Number(event.target.value))} /></label>
-      <label>ASR 模型<select value={asrModel} onChange={event => setAsrModel(event.target.value)}><option value="turbo">turbo 默认</option><option value="small">small 更快</option><option value="medium">medium 更准更慢</option><option value="large-v3">large-v3 高风险</option></select></label>
-      <label>ASR 语言<select value={asrLanguage} onChange={event => setAsrLanguage(event.target.value)}><option value="auto">Auto</option><option value="zh">中文</option><option value="yue">粤语/方言</option><option value="en">English</option><option value="es">Español</option><option value="pt">Português</option></select></label>
-    </div>
-    <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">LIBRARY</span><h2>视频资产</h2></div><span>{videos.length} items</span></div><div className="asset-list">{videos.map(video => <div className="asset-row" key={video.id}><div className="asset-icon">▶</div><div className="asset-main"><b>{video.name}</b><small>{formatTime(video.duration)} · {video.width}×{video.height} · {video.fps.toFixed(1)} fps</small></div><div className="chips">{video.indexed_modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}</div><span className={`status ${video.status}`}>{statusText(video.status)}</span><div className="asset-actions">{video.status !== "indexing" && <button className="outline" onClick={() => index(video.id)}>{video.indexed_modalities.length ? "重建索引" : "建立索引"}</button>}<button className="outline" onClick={() => rename(video)}>重命名</button><button className="outline danger" disabled={video.status === "indexing"} onClick={() => remove(video)}>删除</button></div></div>)}{!videos.length && <div className="empty-list">还没有视频素材</div>}</div></div>
+  return <div className="stack-page"><div className="upload-panel panel"><div><span className="panel-label">NEW ASSET</span><h2>添加视频素材</h2><p>上传后按需选择 Visual、Face、ASR 或 OCR 通道。</p></div><label className="file-line"><input type="file" accept="video/*" onChange={event => setVideoFile(event.target.files?.[0])} /><span>{videoFile?.name || "选择视频文件"}</span><b>浏览</b></label><label className="file-line secondary"><input type="file" accept=".json,.srt,.vtt" onChange={event => setTranscript(event.target.files?.[0])} /><span>{transcript?.name || "可选：已有字幕 JSON / SRT / VTT"}</span><b>添加</b></label><button className="primary compact" onClick={upload} disabled={uploading}>{uploading ? "正在上传…" : "上传素材"}</button></div>
+    <IndexOptionsPanel value={indexConfiguration} onChange={setIndexConfiguration} />
+    <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">LIBRARY</span><h2>视频资产</h2></div><span>{videos.length} items</span></div><div className="asset-list">{videos.map(video => <div className="asset-row" key={video.id}><div className="asset-icon">▶</div><div className="asset-main"><b>{video.name}</b><small>{formatTime(video.duration)} · {video.width}×{video.height} · {video.fps.toFixed(1)} fps</small></div><div className="chips">{video.indexed_modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}</div><span className={`status ${video.status}`}>{statusText(video.status)}</span><div className="asset-actions">{video.status !== "indexing" && <button className="outline index-action" disabled={!indexConfiguration.modalities.length} onClick={() => index(video)}>{indexActionLabel(video, indexConfiguration.modalities)}</button>}<button className="outline" onClick={() => rename(video)}>重命名</button><button className="outline danger" disabled={video.status === "indexing"} onClick={() => remove(video)}>删除</button></div></div>)}{!videos.length && <div className="empty-list">还没有视频素材</div>}</div></div>
   </div>;
 }
 
@@ -336,14 +260,70 @@ function IndexesPage({ jobs, videos }: { jobs: Job[]; videos: Video[] }) {
   const names = Object.fromEntries(videos.map(video => [video.id, video.name]));
   return <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">PIPELINE</span><h2>索引任务</h2></div><span>阶段子进程退出后释放模型</span></div><div className="job-list">{jobs.map(job => {
     const stages = job.metrics?.stages || {};
-    return <div className="job-row" key={job.id}><div className={`job-state ${job.status}`}>{job.status === "completed" ? "✓" : job.status === "failed" ? "!" : "↻"}</div><div className="job-main"><b>{names[job.video_id] || job.video_id}</b><small>{job.modalities.join(" → ")} · 当前：{job.stage} · 总耗时 {formatDuration(job.metrics?.total_elapsed_seconds)}</small><div className="stage-times">{["visual", "face", "asr", "ocr"].filter(stage => job.modalities.includes(stage) || stages[stage]).map(stage => <span key={stage}>{stage}: {formatDuration(stages[stage]?.elapsed_seconds)}</span>)}</div><div className="progress"><span style={{ width: `${job.progress * 100}%` }} /></div></div><span className={`status ${job.status}`}>{statusText(job.status)}</span>{job.error && <p>{job.error}</p>}</div>;
+    return <div className="job-row" key={job.id}><div className={`job-state ${job.status}`}>{job.status === "completed" ? "✓" : job.status === "failed" ? "!" : "↻"}</div><div className="job-main"><b>{names[job.video_id] || job.video_id}</b><small>{job.modalities.join(" → ")} · 当前：{job.stage} · 总耗时 {formatDuration(job.metrics?.total_elapsed_seconds)}</small><div className="stage-times">{(["visual", "face", "asr", "speaker", "ocr"] as const).filter(stage => stages[stage] || (stage !== "speaker" && job.modalities.includes(stage))).map(stage => <span key={stage}>{stage}: {formatDuration(stages[stage]?.elapsed_seconds)}</span>)}</div><div className="progress"><span style={{ width: `${job.progress * 100}%` }} /></div></div><span className={`status ${job.status}`}>{statusText(job.status)}</span>{job.error && <p>{job.error}</p>}</div>;
   })}{!jobs.length && <div className="empty-list">还没有索引任务</div>}</div></div>;
 }
 
-function EntitiesPage({ entities, refresh, setNotice }: { entities: Entity[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
+function SpeakersPage({ videos, setNotice }: { videos: Video[]; setNotice: (value: string) => void }) {
+  const indexed = videos.filter(video => video.speaker_indexed);
+  const [videoId, setVideoId] = useState("");
+  const [view, setView] = useState<SpeakerView>();
+  const [hits, setHits] = useState<VoiceHit[]>([]);
+  const [voiceFile, setVoiceFile] = useState<File>();
+  const [entities, setEntities] = useState<Entity[]>([]);
+  const [selectedEntity, setSelectedEntity] = useState<Record<number, string>>({});
+  const [loading, setLoading] = useState(false);
+  useEffect(() => { if (!videoId && indexed.length) setVideoId(indexed[0].id); }, [indexed.length]);
+  const load = async (id = videoId) => {
+    if (!id) return;
+    setLoading(true);
+    try { setView(await api.speakers(id)); }
+    catch (error) { setView(undefined); setNotice(error instanceof Error ? error.message : "无法读取 Speaker 索引"); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(videoId); setHits([]); }, [videoId]);
+  useEffect(() => { api.entities().then(setEntities).catch(() => undefined); }, []);
+  const rename = async (trackId: number, current: string) => {
+    const name = window.prompt("Speaker 名称", current); if (name == null) return;
+    setView(await api.updateSpeaker(videoId, trackId, { display_name: name.trim() || undefined }));
+  };
+  const move = async (utteranceIndex: number, trackId: number | null, searchable: boolean) => {
+    setView(await api.updateUtterance(videoId, utteranceIndex, { corrected_track_id: trackId, searchable }));
+  };
+  const search = async (utteranceIndex: number) => {
+    setLoading(true); try { setHits((await api.voiceSearch(videoId, utteranceIndex)).results); }
+    catch (error) { setNotice(error instanceof Error ? error.message : "声纹搜索失败"); }
+    finally { setLoading(false); }
+  };
+  const searchUpload = async () => {
+    if (!voiceFile) return;
+    setLoading(true); try { setHits((await api.voiceSearchUpload(voiceFile)).results); }
+    catch (error) { setNotice(error instanceof Error ? error.message : "上传声音搜索失败"); }
+    finally { setLoading(false); }
+  };
+  const addToLibrary = async (trackId: number, utteranceIndex: number) => {
+    const entityId = selectedEntity[trackId]; if (!entityId) return setNotice("请先选择人物");
+    try { await api.addVoiceSample(entityId, videoId, utteranceIndex, trackId); setNotice("代表声音已加入人物库并绑定 Speaker"); await load(); }
+    catch (error) { setNotice(error instanceof Error ? error.message : "加入人物库失败"); }
+  };
+  const utteranceByIndex = Object.fromEntries((view?.utterances || []).map(item => [item.index, item]));
+  return <div className="speaker-page">
+    <div className="panel speaker-toolbar"><div><span className="panel-label">VOICE WORKSPACE</span><h2>视频内说话人</h2></div><label>视频<select value={videoId} onChange={event => setVideoId(event.target.value)}><option value="">选择已建立 Speaker 索引的视频</option>{indexed.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><span>{loading ? "处理中…" : `${view?.tracks.length || 0} speakers`}</span><label className="voice-upload">上传参考声音<input type="file" accept="audio/*,video/*" onChange={event => setVoiceFile(event.target.files?.[0])} /></label><button className="primary compact" disabled={!voiceFile || loading} onClick={searchUpload}>搜索上传声音</button></div>
+    {!indexed.length && <div className="panel empty-list">请先为视频选择 ASR + Speaker 通道建立索引</div>}
+    <div className="speaker-grid">{view?.tracks.filter(track => !track.hidden).map(track => {
+      const representative = utteranceByIndex[track.representative_utterance_index];
+      return <article className="panel speaker-card" key={track.track_id}><div className="speaker-card-head"><div><span>Speaker {track.track_id}</span><h3>{track.label}</h3><small>{track.utterance_count} 句 · {formatDuration(track.duration_ms / 1000)}</small></div><button className="outline" onClick={() => rename(track.track_id, track.label)}>改名</button></div>{representative && <><div className="representative"><audio controls preload="none" src={representative.clip_url} /><button className="primary compact" onClick={() => search(representative.index)}>用代表声音搜索</button></div><div className="voice-library-bind"><select value={selectedEntity[track.track_id] || track.entity_id || ""} onChange={event => setSelectedEntity(value => ({ ...value, [track.track_id]: event.target.value }))}><option value="">选择人物库身份</option>{entities.map(entity => <option key={entity.id} value={entity.id}>{entity.name}</option>)}</select><button className="outline" onClick={() => addToLibrary(track.track_id, representative.index)}>加入声音库并绑定</button></div></>}<div className="utterance-list">{track.utterance_indices.map(index => { const utterance = utteranceByIndex[index]; if (!utterance) return null; return <div className="utterance-row" key={index}><div><b>{formatTime(utterance.start_ms / 1000)}–{formatTime(utterance.end_ms / 1000)}</b><p>{utterance.text || "（无文本）"}</p></div><audio controls preload="none" src={utterance.clip_url} /><select value={utterance.track_id ?? -1} onChange={event => move(index, Number(event.target.value), utterance.searchable)}><option value={-1}>未归属</option>{view.tracks.map(option => <option key={option.track_id} value={option.track_id}>{option.label}</option>)}</select><button className="outline" onClick={() => search(index)}>搜索同声</button><label className="searchable-check"><input type="checkbox" checked={utterance.searchable} onChange={event => move(index, utterance.track_id, event.target.checked)} />可检索</label></div>})}</div></article>;
+    })}</div>
+    {!!hits.length && <div className="panel voice-results"><div className="section-head"><div><span className="panel-label">VOICE MATCHES</span><h2>同声纹片段</h2></div><span>{hits.length} results</span></div>{hits.map(hit => <div className="voice-hit" key={`${hit.video_id}:${hit.utterance_index}`}><b>{hit.video_name}</b><span>{formatTime(hit.start_ms / 1000)} · Speaker {hit.track_id ?? "?"}</span><strong>{(hit.score * 100).toFixed(1)}%</strong><p>{hit.text || "（无文本）"}</p><audio controls preload="none" src={hit.clip_url} /></div>)}</div>}
+  </div>;
+}
+
+function EntitiesPage({ entities, videos, refresh, setNotice }: { entities: Entity[]; videos: Video[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
   const [name, setName] = useState(""); const [image, setImage] = useState<File>(); const [saving, setSaving] = useState(false);
-  const save = async () => { if (!name.trim() || !image) return setNotice("请输入人物名称并选择清晰正脸"); setSaving(true); try { await api.createEntity(name.trim(), image); setName(""); setImage(undefined); await refresh(); setNotice("人物已登记，以后可以直接用名字检索"); } catch (error) { setNotice(error instanceof Error ? error.message : "人物登记失败"); } finally { setSaving(false); } };
-  return <div className="entity-layout"><div className="entity-create panel"><span className="panel-label">NEW ENTITY</span><h2>登记人物</h2><p>人物名称与参考脸绑定后，可用“内马尔”等名称调用 face_index。</p><input className="text-input" value={name} onChange={event => setName(event.target.value)} placeholder="人物或明星名称" /><label className="portrait-drop"><input type="file" accept="image/*" onChange={event => setImage(event.target.files?.[0])} />{image ? <img src={URL.createObjectURL(image)} /> : <><span>◎</span><b>选择清晰正脸</b></>}</label><button className="primary compact" disabled={saving} onClick={save}>{saving ? "正在提取人脸…" : "登记人物"}</button></div><div className="entity-library"><div className="section-head"><div><span className="panel-label">FACE LIBRARY</span><h2>人物库</h2></div><span>{entities.length} entities</span></div><div className="entity-grid">{entities.map(entity => <article key={entity.id}><img src={`/api/entities/${entity.id}/reference`} /><div><b>{entity.name}</b><small>{entity.embedding_path ? "Face embedding ready" : "Processing"}</small></div></article>)}{!entities.length && <div className="empty-list">还没有登记人物</div>}</div></div></div>;
+  const save = async () => { if (!name.trim()) return setNotice("请输入人物名称"); setSaving(true); try { image ? await api.createEntity(name.trim(), image) : await api.createVoiceEntity(name.trim()); setName(""); setImage(undefined); await refresh(); setNotice(image ? "人物与参考脸已登记" : "已创建声音人物，可从 Speaker 页面添加声音"); } catch (error) { setNotice(error instanceof Error ? error.message : "人物登记失败"); } finally { setSaving(false); } };
+  const rename = async (entity: Entity) => { const next = window.prompt("人物名称", entity.name); if (!next?.trim() || next.trim() === entity.name) return; try { await api.renameEntity(entity.id, next.trim()); await refresh(); setNotice("人物已重命名"); } catch (error) { setNotice(error instanceof Error ? error.message : "重命名失败"); } };
+  const remove = async (entity: Entity) => { if (!window.confirm(`删除人物“${entity.name}”？相关人脸、声音样本和绑定也会删除。`)) return; try { await api.deleteEntity(entity.id); await refresh(); setNotice("人物已删除"); } catch (error) { setNotice(error instanceof Error ? error.message : "删除失败"); } };
+  return <div><div className="entity-layout"><div className="entity-create panel"><span className="panel-label">NEW IDENTITY</span><h2>登记人物</h2><p>参考脸可选；没有图片时可先创建声音人物，再从下方视频说话人添加代表声音。</p><input className="text-input" value={name} onChange={event => setName(event.target.value)} placeholder="人物或明星名称" /><label className="portrait-drop"><input type="file" accept="image/*" onChange={event => setImage(event.target.files?.[0])} />{image ? <img src={URL.createObjectURL(image)} /> : <><span>◎</span><b>可选：添加清晰正脸</b></>}</label><button className="primary compact" disabled={saving} onClick={save}>{saving ? "正在登记…" : image ? "登记人脸人物" : "创建声音人物"}</button></div><div className="entity-library"><div className="section-head"><div><span className="panel-label">IDENTITY LIBRARY</span><h2>人物库</h2></div><span>{entities.length} entities</span></div><div className="entity-grid">{entities.map(entity => <article key={entity.id}>{entity.reference_path ? <img src={`/api/entities/${entity.id}/reference`} /> : <div className="voice-only-avatar">◉</div>}<div><b>{entity.name}</b><small>{entity.embedding_path ? "人脸" : "无参考脸"} · {entity.voice_sample_count || 0} 条声音</small><div className="asset-actions"><button className="outline" onClick={() => rename(entity)}>重命名</button><button className="outline danger" onClick={() => remove(entity)}>删除</button></div></div></article>)}{!entities.length && <div className="empty-list">还没有登记人物</div>}</div></div></div><SpeakersPage videos={videos} setNotice={setNotice} /></div>;
 }
 
 function Overview({ videos, jobs, entities, setPage }: { videos: Video[]; jobs: Job[]; entities: Entity[]; setPage: (page: Page) => void }) {

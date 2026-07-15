@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Speaker Diarization 原始输出预览</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, "Microsoft YaHei", sans-serif; background: #0b1020; color: #edf2ff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at top left, #172554, #0b1020 38rem); }
+    main { width: min(1180px, calc(100% - 32px)); margin: 28px auto 64px; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    .subtle { color: #94a3b8; margin: 0; }
+    .panel { margin-top: 20px; padding: 20px; border: 1px solid #27324a; border-radius: 16px; background: rgba(15, 23, 42, .88); box-shadow: 0 18px 60px #02061766; }
+    .controls { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; gap: 12px; align-items: end; }
+    label { display: grid; gap: 7px; color: #cbd5e1; font-size: 13px; }
+    select, button { height: 40px; border: 1px solid #3b4966; border-radius: 9px; background: #111a2e; color: #f8fafc; padding: 0 12px; }
+    button { cursor: pointer; }
+    button:hover { border-color: #60a5fa; }
+    audio { width: 100%; margin-top: 18px; }
+    .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .chip { padding: 6px 10px; border-radius: 999px; background: #1e293b; color: #cbd5e1; font-size: 12px; }
+    .timeline-wrap { overflow-x: auto; margin-top: 18px; padding-bottom: 8px; }
+    .timeline { position: relative; min-width: 760px; border-left: 92px solid transparent; }
+    .axis { position: relative; height: 28px; border-bottom: 1px solid #334155; }
+    .tick { position: absolute; bottom: 0; height: 7px; border-left: 1px solid #64748b; color: #94a3b8; font-size: 10px; padding: 0 0 9px 4px; }
+    .lane { position: relative; height: 52px; border-bottom: 1px solid #263149; background-image: linear-gradient(90deg, #ffffff08 1px, transparent 1px); background-size: 10% 100%; }
+    .lane-name { position: absolute; right: calc(100% + 12px); top: 17px; width: 80px; text-align: right; color: #cbd5e1; font-size: 12px; }
+    .turn { position: absolute; top: 9px; height: 34px; min-width: 2px; border: 1px solid #ffffff55; border-radius: 5px; cursor: pointer; opacity: .86; overflow: hidden; }
+    .turn:hover, .turn.active { opacity: 1; outline: 2px solid white; z-index: 4; }
+    .turn.short { box-shadow: 0 0 0 2px #f43f5e; z-index: 3; }
+    .playhead { position: absolute; z-index: 8; top: 0; bottom: 0; width: 2px; background: #fff; pointer-events: none; box-shadow: 0 0 8px #fff; }
+    .legend { margin-top: 12px; color: #94a3b8; font-size: 12px; }
+    .error { color: #fda4af; white-space: pre-wrap; }
+    table { width: 100%; margin-top: 12px; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid #263149; text-align: left; font-size: 13px; }
+    th { position: sticky; top: 0; background: #0f172a; color: #94a3b8; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover, tbody tr.active { background: #1e293b; }
+    .warning { color: #fb7185; font-weight: 700; }
+    .annotation-form { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)) auto auto; gap: 10px; align-items: end; }
+    .annotation-form input { height: 40px; border: 1px solid #3b4966; border-radius: 9px; background: #111a2e; color: #f8fafc; padding: 0 10px; }
+    .annotation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    @media (max-width: 720px) { .controls { grid-template-columns: 1fr; } main { width: min(100% - 20px, 1180px); } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Speaker Diarization 原始输出预览</h1>
+  <p class="subtle">Community-1 原始 turn；未过滤、未合并、未与 ASR 对齐。</p>
+
+  <section class="panel">
+    <div class="controls">
+      <label>评测样本
+        <select id="caseSelect"></select>
+      </label>
+      <button id="backButton" type="button">−5 秒</button>
+      <button id="forwardButton" type="button">+5 秒</button>
+    </div>
+    <audio id="audio" controls preload="metadata"></audio>
+    <div id="stats" class="stats"></div>
+    <div id="error" class="error"></div>
+    <div class="timeline-wrap"><div id="timeline" class="timeline"></div></div>
+    <div class="legend">红色外框表示持续时间不足 300ms；同一时间不同轨道都有色块表示原始重叠语音。</div>
+  </section>
+
+  <section class="panel" id="truth-annotation">
+    <h2>人工真值标注</h2>
+    <p class="subtle">按播放位置设置起止时间，并填写稳定的真实人物编号，例如 HOST、MAN_01、WOMAN_01。</p>
+    <div class="annotation-form">
+      <label>开始（秒）<input id="truthStart" type="number" min="0" step="0.001" /></label>
+      <label>结束（秒）<input id="truthEnd" type="number" min="0" step="0.001" /></label>
+      <label>真实 Speaker ID<input id="truthSpeaker" type="text" placeholder="MAN_01" /></label>
+      <button id="setStart" type="button">当前位置→起点</button>
+      <button id="setEnd" type="button">当前位置→终点</button>
+    </div>
+    <div class="annotation-actions">
+      <button id="addTruth" type="button">添加标注</button>
+      <button id="exportTruth" type="button">导出 JSON</button>
+      <button id="clearTruth" type="button">清空当前样本</button>
+      <span id="truthStatus" class="subtle"></span>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>真实 Speaker</th><th>开始</th><th>结束</th><th>持续</th><th>操作</th></tr></thead>
+      <tbody id="truthRows"></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>原始 turn</h2>
+    <table>
+      <thead><tr><th>#</th><th>Speaker</th><th>开始</th><th>结束</th><th>持续</th><th>检查提示</th></tr></thead>
+      <tbody id="turnRows"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+  const cases = [
+    { id: "variety_zh", label: "中文 · 综艺片段（前 60 秒）", json: "../outputs/community1_raw/variety_zh_60s.json", audio: "../audio/variety_zh_300s.wav" },
+    { id: "variety_zh_3dspeaker", label: "中文综艺 · 3D-Speaker（前 60 秒）", json: "../outputs/review/variety_zh_3dspeaker_60s.json", audio: "../audio/variety_zh_300s.wav" },
+    { id: "variety_zh_eres2netv2", label: "中文综艺 · 3D-Speaker + ERes2NetV2", json: "../outputs/3dspeaker_eres2netv2/variety_zh_eval_60s.json", audio: "../audio/variety_zh_eval_60s.wav" },
+    { id: "variety_zh_campplus_oracle6", label: "中文综艺 · CAM++（诊断：指定 6 人）", json: "../outputs/3dspeaker_oracle/variety_campplus_oracle6.json", audio: "../audio/variety_zh_eval_60s.wav" },
+    { id: "variety_zh_eres2netv2_oracle6", label: "中文综艺 · ERes2NetV2（诊断：指定 6 人）", json: "../outputs/3dspeaker_oracle/variety_eres2netv2_oracle6.json", audio: "../audio/variety_zh_eval_60s.wav" },
+    { id: "variety_zh_community1_oracle6", label: "中文综艺 · Community-1 VBx（诊断：指定 6 人）", json: "../outputs/community1_oracle/variety_zh_oracle6.json", audio: "../audio/variety_zh_eval_60s.wav" },
+    { id: "variety_zh_campplus_clean_oracle6", label: "中文综艺 · 干净边界 + CAM++（指定 6 人）", json: "../outputs/3dspeaker_clean/variety_campplus_oracle6.json", audio: "../audio/variety_zh_eval_60s.wav" },
+    { id: "variety_zh_eres2netv2_clean_oracle6", label: "中文综艺 · 干净边界 + ERes2NetV2（指定 6 人）", json: "../outputs/3dspeaker_clean/variety_eres2netv2_oracle6.json", audio: "../audio/variety_zh_eval_60s.wav" },
+    { id: "variety_zh_diarizen_base", label: "中文综艺 · DiariZen Base-s80（自动人数）", json: "../outputs/diarizen/variety_zh_base.json", audio: "../audio/variety_zh_eval_60s.wav" },
+    { id: "variety_zh_sortformer", label: "中文综艺 · Sortformer 4spk（前 60 秒）", json: "../outputs/review/variety_zh_sortformer_60s.json", audio: "../audio/variety_zh_300s.wav" },
+    { id: "trailer_zh", label: "中文 · 多人预告片（前 60 秒）", json: "../outputs/community1_raw/trailer_zh_60s.json", audio: "../audio/trailer_zh_multi_117s.wav" },
+    { id: "sports_en", label: "英文 · 体育解说（前 60 秒）", json: "../outputs/community1_raw/sports_en_60s.json", audio: "../audio/sports_en_180s.wav" },
+    { id: "ad_es", label: "西语广告 · Community-1", json: "../outputs/community1_matrix/ad_es_60s.json", audio: "../audio/ad_es_eval_60s.wav" },
+    { id: "ad_es_3dspeaker", label: "西语广告 · 3D-Speaker", json: "../outputs/review/ad_es_3dspeaker_60s.json", audio: "../audio/ad_es_eval_60s.wav" },
+    { id: "ad_es_eres2netv2", label: "西语广告 · 3D-Speaker + ERes2NetV2", json: "../outputs/3dspeaker_eres2netv2/ad_es_eval_60s.json", audio: "../audio/ad_es_eval_60s.wav" },
+    { id: "ad_es_sortformer", label: "西语广告 · Sortformer 4spk", json: "../outputs/sortformer_matrix/ad_es_60s.json", audio: "../audio/ad_es_eval_60s.wav" },
+    { id: "drama_zh", label: "中文电视剧 · Community-1", json: "../outputs/community1_matrix/drama_zh_60s.json", audio: "../audio/drama_zh_eval_60s.wav" },
+    { id: "drama_zh_3dspeaker", label: "中文电视剧 · 3D-Speaker", json: "../outputs/review/drama_zh_3dspeaker_60s.json", audio: "../audio/drama_zh_eval_60s.wav" },
+    { id: "drama_zh_eres2netv2", label: "中文电视剧 · 3D-Speaker + ERes2NetV2", json: "../outputs/3dspeaker_eres2netv2/drama_zh_eval_60s.json", audio: "../audio/drama_zh_eval_60s.wav" },
+    { id: "drama_zh_sortformer", label: "中文电视剧 · Sortformer 4spk", json: "../outputs/sortformer_matrix/drama_zh_60s.json", audio: "../audio/drama_zh_eval_60s.wav" },
+    { id: "documentary_zh", label: "书籍纪录片 180–240s · Community-1", json: "../outputs/community1_matrix/documentary_zh_60s.json", audio: "../audio/documentary_zh_eval_60s.wav" },
+    { id: "documentary_zh_3dspeaker", label: "书籍纪录片 180–240s · 3D-Speaker", json: "../outputs/review/documentary_zh_3dspeaker_60s.json", audio: "../audio/documentary_zh_eval_60s.wav" },
+    { id: "documentary_zh_eres2netv2", label: "书籍纪录片 · 3D-Speaker + ERes2NetV2", json: "../outputs/3dspeaker_eres2netv2/documentary_zh_eval_60s.json", audio: "../audio/documentary_zh_eval_60s.wav" },
+    { id: "documentary_zh_sortformer", label: "书籍纪录片 180–240s · Sortformer 4spk", json: "../outputs/sortformer_matrix/documentary_zh_60s.json", audio: "../audio/documentary_zh_eval_60s.wav" },
+  ];
+  const colors = ["#3b82f6", "#f59e0b", "#10b981", "#a855f7", "#ec4899", "#06b6d4"];
+  const select = document.querySelector("#caseSelect");
+  const audio = document.querySelector("#audio");
+  const timeline = document.querySelector("#timeline");
+  const rows = document.querySelector("#turnRows");
+  const stats = document.querySelector("#stats");
+  const error = document.querySelector("#error");
+  const truthRows = document.querySelector("#truthRows");
+  const truthStatus = document.querySelector("#truthStatus");
+  const truthStart = document.querySelector("#truthStart");
+  const truthEnd = document.querySelector("#truthEnd");
+  const truthSpeaker = document.querySelector("#truthSpeaker");
+  let payload = null;
+  let currentCase = null;
+  let truth = [];
+  let playhead = null;
+
+  cases.forEach(item => select.add(new Option(item.label, item.id)));
+  select.value = new URLSearchParams(location.search).get("case") || cases[0].id;
+
+  const fmt = seconds => `${Math.floor(seconds / 60)}:${(seconds % 60).toFixed(3).padStart(6, "0")}`;
+  const seek = seconds => { audio.currentTime = Math.max(0, seconds); audio.play(); };
+  const truthKey = () => `speaker-truth:${currentCase?.audio || "unknown"}`;
+
+  async function loadCase() {
+    const item = cases.find(candidate => candidate.id === select.value) || cases[0];
+    currentCase = item;
+    error.textContent = "";
+    try {
+      const response = await fetch(item.json, { cache: "no-store" });
+      if (!response.ok) throw new Error(`无法读取 ${item.json}: HTTP ${response.status}`);
+      payload = await response.json();
+      audio.src = item.audio;
+      truth = JSON.parse(localStorage.getItem(truthKey()) || "[]");
+      history.replaceState(null, "", `?case=${item.id}`);
+      render();
+      renderTruth();
+    } catch (reason) {
+      error.textContent = `${reason}\n请通过项目提供的本地 HTTP 服务打开页面，不要直接双击 HTML。`;
+    }
+  }
+
+  function saveTruth() {
+    truth.sort((a, b) => a.start - b.start || a.end - b.end || a.speaker.localeCompare(b.speaker));
+    localStorage.setItem(truthKey(), JSON.stringify(truth));
+    truthStatus.textContent = `已在浏览器保存 ${truth.length} 段`;
+    renderTruth();
+  }
+
+  function renderTruth() {
+    truthRows.innerHTML = truth.map((turn, index) => `<tr data-index="${index}"><td>${index + 1}</td><td>${turn.speaker}</td><td>${fmt(turn.start)}</td><td>${fmt(turn.end)}</td><td>${(turn.end-turn.start).toFixed(3)}s</td><td><button type="button" data-delete="${index}">删除</button></td></tr>`).join("");
+    truthRows.querySelectorAll("tr").forEach(row => row.onclick = event => {
+      if (event.target.dataset.delete !== undefined) return;
+      seek(truth[Number(row.dataset.index)].start);
+    });
+    truthRows.querySelectorAll("button[data-delete]").forEach(button => button.onclick = () => {
+      truth.splice(Number(button.dataset.delete), 1); saveTruth();
+    });
+    truthStatus.textContent = truth.length ? `已在浏览器保存 ${truth.length} 段` : "当前样本尚未标注";
+  }
+
+  function render() {
+    const speakers = [...new Set(payload.turns.map(turn => turn.speaker))].sort();
+    const duration = payload.audio_seconds;
+    const shortCount = payload.turns.filter(turn => turn.end - turn.start < .3).length;
+    stats.innerHTML = [
+      payload.model ? `模型 ${payload.model}` : "模型 pyannote/community-1",
+      `音频 ${duration.toFixed(1)} 秒`, `${speakers.length} 个原始标签`, `${payload.turns.length} 个 turn`,
+      payload.model_max_speakers ? `模型上限 ${payload.model_max_speakers} 人` : null,
+      `<span class="${shortCount ? "warning" : ""}">${shortCount} 个 &lt;300ms 短段</span>`
+    ].filter(Boolean).map(value => `<span class="chip">${value}</span>`).join("");
+
+    timeline.innerHTML = "";
+    const axis = document.createElement("div"); axis.className = "axis"; timeline.append(axis);
+    const step = duration <= 90 ? 5 : 10;
+    for (let second = 0; second <= duration; second += step) {
+      const tick = document.createElement("span"); tick.className = "tick";
+      tick.style.left = `${second / duration * 100}%`; tick.textContent = `${second}s`; axis.append(tick);
+    }
+    speakers.forEach((speaker, speakerIndex) => {
+      const lane = document.createElement("div"); lane.className = "lane";
+      const name = document.createElement("span"); name.className = "lane-name"; name.textContent = speaker; lane.append(name);
+      payload.turns.forEach((turn, turnIndex) => {
+        if (turn.speaker !== speaker) return;
+        const block = document.createElement("button");
+        block.className = `turn${turn.end - turn.start < .3 ? " short" : ""}`;
+        block.style.left = `${turn.start / duration * 100}%`;
+        block.style.width = `${Math.max((turn.end - turn.start) / duration * 100, .12)}%`;
+        block.style.background = colors[speakerIndex % colors.length];
+        block.title = `${speaker}  ${fmt(turn.start)}–${fmt(turn.end)}  (${(turn.end-turn.start).toFixed(3)}s)`;
+        block.dataset.turnIndex = turnIndex; block.onclick = () => seek(turn.start); lane.append(block);
+      });
+      timeline.append(lane);
+    });
+    playhead = document.createElement("div"); playhead.className = "playhead"; timeline.append(playhead);
+
+    rows.innerHTML = payload.turns.map((turn, index) => {
+      const length = turn.end - turn.start;
+      return `<tr data-index="${index}"><td>${index + 1}</td><td>${turn.speaker}</td><td>${fmt(turn.start)}</td><td>${fmt(turn.end)}</td><td>${length.toFixed(3)}s</td><td class="${length < .3 ? "warning" : ""}">${length < .3 ? "极短段" : ""}</td></tr>`;
+    }).join("");
+    rows.querySelectorAll("tr").forEach(row => row.onclick = () => seek(payload.turns[Number(row.dataset.index)].start));
+    updatePlayhead();
+  }
+
+  function updatePlayhead() {
+    if (!payload || !playhead) return;
+    playhead.style.left = `${Math.min(audio.currentTime / payload.audio_seconds * 100, 100)}%`;
+    document.querySelectorAll(".turn.active, tbody tr.active").forEach(element => element.classList.remove("active"));
+    payload.turns.forEach((turn, index) => {
+      if (audio.currentTime >= turn.start && audio.currentTime <= turn.end) {
+        document.querySelector(`.turn[data-turn-index="${index}"]`)?.classList.add("active");
+        document.querySelector(`tbody tr[data-index="${index}"]`)?.classList.add("active");
+      }
+    });
+  }
+
+  select.addEventListener("change", loadCase);
+  audio.addEventListener("timeupdate", updatePlayhead);
+  document.querySelector("#backButton").onclick = () => seek(audio.currentTime - 5);
+  document.querySelector("#forwardButton").onclick = () => seek(audio.currentTime + 5);
+  document.querySelector("#setStart").onclick = () => truthStart.value = audio.currentTime.toFixed(3);
+  document.querySelector("#setEnd").onclick = () => truthEnd.value = audio.currentTime.toFixed(3);
+  document.querySelector("#addTruth").onclick = () => {
+    const start = Number(truthStart.value), end = Number(truthEnd.value), speaker = truthSpeaker.value.trim();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !speaker) {
+      truthStatus.textContent = "请填写有效起止时间和 Speaker ID"; return;
+    }
+    truth.push({ start: Number(start.toFixed(3)), end: Number(end.toFixed(3)), speaker });
+    truthStart.value = end.toFixed(3); truthEnd.value = ""; saveTruth();
+  };
+  document.querySelector("#clearTruth").onclick = () => {
+    if (truth.length && confirm("确定清空当前音频的全部人工标注？")) { truth = []; saveTruth(); }
+  };
+  document.querySelector("#exportTruth").onclick = () => {
+    const content = { schema_version: 1, audio: currentCase.audio, audio_seconds: payload.audio_seconds, turns: truth };
+    const blob = new Blob([JSON.stringify(content, null, 2) + "\n"], { type: "application/json" });
+    const link = document.createElement("a"); link.href = URL.createObjectURL(blob);
+    link.download = `${currentCase.id.replace(/_(3dspeaker|sortformer)$/, "")}.truth.json`; link.click();
+    URL.revokeObjectURL(link.href);
+  };
+  loadCase();
+</script>
+</body>
+</html>

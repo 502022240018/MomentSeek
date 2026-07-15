@@ -18,6 +18,7 @@ class IndexRequest(BaseModel):
     asr_engine: str | None = None
     asr_model: str | None = None
     asr_language: str | None = None
+    asr_speaker_enabled: bool | None = None
 
     @field_validator("modalities")
     @classmethod
@@ -155,6 +156,54 @@ class VideoRenameRequest(BaseModel):
         if len(normalized) > 200:
             raise ValueError("视频名称过长")
         return normalized
+
+
+class SpeakerUpdateRequest(BaseModel):
+    display_name: str | None = None
+    representative_utterance_index: int | None = Field(default=None, ge=0)
+    hidden: bool = False
+
+
+class UtteranceUpdateRequest(BaseModel):
+    corrected_track_id: int | None = Field(default=None, ge=-1)
+    searchable: bool = True
+
+
+class VoiceSearchRequest(BaseModel):
+    query_video_id: str
+    query_utterance_index: int = Field(ge=0)
+    video_ids: list[str] | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class VoiceOnlyEntityRequest(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_voice_entity_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("人物名称不能为空")
+        return value
+
+
+class EntityUpdateRequest(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_entity_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("人物名称不能为空")
+        return value
+
+
+class VoiceSampleRequest(BaseModel):
+    video_id: str
+    utterance_index: int = Field(ge=0)
+    bind_track_id: int | None = Field(default=None, ge=0)
 
 
 class HealthResponse(BaseModel):

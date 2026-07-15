@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+
+from app.db import Catalog
 from app.settings import Settings
 from app.worker import subprocess_environment, worker_environment
 
@@ -79,3 +82,56 @@ def test_worker_environment_propagates_indexing_profile_settings(tmp_path):
     assert environment["ASR_SEMANTIC_LOCAL_FILES_ONLY"] == "true"
     assert environment["OCR_DEVICE"] == "auto"
     assert environment["OCR_VERSION"] == "PP-OCRv6"
+
+
+def test_selective_rebuild_preserves_existing_modalities(monkeypatch, tmp_path):
+    import app.worker as worker
+
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+    )
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    video_path = settings.upload_dir / "video-1.mp4"
+    video_path.write_bytes(b"fake")
+    catalog.create_video({
+        "id": "video-1",
+        "name": "demo.mp4",
+        "file_path": str(video_path),
+        "duration": 10.0,
+        "fps": 25.0,
+        "width": 1920,
+        "height": 1080,
+        "status": "ready",
+    })
+    catalog.update_video("video-1", indexed_modalities=["face", "visual"])
+    job = catalog.create_job({
+        "id": "job-1",
+        "video_id": "video-1",
+        "status": "queued",
+        "stage": "queued",
+        "progress": 0,
+        "modalities": ["asr"],
+        "options": {"asr_language": "auto"},
+    })
+    monkeypatch.setattr(worker, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout='{"chunks": 3}\n',
+            stderr="",
+        ),
+    )
+
+    worker.execute_job(job["id"])
+
+    updated_video = catalog.get_video("video-1")
+    updated_job = catalog.get_job(job["id"])
+    assert updated_video["indexed_modalities"] == ["asr", "face", "visual"]
+    assert updated_video["status"] == "ready"
+    assert updated_job["status"] == "completed"
+    assert updated_job["modalities"] == ["asr"]
