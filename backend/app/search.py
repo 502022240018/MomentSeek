@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -801,6 +800,82 @@ def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -
     return groups
 
 
+_ASR_LEXICAL_RESERVE_POOL_SIZE = 50
+_ASR_LEXICAL_RESERVE_MIN_SCORE = 0.50
+_ASR_LEXICAL_RESERVE_INITIAL_PRIMARY = 3
+_ASR_LEXICAL_RESERVE_PRIMARY_RUN = 8
+
+
+def _asr_result_lexical_score(result: SearchResult) -> float:
+    return max(
+        (
+            float(item.get("lexical_score") or 0.0)
+            for item in result.evidence
+            if item.get("modality") == "asr"
+        ),
+        default=0.0,
+    )
+
+
+def _reserve_asr_lexical_results(results: list[SearchResult], limit: int) -> list[SearchResult]:
+    """Reserve sparse result slots for strong lexical hits without rewriting confidence scores."""
+    above = [result for result in results if result.above_threshold]
+    below = [result for result in results if not result.above_threshold]
+    pool_size = max(_ASR_LEXICAL_RESERVE_POOL_SIZE, limit)
+    primary = above[:pool_size]
+    lexical = sorted(
+        (
+            result
+            for result in above
+            if _asr_result_lexical_score(result) >= _ASR_LEXICAL_RESERVE_MIN_SCORE
+        ),
+        key=lambda result: (_asr_result_lexical_score(result), result.score),
+        reverse=True,
+    )[:pool_size]
+    if not lexical:
+        return results
+
+    reranked: list[SearchResult] = []
+    emitted: set[int] = set()
+    primary_position = 0
+    lexical_position = 0
+
+    def emit(result: SearchResult) -> bool:
+        identity = id(result)
+        if identity in emitted:
+            return False
+        emitted.add(identity)
+        reranked.append(result)
+        return True
+
+    while (
+        primary_position < len(primary)
+        and primary_position < _ASR_LEXICAL_RESERVE_INITIAL_PRIMARY
+    ):
+        emit(primary[primary_position])
+        primary_position += 1
+
+    while primary_position < len(primary) or lexical_position < len(lexical):
+        while lexical_position < len(lexical):
+            candidate = lexical[lexical_position]
+            lexical_position += 1
+            if emit(candidate):
+                break
+
+        taken = 0
+        while (
+            primary_position < len(primary)
+            and taken < _ASR_LEXICAL_RESERVE_PRIMARY_RUN
+        ):
+            candidate = primary[primary_position]
+            primary_position += 1
+            if emit(candidate):
+                taken += 1
+
+    remaining_above = [result for result in above if id(result) not in emitted]
+    return reranked + remaining_above + below
+
+
 class SearchEngine:
     def __init__(self, settings: Settings, catalog: Catalog):
         self.settings = settings
@@ -1005,5 +1080,7 @@ class SearchEngine:
         # Above-threshold results first (each block sorted by score), so the UI can
         # draw a single divider where matches start dropping below threshold.
         results.sort(key=lambda item: (item.above_threshold, item.score), reverse=True)
+        if set(modalities) == {"asr"} and text:
+            results = _reserve_asr_lexical_results(results, limit)
         result_limit = 500 if visual_profile == "recall" else limit
         return [item.to_dict() for item in results[:result_limit]]

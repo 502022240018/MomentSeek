@@ -1,0 +1,48 @@
+{"id":"na001","split":"tune","category":"no_answer_easy","query":"火山口熔岩湖无人机航拍","targets":[]}
+{"id":"na002","split":"tune","category":"no_answer_easy","query":"深海潜水器探索马里亚纳海沟","targets":[]}
+{"id":"na003","split":"tune","category":"no_answer_easy","query":"家庭烘焙巧克力曲奇","targets":[]}
+{"id":"na004","split":"tune","category":"no_answer_easy","query":"量子计算机纠错算法教程","targets":[]}
+{"id":"na005","split":"tune","category":"no_answer_easy","query":"南极帝企鹅在暴风雪中孵蛋","targets":[]}
+{"id":"na006","split":"tune","category":"no_answer_easy","query":"古埃及金字塔考古发现木乃伊","targets":[]}
+{"id":"na007","split":"tune","category":"no_answer_hard","query":"手机发布会宣布支持卫星通信","targets":[]}
+{"id":"na008","split":"tune","category":"no_answer_hard","query":"教师节给班主任送一支名牌钢笔","targets":[]}
+{"id":"na009","split":"tune","category":"no_answer_hard","query":"搬家公司把办公室搬到上海浦东","targets":[]}
+{"id":"na010","split":"tune","category":"no_answer_hard","query":"海底捞用机器人替代所有服务员","targets":[]}
+{"id":"na011","split":"tune","category":"no_answer_hard","query":"金融市场波动指数创历史最低","targets":[]}
+{"id":"na012","split":"tune","category":"no_answer_hard","query":"处理器全部从英特尔换成AMD","targets":[]}
+{"id":"na013","split":"tune","category":"no_answer_hard","query":"图书馆把八千本书全部卖掉","targets":[]}
+{"id":"na014","split":"tune","category":"no_answer_cross_language","query":"The company moved its headquarters to New York","targets":[]}
+{"id":"na015","split":"tune","category":"no_answer_cross_language","query":"El profesor recibió un ordenador portátil","targets":[]}
+{"id":"na016","split":"tune","category":"no_answer_cross_language","query":"Messi anunció su retirada del fútbol","targets":[]}
+{"id":"na017","split":"dev","category":"no_answer_easy","query":"高铁列车穿越雪山隧道","targets":[]}
+{"id":"na018","split":"dev","category":"no_answer_easy","query":"宇航员在月球基地种植蔬菜","targets":[]}
+{"id":"na019","split":"dev","category":"no_answer_easy","query":"显微镜观察细胞有丝分裂","targets":[]}
+{"id":"na020","split":"dev","category":"no_answer_easy","query":"爵士乐队现场演奏萨克斯","targets":[]}
+{"id":"na021","split":"dev","category":"no_answer_easy","query":"厨师制作日式寿司拼盘","targets":[]}
+{"id":"na022","split":"dev","category":"no_answer_easy","query":"台风登陆沿海城市紧急疏散","targets":[]}
+{"id":"na023","split":"dev","category":"no_answer_hard","query":"充电宝可以给电动汽车充电","targets":[]}
+{"id":"na024","split":"dev","category":"no_answer_hard","query":"孩子给老师买了一台笔记本电脑","targets":[]}
+{"id":"na025","split":"dev","category":"no_answer_hard","query":"公司取消搬家继续留在原办公室","targets":[]}
+{"id":"na026","split":"dev","category":"no_answer_hard","query":"餐厅经理必须有五年海外工作经验","targets":[]}
+{"id":"na027","split":"dev","category":"no_answer_hard","query":"单位把社保全部改成住房公积金","targets":[]}
+{"id":"na028","split":"dev","category":"no_answer_hard","query":"武汉大学和华中科技大学正式合并","targets":[]}
+{"id":"na029","split":"dev","category":"no_answer_hard","query":"小区禁止所有居民饲养宠物","targets":[]}
+{"id":"na030","split":"dev","category":"no_answer_cross_language","query":"La biblioteca cerró por reformas","targets":[]}
+{"id":"na031","split":"dev","category":"no_answer_cross_language","query":"The restaurant replaced every waiter with robots","targets":[]}
+{"id":"na032","split":"dev","category":"no_answer_cross_language","query":"Mbappe announced his retirement from football","targets":[]}
+{"id":"na033","split":"holdout","category":"no_answer_easy","query":"森林消防员扑灭山火","targets":[]}
+{"id":"na034","split":"holdout","category":"no_answer_easy","query":"博物馆展示恐龙化石","targets":[]}
+{"id":"na035","split":"holdout","category":"no_answer_easy","query":"农民驾驶收割机收小麦","targets":[]}
+{"id":"na036","split":"holdout","category":"no_answer_easy","query":"芭蕾舞演员排练天鹅湖","targets":[]}
+{"id":"na037","split":"holdout","category":"no_answer_easy","query":"机器人参加国际象棋比赛","targets":[]}
+{"id":"na038","split":"holdout","category":"no_answer_easy","query":"天文学家观测遥远的黑洞","targets":[]}
+{"id":"na039","split":"holdout","category":"no_answer_hard","query":"短视频平台上线未成年人防沉迷模式","targets":[]}
+{"id":"na040","split":"holdout","category":"no_answer_hard","query":"活动抽奖一等奖是日本往返机票","targets":[]}
+{"id":"na041","split":"holdout","category":"no_answer_hard","query":"客户交片只接受网盘链接不收移动硬盘","targets":[]}
+{"id":"na042","split":"holdout","category":"no_answer_hard","query":"河南一本录取率提高到百分之二十","targets":[]}
+{"id":"na043","split":"holdout","category":"no_answer_hard","query":"壳牌在中国推出纯电动汽车电池","targets":[]}
+{"id":"na044","split":"holdout","category":"no_answer_hard","query":"学区房价格一年下降了一半","targets":[]}
+{"id":"na045","split":"holdout","category":"no_answer_hard","query":"超市今年盈利一千万元","targets":[]}
+{"id":"na046","split":"holdout","category":"no_answer_cross_language","query":"Das Unternehmen zog seinen Hauptsitz nach Berlin","targets":[]}
+{"id":"na047","split":"holdout","category":"no_answer_cross_language","query":"La batería externa puede cargar un coche eléctrico","targets":[]}
+{"id":"na048","split":"holdout","category":"no_answer_cross_language","query":"The apartment complex banned all pets","targets":[]}

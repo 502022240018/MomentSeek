@@ -1,0 +1,69 @@
+{
+  "dataset": "yesterday_ep04_embedded_zh_simplified_20260708",
+  "label_source": "embedded_subtitle",
+  "source_video_id": "a293b5981126444182208da7ba6274f5",
+  "source_video_name": "电视剧昨夜降至04.mp4",
+  "source_video_file": "runtime-server/uploads/a293b5981126444182208da7ba6274f5.mp4",
+  "subtitle_stream": "0:s:0",
+  "subtitle_language": "zh-Hans",
+  "subtitle_title": "Simplified Chinese",
+  "notes": "Extracted from the default embedded SubRip subtitle stream. Intended as ASR transcript truth / sidecar input.",
+  "files": {
+    "srt": "eval/asr/truth/yesterday_ep04_embedded_zh_simplified_20260708.srt",
+    "sidecar_json": "eval/asr/truth/yesterday_ep04_embedded_zh_simplified_20260708.sidecar.json",
+    "truth_jsonl": "eval/asr/truth/yesterday_ep04_embedded_zh_simplified_20260708.jsonl"
+  },
+  "segment_count": 653,
+  "first_start_ms": 24160,
+  "last_end_ms": 1818880,
+  "total_subtitle_duration_ms": 709118,
+  "short_text_segments_le_2_chars": 84,
+  "empty_segments": 0,
+  "sample": [
+    {
+      "index": 0,
+      "subtitle_index": 1,
+      "start_time": 24.16,
+      "end_time": 25.56,
+      "start_ms": 24160,
+      "end_ms": 25560,
+      "text": "你姐过生日那天"
+    },
+    {
+      "index": 1,
+      "subtitle_index": 2,
+      "start_time": 26.48,
+      "end_time": 28.04,
+      "start_ms": 26480,
+      "end_ms": 28040,
+      "text": "我赶到的时候已经晚了"
+    },
+    {
+      "index": 2,
+      "subtitle_index": 3,
+      "start_time": 30.28,
+      "end_time": 31.32,
+      "start_ms": 30280,
+      "end_ms": 31320,
+      "text": "虽然后来我猜到"
+    },
+    {
+      "index": 3,
+      "subtitle_index": 4,
+      "start_time": 31.32,
+      "end_time": 32.52,
+      "start_ms": 31320,
+      "end_ms": 32520,
+      "text": "发生什么了 可是"
+    },
+    {
+      "index": 4,
+      "subtitle_index": 5,
+      "start_time": 34.2,
+      "end_time": 35.24,
+      "start_ms": 34200,
+      "end_ms": 35240,
+      "text": "可是我没有证据"
+    }
+  ]
+}

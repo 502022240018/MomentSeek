@@ -4,7 +4,15 @@ import numpy as np
 import pytest
 
 from app.db import Catalog
-from app.search import Candidate, SearchEngine, _groups, _visual_candidates
+from app.search import (
+    Candidate,
+    SearchEngine,
+    SearchResult,
+    _groups,
+    _reserve_asr_lexical_results,
+    _visual_candidates,
+    lexical_score,
+)
 from app.settings import Settings
 
 
@@ -67,6 +75,49 @@ def test_asr_adjacent_segments_can_merge():
     assert len(groups) == 1
     assert min(item.start_time for item in groups[0]) == 10
     assert max(item.end_time for item in groups[0]) == 17
+
+
+def test_cjk_lexical_score_keeps_bigram_coverage_on_entity_extension():
+    text = "说实话,我们天山不好进的,一般都去昆仑。"
+
+    assert lexical_score("昆仑山", text) == pytest.approx(1 / 2)
+    assert lexical_score("昆仑山", "今天去昆明旅游") == 0
+
+
+def test_asr_lexical_pool_preserves_primary_top3_and_reserves_next_slot():
+    def result(name: str, score: float, lexical: float) -> SearchResult:
+        return SearchResult(
+            video_id=name,
+            video_name=name,
+            start_time=0,
+            end_time=1,
+            score=score,
+            modalities=["asr"],
+            thumbnail_url=None,
+            media_url="",
+            clip_url="",
+            decision="semantic_hit",
+            evidence=[{"modality": "asr", "lexical_score": lexical}],
+        )
+
+    primary = [
+        result("lexical-top", 0.99, 0.5),
+        result("semantic-1", 0.98, 0.0),
+        result("semantic-2", 0.97, 0.0),
+        result("semantic-3", 0.96, 0.0),
+        result("weak-lexical", 0.95, 0.4),
+        result("lexical-reserved", 0.50, 0.5),
+    ]
+
+    reranked = _reserve_asr_lexical_results(primary, limit=5)
+
+    assert [item.video_id for item in reranked[:4]] == [
+        "lexical-top",
+        "semantic-1",
+        "semantic-2",
+        "lexical-reserved",
+    ]
+    assert reranked.index(primary[3]) < reranked.index(primary[4])
 
 
 def test_search_rejects_legacy_index_without_v3_manifest(tmp_path):
