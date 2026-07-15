@@ -33,10 +33,13 @@ runtime/
 上传视频
   -> 写入 SQLite videos
   -> 保存源视频到 runtime/uploads
-  -> 创建索引任务
+  -> 选择 visual / face / asr / ocr 中的一条或多条通道
+  -> 创建选择性构建或重建任务
   -> worker / stage_runner 构建所选通道索引
   -> search 加载索引并返回时间段、证据、缩略图、媒体和 clip URL
 ```
+
+索引任务只覆盖本次选择通道对应的 `.npz` 和 manifest channel；同一视频未选择的既有通道继续保留。因而同一个任务可以同时“构建缺失通道”和“重建已有通道”，但同一视频不能并发运行多个索引任务。
 
 索引通道：
 
@@ -93,6 +96,7 @@ backend/app/indexer_daemon.py
 | 路径 | 职责 |
 |---|---|
 | `frontend/src/main.tsx` | 上传、建索引、搜索、播放、素材管理等主 UI |
+| `frontend/src/indexing.tsx` | 索引通道选择、分通道参数、构建/重建动作判定 |
 | `frontend/src/api.ts` | 前端 API client 和 TypeScript 类型 |
 | `frontend/src/styles.css` | 样式 |
 
@@ -126,7 +130,7 @@ staging/prod 验证时应把这些字段与 `docs/DEPLOYMENT.md` 中的 release 
 | `DELETE` | `/api/videos/{video_id}` | `main.py::delete_video` | 删除视频、索引、缩略图、任务 | `api.ts::deleteVideo` | `db.py`, runtime 清理 |
 | `GET` | `/api/videos/{video_id}/media` | `main.py::video_media` | 原视频流式播放 | 播放器/结果卡 | `runtime/uploads` |
 | `GET` | `/api/videos/{video_id}/clip` | `main.py::video_clip` | 生成/返回命中时间段 clip | 播放器/结果卡 | `media.py`, `runtime/clips` |
-| `POST` | `/api/videos/{video_id}/index` | `main.py::create_index_job` | 创建索引任务 | `api.ts::indexVideo` | `schemas.py`, `db.py`, `worker.py` |
+| `POST` | `/api/videos/{video_id}/index` | `main.py::create_index_job` | 为指定非空 `modalities` 集合创建选择性构建/重建任务，保留未选择的既有通道 | `api.ts::indexVideo` | `schemas.py`, `db.py`, `worker.py` |
 | `GET` | `/api/jobs` | `main.py::list_jobs` | 任务列表，可按 video 过滤 | `api.ts::jobs` | `db.py` |
 | `GET` | `/api/jobs/{job_id}` | `main.py::get_job` | 任务详情、失败信息、日志上下文 | UI 轮询/详情 | `db.py` |
 | `POST` | `/api/entities` | `main.py::create_entity` | 登记人物参考图 | `api.ts::createEntity` | `faces.py`, `db.py`, `runtime/entities` |
@@ -141,7 +145,7 @@ staging/prod 验证时应把这些字段与 `docs/DEPLOYMENT.md` 中的 release 
 
 重要请求模型在 `backend/app/schemas.py`：
 
-- `IndexRequest`：`modalities`、visual 参数、face fps、OCR fps、ASR 模型和语言。
+- `IndexRequest`：`modalities` 必须是 `visual / face / asr / ocr` 的非空子集；其余字段是各通道参数。重复通道会去重，任务按请求中的通道顺序执行。
 - `VideoRenameRequest`：校验视频名称。
 - `HealthResponse`：health 响应结构。
 

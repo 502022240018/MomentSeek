@@ -179,7 +179,7 @@ features.face_cosine
 
 ## ASR
 
-Speaker Diarization 与声纹检索目前处于设计阶段，第一阶段计划增加视频内 speaker turns、ASR chunk speaker 归属和每个 speaker 一个聚合声纹 embedding。正式 schema、debug 分层和跨视频逐库声纹搜索方案见 `docs/superpowers/specs/2026-07-13-speaker-diarization-voiceprint-design.md`；在实现完成前，当前 ASR v3 协议不变。
+Speaker Diarization 与声纹检索已作为 ASR 的可选子阶段实现，不是独立检索通道。模型的 1.5 秒重叠短窗只用于边界分析与聚类；正式 `speaker.npz` 保存连续同 speaker 窗口合并、再按 ASR 自然边界切分后的自适应 turn 声纹、时间/ASR 引用和 track 缓存，不保存短窗。人物库统一管理人脸身份、视频内 speaker 绑定及代表声音。视频 speaker 接口按总说话时长排序，每人最多返回 5 个接近该人声纹中心的代表片段，完整 turn 向量仍用于同声纹检索。跨视频永久 Speaker ID 暂不自动合并。
 
 2026-07-09 起，新建 ASR v3 索引使用分层 pipeline：
 
@@ -247,6 +247,7 @@ text_profile
 ```text
 docs/experiments/asr/2026-07-07-asr-postprocess-tuning.md
 docs/experiments/asr/2026-07-13-asr-production-chunk-pipeline.md
+docs/experiments/asr/2026-07-14-asr-dual-pool-retrieval.md
 ```
 
 当前常用 ASR 引擎策略：
@@ -277,6 +278,14 @@ query text -> lexical score
 可选 query text -> MiniLM embedding -> semantic cosine
 combined_score = max(lexical_score, 0.65 * semantic_score + 0.35 * lexical_score)
 ```
+
+当前候选判定使用 `semantic_score >= 0.55 or lexical_score >= 0.25`。2026-07-14 在 74 条有答案和 56 条无答案查询上的校准表明，现行无答案 FAR 为 100%；保持约 95% target recall 时，验证集 FAR 仍接近 90%。因此这两个阈值目前只能理解为宽松结果分区，不能对外宣称“有答案/无答案”，生产参数也没有因该实验调整。详见 `docs/experiments/asr/2026-07-14-asr-no-answer-threshold-calibration.md`。
+
+Lexical 先做 NFKC、繁简和搜索标点归一化。完整 query 子串命中记为 `1.0`，否则计算 query bigram 覆盖率。Lexical 与 semantic 分别形成候选池；ASR-only 搜索保留 combined score 的主排序，同时对 `lexical_score >= 0.50` 的强字面候选做稀疏保底：先完整保留主排序前 3 条，此后每 8 条主结果最多插入 1 条尚未出现的 lexical 候选，候选池大小为 50。
+
+保底只改变最终返回顺序，不改写 calibrated `score`。多通道搜索仍按原有跨通道融合执行，不应用 ASR-only lexical reserve。42 条当前素材查询的 A/B 表明，直接提高 CJK 局部覆盖分或使用 weighted RRF 都会降低 Top-1，因此未采用；详见 `docs/experiments/asr/2026-07-14-asr-dual-pool-retrieval.md`。
+
+2026-07-14 的 25-source / 82-query 离线实验表明，`gte-multilingual-base` 在 ASR chunk 排序上明显优于当前 MiniLM；最佳离线融合为 90% GTE semantic + 10% legacy bigram，并把 `lexical_score >= 0.50` 的强字面命中放入独立优先区。GTE 为 768 维，主权重约 611 MB，本机缓存约 628 MB；当前已明确暂缓，**没有替换本节现行生产协议，也不重建索引**。若未来恢复该方向，仍需完成 GTE 专属 confidence/threshold、真实 API result-level A/B，以及 ASR/OCR semantic 模型配置解耦；详见 `docs/experiments/asr/2026-07-14-asr-retrieval-v2-six-stage.md`。
 
 ASR evidence 主要字段：
 

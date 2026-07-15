@@ -1,13 +1,13 @@
 # MomentSeek 当前状态
 
-更新时间：2026-07-13
+更新时间：2026-07-15
 
 ## 项目位置
 
 ```text
 工作目录：C:\Users\29154\Projects\video-removal-system\prototype
 项目目录：video_retrieval_mvp/
-当前分支：feat/asr-search-asset-improvements
+当前分支：main
 仓库：    https://github.com/502022240018/MomentSeek
 ```
 
@@ -17,8 +17,11 @@ MomentSeek 是一个多模态视频检索 MVP，当前有四条检索通道：
 |---|---|
 | `visual` | 文本/图片搜画面，当前服务器使用 SigLIP2，在 5s bucket 内按帧级 MaxSim 召回 |
 | `face` | 参考图或人物库 entity 搜人脸出现片段 |
+| `asr + speaker` | 可选说话人区分、逐句声纹检索；人物库中统一管理和绑定 |
 | `asr` | 搜语音转写文本，支持 lexical 和可选 semantic |
 | `ocr` | 搜画面文字，支持 lexical 和可选 semantic |
+
+Speaker 当前保留已实现基线，后续聚类、重叠语音、质量评分和查全率评测优化已记录为 deferred，暂不进入当前开发范围。
 
 详细通道协议见 `docs/RETRIEVAL_CHANNELS.md`。
 
@@ -51,9 +54,20 @@ VISUAL_HF_CACHE_DIR=/app/runtime/hf_cache
 本地 /api/jobs：active_count=0
 ASR NPZ：9/9 可读取 chunk_times_ms、texts、384-d embeddings、embedding_chunk_indices
 ASR API 搜索：6 条中文、西语和英文查询的目标视频均为 Top-1
-后端测试：149 passed（已删除 6 个仅覆盖旧 asr_postprocess/旧报告的死路径测试）
+后端主测试：156 passed（不含工作树中独立开发的 speaker 评估测试）
+ASR 双池评测：42 条，Hit@1 0.833 保持不变，Hit@5 0.905 -> 0.929，Hit@50 0.929 -> 0.952
+ASR 核心回归：“昆仑山”指定原句由 Top-50 外提升到真实 API 第 4
+ASR retrieval v2：25 个 source、6854 个实际 ASR chunk、82 条查询；qrel 与开放素材 split 隔离校验通过
+六阶段离线结论：GTE + 90/10 semantic/lexical + strong lexical priority 全量 MRR 0.899、Hit@1 0.865、Hit@5 0.946、Hit@50 0.973
+GTE 资源记录：768 维，主权重约 611 MB，本机模型缓存约 628 MB；当前明确暂缓，不改默认 MiniLM、不重建索引
+ASR 无答案校准：74 条有答案 + 56 条无答案；现行 FAR 100%，95% recall operating point 的 holdout FAR 仍 89.5%，没有安全单阈值，生产配置未改
+ASR 下一阶段：执行 RQ-003H，小型 multilingual cross-encoder 离线精排现有 Top-30/50；保持 MiniLM 384 维索引与第一阶段候选池不变
+注意：GTE 仍是实验候选，尚未替换当前 MiniLM 索引；不得按已上线表述
 最终回归：runtime-server/analysis/asr_formal_regression_20260713_final/
 最终听查/检索评估：runtime-server/analysis/asr_formal_review_eval_20260713_final_v2/
+双候选池评测：runtime-server/analysis/asr_hybrid_retrieval_eval_20260714/
+六阶段检索评测：runtime-server/analysis/asr_retrieval_benchmark_20260714/
+无答案阈值校准：runtime-server/analysis/asr_no_answer_threshold_20260714/
 ```
 
 当前 quick tunnel 地址是临时地址，失效后需要重新启动 cloudflared：
@@ -155,6 +169,8 @@ audio_extract
    纯语气/连接词、过短项、明显不可信文字/时长比不生成 embedding
 -> MiniLM semantic embedding
 -> asr.npz
+-> search: lexical / semantic 独立候选池
+   combined score 保持主序；lexical >= 0.50 的强字面候选稀疏保底
 ```
 
 2026-07-13 已使用上述正式路径重建本地全部 9 个视频的 ASR 索引。最终路由：5 个中文长视频和 1 个方言视频走 SenseVoice，世界杯广告与比赛集锦走英文 faster-whisper，球星牛奶广告走西语 faster-whisper。书籍纪录片曾因只探测片头 30s 被误判为英文，改成多位置投票后已重建为 `funasr / zh`。
@@ -180,6 +196,7 @@ Quick tunnel 域名不是固定的。前端出现 `failed to fetch` 时，先检
 
 ## 当前注意事项
 
+- 视频资产页支持任意选择 `visual / face / asr / ocr` 通道进行构建或重建；一次任务可以混合补建缺失通道和重建已有通道，未选择通道保持不变。
 - 多人开发与可复制部署方案已设计，第一阶段新增 dev.cpu/dev.cuda/staging.ascend/prod.ascend profile 和 manifest。
 - 本地 9 个视频的 ASR 已全部重跑为 schema v3；其他机器部署后仍需对各自旧索引重跑对应通道。
 - ASR/OCR semantic 索引是可选增强；缺失时会退回 lexical。

@@ -154,28 +154,79 @@ ID:
 
 ```text
 优先级：P2
-状态：open
+状态：in_progress / offline experiment complete
 范围：asr/ocr semantic ranking / embedding model evaluation / threshold calibration
 问题或目标：
   MiniLM 在纯 semantic、跨语言或低分区间会出现弱相关结果与真实结果近分并列。
-  需要测试 multilingual-e5-small 能否在保留 MiniLM 原有模糊语义、近义改写和多语言能力的同时，提高 query -> ASR/OCR chunk 检索质量，再决定是否替换当前 MiniLM。
+  已完成 MiniLM / multilingual-e5-small / gte-multilingual-base 的 ASR chunk-level 对比；GTE 明显更好，但模型专属阈值和生产 API A/B 尚未完成，当前默认仍是 MiniLM。
 影响：
   中文查询“姆巴佩应该多传球”时，世界杯广告中的真实英文台词在全库 API 排第 2；Top-1 是无明显语义关系的中文综艺短句，两者校准分均约 0.62。
 证据或上下文：
   2026-07-13 正式 embedding 评估 18 条 query：目标 chunk Top-1/3/5 = 16/18/18；两条 Top-1 失败都在 Top-2。
+  2026-07-14 retrieval v2：25 个 source、6854 个真实 ASR chunk、74 条有答案查询和 8 条无答案查询。GTE semantic-only 全量 MRR/H@1/H@5 = 0.869/0.824/0.932，MiniLM 为 0.761/0.703/0.851；E5-small 没有形成稳定收益。
+  最终离线融合候选为 GTE absolute + legacy bigram，90/10 semantic-primary，并为 lexical coverage >= 0.50 建独立优先区；全量 MRR/H@1/H@5/H@50 = 0.899/0.865/0.946/0.973。
+  GTE-base 为 768 维，主权重文件 610,753,338 bytes，本机 Hugging Face 缓存合计约 627,964,743 bytes；相比当前 384 维 MiniLM，float16 索引向量空间翻倍。当前决定是只保留实验记录，暂不改默认模型、依赖或正式索引。
+  2026-07-14 无答案校准扩充到 56 条负例。现行 MiniLM threshold 的 FAR 为 100%；保持 tune target recall >= 95% 时，holdout recall/FAR 为 0.935/0.895。raw cosine 0.60 的严格观察点全量 recall/FAR 为 0.919/0.393，仍不适合直接作为“无答案”判定，因此生产阈值未修改。
 下一步：
-  1. 固定当前正式 ASR/OCR chunk 和人工 query 集，只重建候选文本 embedding，不重新转写或修改 chunk，避免混入其他变量。
-  2. 以 paraphrase-multilingual-MiniLM-L12-v2 为基线，优先 A/B 测试 multilingual-e5-small；E5 必须分别使用 `query:` 和 `passage:` 输入格式。若 E5 收益不足，再测试 gte-multilingual-base 作为质量上限候选。
-  3. 同时覆盖近义模糊查询、概括性查询、跨语言查询、ASR 错词样例和字面相似但语义无关的困难负例。
-  4. 分开评估 raw cosine 排序和完整 API 排序，记录 chunk/video Recall@1/3/5、MRR、正负例分数间隔、CPU 建库吞吐、冷热查询延迟、模型常驻内存与索引大小。
-  5. 每个候选模型单独校准 semantic confidence 和 lexical 融合；不得沿用 MiniLM 固定余弦阈值，也不得混用不同模型生成的查询与索引向量。
-  6. 只有当 E5 在固定评估集和新增 holdout 上稳定改善检索，且速度、内存和部署复杂度可接受时，才替换默认模型并重建全部 ASR/OCR semantic embedding；否则继续保留 MiniLM。
-  7. 不要通过继续修改 chunk 切分来掩盖向量排序问题。
+  1. 用真实用户零结果 query 扩充无答案、困难负例和多语言 query；如果未来恢复 GTE 评估，必须单独拟合 confidence / above-threshold，不得沿用 MiniLM sigmoid 和阈值。
+  2. 在真实 API 的 per-video candidate、clip merge、final result 层复跑 shadow A/B，并记录视频级 MRR、冷热查询延迟、模型常驻内存与 CPU/GPU 建库吞吐。
+  3. 将 ASR 与 OCR semantic model 配置解耦，或先完成 OCR 固定评测；禁止混用 MiniLM 与 GTE 向量空间。
+  4. 上述验证通过后，才修改默认模型并重建全部 ASR semantic embedding；当前正式 9 条视频仍保留 MiniLM 384-d。
+  5. 不要通过继续修改 chunk 切分来掩盖向量排序问题。
 相关文件或实验：
   backend/app/search.py
   backend/app/indexing/text_semantic.py
   runtime-server/analysis/asr_formal_review_eval_20260713_final_v2/REPORT.md
   docs/experiments/asr/2026-07-13-asr-production-chunk-pipeline.md
+  docs/experiments/asr/2026-07-14-asr-retrieval-v2-six-stage.md
+  docs/experiments/asr/2026-07-14-asr-no-answer-threshold-calibration.md
+  eval/asr/retrieval_v2/
+  scripts/asr_retrieval_benchmark.py
+  scripts/asr_no_answer_threshold_eval.py
+  runtime-server/analysis/asr_retrieval_benchmark_20260714/
+```
+
+### RQ-003H ASR 候选精排
+
+```text
+优先级：P1
+状态：planned / evidence ready
+范围：ASR-only candidate reranking / multilingual relevance / result-level evaluation
+问题或目标：
+  当前 MiniLM + combined 主序 + lexical reserve 的候选召回已经较高，但 Top-1 仍明显低于 Top-50。
+  下一阶段保持 MiniLM 384 维索引不变，对现有 Top-30/50 候选增加小型 multilingual cross-encoder 精排，优先改善语义改写、跨语言和同主题近分误排。
+实验依据：
+  retrieval v2 的 74 条有答案查询中，当前参考方案 MRR/H@1/H@5/H@50 = 0.831/0.784/0.919/0.946，约 70 条已进入 Top-50、68 条进入 Top-5、58 条位于 Top-1。
+  这说明多数失败不是“完全没有召回”，而是正确 chunk 已在候选池中但排名不够靠前；精排存在明确的可提升上限。
+  42 条平台查询的 combined-primary lexical reserve 保持 H@1 0.833，并将 H@5/H@50 提升到 0.929/0.952；全量 RRF 和通用 CJK 连续片段加分会降低 Top-1，不能作为精排替代品。
+  无答案实验中，单阈值保持约 95% recall 时 holdout FAR 仍约 89.5%；“收入八千本书/卖掉八千本书”等困难反事实需要 query-chunk 联合判断，不能继续只调 cosine。
+候选输入基线：
+  1. 先固定现有 combined 主序和 lexical reserve，取去重后的 Top-30/50，避免同时改召回与精排导致归因不清。
+  2. 第二阶段再加入语言感知 lexical、受保护 pinyin 和多视图候选，比较 candidate recall 上限变化。
+  3. 每个候选保留原始 score、lexical/semantic/pinyin 来源和 chunk_id；reranker 只新增独立 relevance score，不覆盖原始 evidence。
+实验步骤：
+  1. 冻结 25-source corpus、74 条正例、56 条无答案及 tune/dev/holdout；先输出每条 query 的固定 Top-50 候选快照。
+  2. 选择 2-3 个体量可控的 multilingual cross-encoder，只做离线 Top-30/50 rerank；记录模型大小、CPU/GPU 常驻内存、批量吞吐和单 query p50/p95 延迟。
+  3. 输入先使用 query + 当前 chunk；再单变量 A/B query + 当前 chunk + 邻接上下文，禁止同时加入新的 chunk 合并规则。
+  4. 比较无精排、纯 reranker、reranker + strong lexical safety 三组；strong exact/lexical 命中不得被明显不相关候选挤出 Top-5。
+  5. 按 semantic_paraphrase、cross_lingual、lexical、短实体和语言分别报告 MRR、H@1/5/50，不能只看全量平均。
+  6. 在 56 条无答案中单独报告 FAR，并人工检查实体、数字、否定和反事实 hard negatives；精排分数不能未经校准直接改成“有答案”判断。
+验收原则：
+  1. tune 只用于选择模型和参数，dev 用于方向与安全约束，holdout 只做最终报告。
+  2. 相比当前参考，H@1 至少提高 3 个百分点，H@5/H@50 不下降，且 lexical exact/rewrite 不出现明确回归。
+  3. holdout 与跨语言分类不能出现方向相反的明显退化；收益不能只来自当前平台的少量已知 query。
+  4. 延迟和常驻内存必须单列；若精排成本不适合交互搜索，则缩小 Top-K、量化或蒸馏，而不是静默接受高延迟。
+边界：
+  精排只能重排已召回候选，不能救回 Top-50 外的约 4 条正例。漏召继续由 RQ-003A 的 pinyin/实体容错、语言感知 lexical、多视图或 query expansion 处理。
+  本事项不更换高维 embedding、不重建 ASR 文本，也不把 ColBERT/SPLADE 等新索引体系混入第一轮实验。
+相关文件或实验：
+  backend/app/search.py
+  eval/asr/hybrid_retrieval_queries_v1.jsonl
+  eval/asr/retrieval_v2/
+  docs/experiments/asr/2026-07-14-asr-dual-pool-retrieval.md
+  docs/experiments/asr/2026-07-14-asr-retrieval-v2-six-stage.md
+  docs/experiments/asr/2026-07-14-asr-no-answer-threshold-calibration.md
+  runtime-server/analysis/asr_retrieval_benchmark_20260714/
 ```
 
 ### RQ-003F ASR 启发式规则消融与准入
@@ -195,12 +246,15 @@ ID:
   5. 规则只有在当前评估集与 holdout 上都改善，且没有明确误伤时才进入或继续留在正式路径。
 验收原则：
   最终通用后处理只保留空白/字符规范化、可靠边界合并和极端异常过滤；模型或 adapter 负责其特有输出格式。
+已完成的消融：
+  2026-07-14 在 25-source / 82-query retrieval v2 上比较 current eligibility、obvious hard filter、hard filter + soft penalty。新增规则只多拒绝 6/6641 个 semantic chunk，soft penalty 降权 218 个 chunk；所有 Hit 指标不变，tune 加权目标增益仅 0.462 个百分点，未达到 0.5 个百分点最小实质收益门槛，因此保留 current eligibility，不新增规则。
 相关文件或实验：
   backend/app/indexing/asr_retrieval_chunks.py
   backend/app/indexing/asr_text.py
   backend/app/indexing/asr.py
   runtime-server/analysis/asr_formal_review_eval_20260713_final_v2/
   docs/experiments/asr/2026-07-13-asr-production-chunk-pipeline.md
+  docs/experiments/asr/2026-07-14-asr-retrieval-v2-six-stage.md
 ```
 
 ### RQ-003A ASR 错词容错与专有名词召回
@@ -217,6 +271,8 @@ ID:
 证据或上下文：
   现有素材里出现过类似“黄拔”“赵正宵”“冰气”等疑似 ASR 错词。
   embedding 对完整上下文的主题相似度有效，但对短 chunk 或关键名词错误无能为力。
+已完成：
+  2026-07-14：基于当前 9 个完整 ASR 索引建立 42 条 lexical / semantic 查询集。否决通用 CJK 连续片段加分和直接 weighted RRF，改为 combined 主序 + 强 lexical 独立候选池保底；全量 Hit@1 保持 0.833，Hit@5 从 0.905 提升到 0.929，Hit@50 从 0.929 提升到 0.952。“昆仑山”指定原句由离线第 72、真实 API Top-50 外提升到真实 API 第 4，无需重建索引。
 未来优化方向：
   1. ASR 模型质量对比：按中文/英文/多语种素材比较 FunASR/Paraformer、Whisper small、Whisper medium 或其他更强转写模型。
   2. 发音容错索引：为中文 ASR 文本增加 pinyin/近音检索 fallback，补人名、地名、片名、专有名词听错导致的漏召回。
@@ -231,8 +287,11 @@ ID:
   backend/app/search.py
   docs/experiments/asr/
   docs/experiments/asr/2026-07-07-asr-pinyin-fallback-seed.md
+  docs/experiments/asr/2026-07-14-asr-dual-pool-retrieval.md
   eval/asr/asr_pinyin_seed_eval_20260707.jsonl
+  eval/asr/hybrid_retrieval_queries_v1.jsonl
   scripts/asr_error_candidates.py
+  scripts/asr_hybrid_retrieval_eval.py
   scripts/asr_pinyin_fallback_eval.py
 ```
 
@@ -358,7 +417,7 @@ ID:
 
 ```text
 优先级：P1
-状态：planned
+状态：in_progress / unified evaluator implemented
 范围：retrieval evaluation / quality regression
 问题或目标：
   Visual、ASR 和 sequence retrieval 已有多份数据集、脚本与实验记录，但尚未形成覆盖核心用户查询的统一固定回归门槛。
@@ -367,8 +426,8 @@ ID:
 证据或上下文：
   当前 eval/visual、eval/asr 和 docs/experiments 已积累可复用资产；ASR 已有固定 semantic query 评估，Visual 仍需要把典型误召查询纳入稳定基线。
 下一步：
-  1. 固定 query、目标视频/时间段、负样本和 train/holdout 划分。
-  2. 统一输出 Recall@K、MRR、Top-K 误召率、阈值通过率和播放时间段重叠指标。
+  1. 已新增 `scripts/retrieval_quality_eval.py` 和 `eval/RETRIEVAL_QUALITY.md`，统一输出 Recall@K、MRR、nDCG@K、Top-K 误召率、无答案错误接受率和时间段 tIoU。
+  2. 固定真实剪辑 query、目标视频/时间段、负样本和 tune/dev/holdout 划分；当前 Visual seed 中未人工确认的 positives 不得充当正式门槛。
   3. 先把 RQ-002 的 top1/top3/mean 候选策略做单变量离线对比。
   4. 为关键指标定义允许波动和回归门槛，并在搜索策略变更时运行。
 相关文件或实验：
@@ -383,24 +442,27 @@ ID:
 ### RQ-006 Speaker Diarization 与声纹检索
 
 ```text
-优先级：P1
-状态：planned
+优先级：P2
+状态：deferred（当前基线已实现，后续优化暂缓）
 范围：asr speaker attribution / voiceprint retrieval
 问题或目标：
-  当前 ASR chunk 没有视频内说话人归属，也不能使用参考语音跨视频搜索同一说话人。
-目标方案：
-  1. Diarization 生成视频内 speaker turns，并尽量按可靠 speaker 边界切 ASR retrieval chunk。
-  2. 每个视频内 speaker 从多个高质量语音窗口稳健聚合一个正式声纹 embedding。
-  3. 正式 speaker.npz 只保存 turns、chunk 归属、track embeddings 和有效标记。
-  4. debug 模式把原始 turns、临时样本向量、质量分数和对齐诊断写入独立 debug 产物。
-  5. 第一阶段不建立跨视频永久 Speaker ID；参考语音查询逐视频比较 track embeddings 后全局排序。
+  当前基线已支持视频内说话人区分、自适应 speaker turn、逐 turn 声纹索引、
+  跨视频同声纹搜索，以及在人物库中查看、修正和绑定 speaker。
+已知不足：
+  1. 谱聚类仍可能欠分，UMAP + HDBSCAN fallback 仍可能过分。
+  2. 尚未可靠处理重叠说话、音乐和低信噪比片段。
+  3. track 中心为简单均值，缺少质量加权、离群点过滤和多原型表达。
+  4. 缺少固定人工 truth，尚未系统测量 DER、B-cubed F1、EER、Recall@K 和误报率。
+  5. 第一阶段不建立跨视频永久 Speaker ID。
 下一步：
-  选择本地离线 diarization/voice embedding 模型，建立评测素材和指标，再按设计文档拆分实现与验证。
+  当前暂不继续开发。恢复时先建立多人综艺、电视剧、广告、纪录片及重叠语音人工标注集，
+  再比较谱聚类、HDBSCAN、AHC/VBx、重叠语音过滤、turn 质量评分和稳健 track 聚合；
+  不针对当前局部视频继续追加补丁式阈值。
 相关文件或实验：
   docs/superpowers/specs/2026-07-13-speaker-diarization-voiceprint-design.md
-  backend/app/indexing/asr.py
-  backend/app/indexing/asr_pipeline_types.py
-  backend/app/search.py
+  backend/app/indexing/speaker.py
+  backend/app/speaker_service.py
+  eval/speaker/
 ```
 
 ## 2. 性能、资源与推理效率

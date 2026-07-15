@@ -203,6 +203,8 @@ scripts/start_frontend.sh
 
 前端开发服务器会使用本地后端 API。若前端出现 `failed to fetch`，先确认后端 `/api/health` 正常，再检查前端代理或 API base URL。
 
+视频资产页的索引操作按通道执行：先勾选本次需要的 `Visual / Face / ASR / OCR`，再调整已选通道显示出的参数，最后点击对应视频的动作按钮。按钮会依据该视频的 `indexed_modalities` 显示“构建”“重建”或二者的组合；未选择通道的参数不会发送，已有索引也不会被删除。
+
 ## 验证命令
 
 基础 smoke check：
