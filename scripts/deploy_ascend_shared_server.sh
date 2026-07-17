@@ -6,7 +6,6 @@ SOURCE_DIR="${SOURCE_DIR:-${WORK_ROOT}/platform}"
 MODEL_DIR="${MODEL_DIR:-${WORK_ROOT}/models/platform}"
 RUNTIME_DIR="${RUNTIME_DIR:-${WORK_ROOT}/runtime}"
 LOG_DIR="${LOG_DIR:-${WORK_ROOT}/logs}"
-WHEELHOUSE_DIR="${WHEELHOUSE_DIR:-${WORK_ROOT}/wheelhouse}"
 BASE_IMAGE="${BASE_IMAGE:-swr.cn-south-1.myhuaweicloud.com/ascendhub/mindie:3.0.0b2-800I-A2-py311-openeuler24.03-lts}"
 IMAGE_REPO="${IMAGE_REPO:-momentseek-29154-platform}"
 IMAGE_NAME="${IMAGE_NAME:-}"
@@ -15,7 +14,7 @@ ROLLBACK_NAME="${CONTAINER_NAME}-rollback"
 NPU_ID="${NPU_ID:-5}"
 APP_PORT="${APP_PORT:-18500}"
 BUILD_DIR="${SOURCE_DIR}/.server-build"
-INSIGHTFACE_WHEEL="${WHEELHOUSE_DIR}/insightface-1.0.1-py3-none-any.whl"
+INSIGHTFACE_WHEEL="${INSIGHTFACE_WHEEL:-${SOURCE_DIR}/vendor-wheels/insightface-1.0.1-py3-none-any.whl}"
 INSIGHTFACE_SHA256="5f373f6fedbdda5cbc59a34ca386a75a2995cdaf6899402590ae9eb4308fc2e8"
 
 log() { printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"; }
@@ -53,7 +52,7 @@ grep -q '"lockfileVersion": 3' "$SOURCE_DIR/frontend/package-lock.json" \
   || fail "Unsupported or missing npm lock file"
 
 log "1/8 Resource and ownership checks"
-mkdir -p "$MODEL_DIR" "$RUNTIME_DIR" "$LOG_DIR" "$BUILD_DIR/wheels" "$WHEELHOUSE_DIR"
+mkdir -p "$MODEL_DIR" "$RUNTIME_DIR" "$LOG_DIR" "$BUILD_DIR/wheels"
 [[ -f "$INSIGHTFACE_WHEEL" ]] || fail "Required build artifact is missing: $INSIGHTFACE_WHEEL"
 printf '%s  %s\n' "$INSIGHTFACE_SHA256" "$INSIGHTFACE_WHEEL" | sha256sum -c -
 cp -f "$INSIGHTFACE_WHEEL" "$BUILD_DIR/wheels/"
