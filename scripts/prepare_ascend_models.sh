@@ -7,6 +7,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-momentseek-29154-platform}"
 HOST_MANIFEST="${HOST_MANIFEST:-$PROJECT_ROOT/deploy/models/ascend-prod.models.json}"
 MANIFEST="/tmp/ascend-prod.models.json"
 LOG_DIR="${LOG_DIR:-/home/momentseek-29154/platform/logs}"
+SKIP_SIGLIP="${SKIP_SIGLIP:-0}"
 
 log() { printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -113,17 +114,29 @@ path = snapshot_download(repo_id=repo, cache_dir="/app/models/hf-cache")
 print(f"HF_DOWNLOAD_DONE={repo} path={path}", flush=True)
 '
 }
-if ! retry download_siglip "https://huggingface.co"; then
+if [[ "$SKIP_SIGLIP" == 1 ]]; then
+  printf 'SKIP: SigLIP2 download disabled by SKIP_SIGLIP=1\n'
+elif ! retry download_siglip "https://huggingface.co"; then
   printf 'Official Hugging Face endpoint failed; trying hf-mirror.com\n'
   retry download_siglip "https://hf-mirror.com"
 fi
 
 log "6/7 Verify required model files"
-docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
-  --manifest "$MANIFEST" --lock /app/models/models.lock.json
+if ! docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
+  --manifest "$MANIFEST" --lock /app/models/models.lock.json; then
+  if [[ "$SKIP_SIGLIP" == 1 ]]; then
+    printf 'EXPECTED: full verification is incomplete until the offline SigLIP2 package is imported.\n'
+  else
+    die "required model verification failed"
+  fi
+fi
 du -sh "$MODEL_ROOT"
 
 log "7/7 Summary"
-printf 'MODEL_PREP_RESULT=PASS\n'
+if [[ "$SKIP_SIGLIP" == 1 ]]; then
+  printf 'MODEL_PREP_RESULT=PARTIAL_SIGLIP_PENDING\n'
+else
+  printf 'MODEL_PREP_RESULT=PASS\n'
+fi
 printf 'lock=%s/models.lock.json\n' "$MODEL_ROOT"
 printf 'Next: restart the container only if its environment or image changed; model files are visible immediately.\n'
