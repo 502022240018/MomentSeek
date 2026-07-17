@@ -6,6 +6,7 @@ SOURCE_DIR="${SOURCE_DIR:-${WORK_ROOT}/platform}"
 MODEL_DIR="${MODEL_DIR:-${WORK_ROOT}/models/platform}"
 RUNTIME_DIR="${RUNTIME_DIR:-${WORK_ROOT}/runtime}"
 LOG_DIR="${LOG_DIR:-${WORK_ROOT}/logs}"
+WHEELHOUSE_DIR="${WHEELHOUSE_DIR:-${WORK_ROOT}/wheelhouse}"
 BASE_IMAGE="${BASE_IMAGE:-swr.cn-south-1.myhuaweicloud.com/ascendhub/mindie:3.0.0b2-800I-A2-py311-openeuler24.03-lts}"
 IMAGE_REPO="${IMAGE_REPO:-momentseek-29154-platform}"
 IMAGE_NAME="${IMAGE_NAME:-}"
@@ -14,6 +15,8 @@ ROLLBACK_NAME="${CONTAINER_NAME}-rollback"
 NPU_ID="${NPU_ID:-5}"
 APP_PORT="${APP_PORT:-18500}"
 BUILD_DIR="${SOURCE_DIR}/.server-build"
+INSIGHTFACE_WHEEL="${WHEELHOUSE_DIR}/insightface-1.0.1-py3-none-any.whl"
+INSIGHTFACE_SHA256="5f373f6fedbdda5cbc59a34ca386a75a2995cdaf6899402590ae9eb4308fc2e8"
 
 log() { printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"; }
 fail() { printf '\nDEPLOY_FAILED: %s\n' "$*" >&2; exit 1; }
@@ -35,7 +38,7 @@ trap 'rollback_on_error "$LINENO"' ERR
 [[ -d "$SOURCE_DIR/.git" ]] || fail "Git source not found: $SOURCE_DIR"
 [[ -f "$SOURCE_DIR/backend/requirements-ascend.txt" ]] || fail "Missing Ascend requirements"
 [[ -f "$SOURCE_DIR/frontend/package-lock.json" ]] || fail "Missing frontend package-lock.json"
-for command_name in docker git curl npu-smi flock ss; do
+for command_name in docker git curl npu-smi flock ss sha256sum; do
   command -v "$command_name" >/dev/null 2>&1 || fail "Missing command: $command_name"
 done
 
@@ -50,7 +53,10 @@ grep -q '"lockfileVersion": 3' "$SOURCE_DIR/frontend/package-lock.json" \
   || fail "Unsupported or missing npm lock file"
 
 log "1/8 Resource and ownership checks"
-mkdir -p "$MODEL_DIR" "$RUNTIME_DIR" "$LOG_DIR" "$BUILD_DIR"
+mkdir -p "$MODEL_DIR" "$RUNTIME_DIR" "$LOG_DIR" "$BUILD_DIR/wheels" "$WHEELHOUSE_DIR"
+[[ -f "$INSIGHTFACE_WHEEL" ]] || fail "Required build artifact is missing: $INSIGHTFACE_WHEEL"
+printf '%s  %s\n' "$INSIGHTFACE_SHA256" "$INSIGHTFACE_WHEEL" | sha256sum -c -
+cp -f "$INSIGHTFACE_WHEEL" "$BUILD_DIR/wheels/"
 df -h "$WORK_ROOT"
 npu-smi info -t proc-mem -i "$NPU_ID" -c 0 2>&1 | tee "$LOG_DIR/npu-${NPU_ID}-before-deploy.log"
 if ss -lnt 2>/dev/null | grep -Eq ":${APP_PORT}[[:space:]]"; then
@@ -108,11 +114,11 @@ ENV PYTHONUNBUFFERED=1 \
     APP_MODEL_DIR=/app/models
 RUN command -v ffmpeg && python3 -c "import cv2, PIL; print('base media dependencies: PASS')"
 WORKDIR /app/backend
-COPY vendor-wheels/ /tmp/vendor-wheels/
+COPY .server-build/wheels/insightface-1.0.1-py3-none-any.whl /tmp/insightface.whl
 COPY .server-build/requirements-server.txt /tmp/requirements-server.txt
-RUN python3 -m pip install --no-index --no-deps /tmp/vendor-wheels/insightface-1.0.1-py3-none-any.whl \
-    && python3 -m pip install --find-links=/tmp/vendor-wheels -r /tmp/requirements-server.txt \
-    && rm -rf /tmp/vendor-wheels /tmp/requirements-server.txt
+RUN python3 -m pip install --no-index --no-deps /tmp/insightface.whl \
+    && python3 -m pip install -r /tmp/requirements-server.txt \
+    && rm -f /tmp/insightface.whl /tmp/requirements-server.txt
 COPY backend/ ./
 COPY deploy/models/ascend-prod.models.json /app/deploy/models/ascend-prod.models.json
 COPY scripts/verify_models.py /app/scripts/verify_models.py
