@@ -18,9 +18,11 @@ done
 mkdir -p "$WORK_ROOT" "$LOG_DIR"
 
 log "1/5 Check GitHub connectivity"
-curl -ILsS --connect-timeout 8 --max-time 30 -o /dev/null \
+if ! curl -ILsS --connect-timeout 5 --max-time 12 -o /dev/null \
   -w 'github http=%{http_code} ip=%{remote_ip} time=%{time_total}s error=%{errormsg}\n' \
-  https://github.com/
+  https://github.com/; then
+  printf 'WARNING: GitHub probe failed; continuing to the retrying Git operation.\n' >&2
+fi
 
 if [[ ! -e "$SOURCE_DIR" ]]; then
   log "2/5 Clone source with retries"
@@ -53,7 +55,11 @@ else
   fetch_ok=0
   for attempt in 1 2 3; do
     printf 'fetch_attempt=%s/3\n' "$attempt"
-    if git -C "$SOURCE_DIR" -c http.version=HTTP/1.1 fetch \
+    if git -C "$SOURCE_DIR" \
+      -c http.version=HTTP/1.1 \
+      -c http.lowSpeedLimit=1 \
+      -c http.lowSpeedTime=60 \
+      fetch \
       --deepen=20 --prune origin "$BRANCH"; then
       fetch_ok=1
       break
