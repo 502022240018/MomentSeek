@@ -128,7 +128,7 @@ COPY .server-build/requirements-server.txt /tmp/requirements-server.txt
 COPY .server-build/constraints-server.txt /tmp/constraints-server.txt
 RUN python3 -m pip install --no-index --no-deps /tmp/insightface-1.0.1-py3-none-any.whl \
     && python3 -m pip install -c /tmp/constraints-server.txt -r /tmp/requirements-server.txt \
-    && python3 -m pip install --no-deps open_clip_torch==3.3.0 timm==1.0.28 \
+    && python3 -m pip install --no-deps open_clip_torch==3.3.0 timm==1.0.28 silero-vad==5.1.2 \
     && python3 -c "from importlib.metadata import version; assert version('torch') == '2.9.0'; assert version('torch-npu') == '2.9.0.post1'; print('vendor torch stack preserved')" \
     && rm -f /tmp/insightface-1.0.1-py3-none-any.whl /tmp/requirements-server.txt /tmp/constraints-server.txt
 COPY backend/ ./
@@ -138,7 +138,7 @@ COPY --from=frontend-build /src/frontend/dist /tmp/frontend-dist
 RUN rm -rf ./app/static \
     && mv /tmp/frontend-dist ./app/static
 RUN mkdir -p /app/runtime /app/models \
-    && python3 -c "import fastapi, uvicorn, cv2, PIL, transformers, open_clip, funasr, onnxruntime, rapidocr, insightface; print('platform imports: PASS')"
+    && python3 -c "import fastapi, uvicorn, cv2, PIL, transformers, open_clip, funasr, onnxruntime, rapidocr, insightface; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); print('platform imports and Silero ONNX session: PASS')"
 EXPOSE 18500
 HEALTHCHECK --interval=20s --timeout=5s --retries=6 CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18500/api/health', timeout=3)"
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18500", "--workers", "1"]
@@ -201,6 +201,7 @@ docker run -d \
   -e FACE_PROVIDER=cpu \
   -e ASR_ENGINE=funasr \
   -e ASR_DEVICE=auto \
+  -e ASR_VAD_STRATEGY=silero_12s \
   -e ASR_MODEL_LOCAL_FILES_ONLY=true \
   -e ASR_SEMANTIC_LOCAL_FILES_ONLY=true \
   -e OCR_DEVICE=cpu \

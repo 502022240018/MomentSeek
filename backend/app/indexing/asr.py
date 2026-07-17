@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import time
+import types
 import wave
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -186,6 +188,25 @@ def _build_silero_groups(
     }
 
 
+def _load_silero_onnx_vad() -> object:
+    """Load Silero's bundled ONNX model without importing torchaudio.
+
+    MomentSeek decodes and resamples audio itself, so only Silero's timestamp
+    functions are needed.  A minimal module placeholder prevents the upstream
+    utility module's optional audio I/O import from pulling a torch-specific
+    torchaudio build into CUDA/Ascend runtimes.
+    """
+    if "torchaudio" not in sys.modules:
+        try:
+            __import__("torchaudio")
+        except (ImportError, OSError):
+            sys.modules["torchaudio"] = types.ModuleType("torchaudio")
+
+    from silero_vad import load_silero_vad
+
+    return load_silero_vad(onnx=True)
+
+
 def _offset_raw_items(
     items: list[RawTranscriptItem],
     offset_ms: int,
@@ -234,11 +255,10 @@ def _sensevoice_silero(
     temp_dir: str | Path | None,
 ) -> list[dict]:
     from funasr import AutoModel
-    from silero_vad import load_silero_vad
 
     with offline_env(local_files_only):
         model = AutoModel(**model_kwargs)
-    vad_model = load_silero_vad()
+    vad_model = _load_silero_onnx_vad()
     audio = load_wav_mono(audio_path)
     groups, _vad_stats = _build_silero_groups(audio, vad_model, max_group_seconds=12.0)
     if not groups:

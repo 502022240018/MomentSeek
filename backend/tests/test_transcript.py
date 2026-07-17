@@ -232,7 +232,7 @@ def test_sensevoice_funasr_uses_timestamp_flags_without_external_punc(tmp_path, 
 
 
 def test_sensevoice_silero_strategy_uses_external_vad_groups(tmp_path, monkeypatch):
-    calls = {"generate": []}
+    calls = {"generate": [], "silero_onnx": []}
 
     def fake_resolver(_root, model_name, *, local_files_only=True):
         return {
@@ -260,7 +260,7 @@ def test_sensevoice_silero_strategy_uses_external_vad_groups(tmp_path, monkeypat
 
     fake_funasr = types.SimpleNamespace(AutoModel=FakeAutoModel)
     fake_silero = types.SimpleNamespace(
-        load_silero_vad=lambda: object(),
+        load_silero_vad=lambda *, onnx=False: calls["silero_onnx"].append(onnx) or object(),
         get_speech_timestamps=fake_get_speech_timestamps,
     )
     fake_postprocess = types.SimpleNamespace(rich_transcription_postprocess=lambda text: text)
@@ -283,6 +283,7 @@ def test_sensevoice_silero_strategy_uses_external_vad_groups(tmp_path, monkeypat
     )
 
     assert calls["init"]["model"] == "/models/funasr/sensevoice"
+    assert calls["silero_onnx"] == [True]
     assert "vad_model" not in calls["init"]
     assert len(calls["generate"]) == 2
     assert all(call["merge_vad"] is False for call in calls["generate"])
