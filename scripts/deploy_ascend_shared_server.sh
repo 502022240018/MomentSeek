@@ -10,13 +10,27 @@ BASE_IMAGE="${BASE_IMAGE:-swr.cn-south-1.myhuaweicloud.com/ascendhub/mindie:3.0.
 IMAGE_REPO="${IMAGE_REPO:-momentseek-29154-platform}"
 IMAGE_NAME="${IMAGE_NAME:-}"
 CONTAINER_NAME="${CONTAINER_NAME:-momentseek-29154-platform}"
+ROLLBACK_NAME="${CONTAINER_NAME}-rollback"
 NPU_ID="${NPU_ID:-5}"
 APP_PORT="${APP_PORT:-18500}"
 BUILD_DIR="${SOURCE_DIR}/.server-build"
 
 log() { printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"; }
 fail() { printf '\nDEPLOY_FAILED: %s\n' "$*" >&2; exit 1; }
-trap 'printf "\nDEPLOY_FAILED_AT_LINE=%s\n" "$LINENO" >&2' ERR
+rollback_on_error() {
+  local rc=$?
+  local line="${1:-unknown}"
+  set +e
+  printf '\nDEPLOY_FAILED_AT_LINE=%s\n' "$line" >&2
+  if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker rename "$ROLLBACK_NAME" "$CONTAINER_NAME" >/dev/null 2>&1
+    docker start "$CONTAINER_NAME" >/dev/null 2>&1
+    printf 'Previous platform container was restored automatically.\n' >&2
+  fi
+  exit "$rc"
+}
+trap 'rollback_on_error "$LINENO"' ERR
 
 [[ -d "$SOURCE_DIR/.git" ]] || fail "Git source not found: $SOURCE_DIR"
 [[ -f "$SOURCE_DIR/backend/requirements-ascend.txt" ]] || fail "Missing Ascend requirements"
@@ -40,7 +54,9 @@ mkdir -p "$MODEL_DIR" "$RUNTIME_DIR" "$LOG_DIR" "$BUILD_DIR"
 df -h "$WORK_ROOT"
 npu-smi info -t proc-mem -i "$NPU_ID" -c 0 2>&1 | tee "$LOG_DIR/npu-${NPU_ID}-before-deploy.log"
 if ss -lnt 2>/dev/null | grep -Eq ":${APP_PORT}[[:space:]]"; then
-  fail "Port ${APP_PORT} is already in use"
+  existing_running="$(docker container inspect --format '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  [[ "$existing_running" == "true" ]] \
+    || fail "Port ${APP_PORT} is occupied by something other than ${CONTAINER_NAME}"
 fi
 git -C "$SOURCE_DIR" status -sb
 git -C "$SOURCE_DIR" log -1 --oneline
@@ -142,10 +158,12 @@ docker run --rm "${DEVICE_ARGS[@]}" "$IMAGE_NAME" python3 -c \
   'import torch; import torch_npu; from transformers import Siglip2Model; x=torch.arange(4,dtype=torch.float32,device="npu:0"); print("npu_result",(x*2).cpu().tolist()); print("image_smoke=PASS")'
 
 log "6/8 Replace only our named platform container"
-OLD_IMAGE=""
+if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
+  fail "Stale rollback container exists: ${ROLLBACK_NAME}; inspect it before continuing"
+fi
 if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-  OLD_IMAGE="$(docker container inspect --format '{{.Config.Image}}' "$CONTAINER_NAME")"
-  docker rm -f "$CONTAINER_NAME" >/dev/null
+  docker rename "$CONTAINER_NAME" "$ROLLBACK_NAME"
+  docker stop "$ROLLBACK_NAME" >/dev/null
 fi
 docker run -d \
   --name "$CONTAINER_NAME" \
@@ -189,10 +207,16 @@ done
 if [[ "$healthy" != 1 ]]; then
   docker logs --tail 200 "$CONTAINER_NAME" || true
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  if [[ -n "$OLD_IMAGE" ]] && docker image inspect "$OLD_IMAGE" >/dev/null 2>&1; then
-    printf 'Previous image retained for rollback: %s\n' "$OLD_IMAGE" >&2
+  if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
+    docker rename "$ROLLBACK_NAME" "$CONTAINER_NAME"
+    docker start "$CONTAINER_NAME" >/dev/null
+    printf 'Previous platform container was restored automatically.\n' >&2
   fi
   fail "Platform health check failed"
+fi
+
+if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
+  docker rm "$ROLLBACK_NAME" >/dev/null
 fi
 
 docker image tag "$IMAGE_NAME" "${IMAGE_REPO}:current"
