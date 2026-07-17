@@ -121,7 +121,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
     APP_DATA_DIR=/app/runtime \
-    APP_MODEL_DIR=/app/models
+    APP_MODEL_DIR=/app/models \
+    APP_PORT=18500
 RUN command -v ffmpeg && python3 -c "import cv2, PIL; print('base media dependencies: PASS')"
 WORKDIR /app/backend
 COPY .server-build/wheels/insightface-1.0.1-py3-none-any.whl /tmp/insightface-1.0.1-py3-none-any.whl
@@ -141,8 +142,8 @@ RUN rm -rf ./app/static \
 RUN mkdir -p /app/runtime /app/models \
     && python3 -c "from importlib.metadata import version; import fastapi, uvicorn, cv2, PIL, transformers, funasr, onnxruntime, rapidocr, insightface; assert version('open-clip-torch') == '3.3.0'; assert version('silero-vad') == '5.1.2'; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); print('device-neutral imports and Silero ONNX session: PASS')"
 EXPOSE 18500
-HEALTHCHECK --interval=20s --timeout=5s --retries=6 CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18500/api/health', timeout=3)"
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18500", "--workers", "1"]
+HEALTHCHECK --interval=20s --timeout=5s --retries=6 CMD python3 -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('APP_PORT', '18500') + '/api/health', timeout=3)"
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT:-18500} --workers 1"]
 DOCKERFILE
 
 log "3/8 Check required external endpoints"
