@@ -93,6 +93,7 @@ cat >"$BUILD_DIR/constraints-server.txt" <<'CONSTRAINTS'
 numpy==1.26.4
 torch==2.9.0
 torchvision==0.16.0
+torchaudio==2.9.0
 transformers==4.51.0
 scikit-learn==1.5.0
 umap-learn==0.5.7
@@ -128,8 +129,8 @@ COPY .server-build/requirements-server.txt /tmp/requirements-server.txt
 COPY .server-build/constraints-server.txt /tmp/constraints-server.txt
 RUN python3 -m pip install --no-index --no-deps /tmp/insightface-1.0.1-py3-none-any.whl \
     && python3 -m pip install -c /tmp/constraints-server.txt -r /tmp/requirements-server.txt \
-    && python3 -m pip install --no-deps open_clip_torch==3.3.0 timm==1.0.28 silero-vad==5.1.2 \
-    && python3 -c "from importlib.metadata import version; assert version('torch') == '2.9.0'; assert version('torch-npu') == '2.9.0.post1'; print('vendor torch stack preserved')" \
+    && python3 -m pip install --no-deps torchaudio==2.9.0 open_clip_torch==3.3.0 timm==1.0.28 silero-vad==5.1.2 \
+    && python3 -c "from importlib.metadata import version; assert version('torch') == '2.9.0'; assert version('torch-npu') == '2.9.0.post1'; assert version('torchaudio') == '2.9.0'; print('vendor torch stack preserved')" \
     && rm -f /tmp/insightface-1.0.1-py3-none-any.whl /tmp/requirements-server.txt /tmp/constraints-server.txt
 COPY backend/ ./
 COPY deploy/models/ascend-prod.models.json /app/deploy/models/ascend-prod.models.json
@@ -173,7 +174,7 @@ DEVICE_ARGS=(
 
 log "5/8 Image import and NPU smoke test"
 docker run --rm "${DEVICE_ARGS[@]}" "$IMAGE_NAME" python3 -c \
-  'import torch; import torch_npu; import open_clip; from transformers import Siglip2Model; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); x=torch.arange(4,dtype=torch.float32,device="npu:0"); print("npu_result",(x*2).cpu().tolist()); print("device_imports_and_silero_onnx=PASS"); print("image_smoke=PASS")'
+  'import torch; import torch_npu; import torchaudio; import funasr; import open_clip; from transformers import Siglip2Model; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); x=torch.arange(4,dtype=torch.float32,device="npu:0"); print("npu_result",(x*2).cpu().tolist()); print("device_imports_and_silero_onnx=PASS"); print("image_smoke=PASS")'
 
 log "6/8 Replace only our named platform container"
 if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
