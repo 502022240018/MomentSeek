@@ -138,7 +138,7 @@ COPY --from=frontend-build /src/frontend/dist /tmp/frontend-dist
 RUN rm -rf ./app/static \
     && mv /tmp/frontend-dist ./app/static
 RUN mkdir -p /app/runtime /app/models \
-    && python3 -c "import fastapi, uvicorn, cv2, PIL, transformers, open_clip, funasr, onnxruntime, rapidocr, insightface; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); print('platform imports and Silero ONNX session: PASS')"
+    && python3 -c "from importlib.metadata import version; import fastapi, uvicorn, cv2, PIL, transformers, funasr, onnxruntime, rapidocr, insightface; assert version('open-clip-torch') == '3.3.0'; assert version('silero-vad') == '5.1.2'; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); print('device-neutral imports and Silero ONNX session: PASS')"
 EXPOSE 18500
 HEALTHCHECK --interval=20s --timeout=5s --retries=6 CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18500/api/health', timeout=3)"
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18500", "--workers", "1"]
@@ -173,7 +173,7 @@ DEVICE_ARGS=(
 
 log "5/8 Image import and NPU smoke test"
 docker run --rm "${DEVICE_ARGS[@]}" "$IMAGE_NAME" python3 -c \
-  'import torch; import torch_npu; from transformers import Siglip2Model; x=torch.arange(4,dtype=torch.float32,device="npu:0"); print("npu_result",(x*2).cpu().tolist()); print("image_smoke=PASS")'
+  'import torch; import torch_npu; import open_clip; from transformers import Siglip2Model; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); x=torch.arange(4,dtype=torch.float32,device="npu:0"); print("npu_result",(x*2).cpu().tolist()); print("device_imports_and_silero_onnx=PASS"); print("image_smoke=PASS")'
 
 log "6/8 Replace only our named platform container"
 if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
