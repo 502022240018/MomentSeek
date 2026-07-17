@@ -76,7 +76,6 @@ onnxruntime>=1.20,<2
 scikit-image==0.25.2
 tifffile==2025.6.11
 scenedetect==0.7
-open_clip_torch==3.3.0
 transformers>=4.51.0,<5
 python-multipart==0.0.22
 pydantic-settings==2.12.0
@@ -85,8 +84,19 @@ rapidocr==3.9.0
 opencc-python-reimplemented==0.1.7
 pypinyin==0.54.0
 funasr==1.3.9
-silero-vad==5.1.2
+scikit-learn==1.5.0
+umap-learn==0.5.7
+ftfy==6.3.1
 REQ
+
+cat >"$BUILD_DIR/constraints-server.txt" <<'CONSTRAINTS'
+numpy==1.26.4
+torch==2.9.0
+torchvision==0.16.0
+transformers==4.51.0
+scikit-learn==1.5.0
+umap-learn==0.5.7
+CONSTRAINTS
 
 cat >"$BUILD_DIR/Dockerfile" <<'DOCKERFILE'
 ARG ASCEND_RUNTIME_IMAGE
@@ -115,9 +125,12 @@ RUN command -v ffmpeg && python3 -c "import cv2, PIL; print('base media dependen
 WORKDIR /app/backend
 COPY .server-build/wheels/insightface-1.0.1-py3-none-any.whl /tmp/insightface-1.0.1-py3-none-any.whl
 COPY .server-build/requirements-server.txt /tmp/requirements-server.txt
+COPY .server-build/constraints-server.txt /tmp/constraints-server.txt
 RUN python3 -m pip install --no-index --no-deps /tmp/insightface-1.0.1-py3-none-any.whl \
-    && python3 -m pip install -r /tmp/requirements-server.txt \
-    && rm -f /tmp/insightface-1.0.1-py3-none-any.whl /tmp/requirements-server.txt
+    && python3 -m pip install -c /tmp/constraints-server.txt -r /tmp/requirements-server.txt \
+    && python3 -m pip install --no-deps open_clip_torch==3.3.0 timm==1.0.28 \
+    && python3 -c "from importlib.metadata import version; assert version('torch') == '2.9.0'; assert version('torch-npu') == '2.9.0.post1'; print('vendor torch stack preserved')" \
+    && rm -f /tmp/insightface-1.0.1-py3-none-any.whl /tmp/requirements-server.txt /tmp/constraints-server.txt
 COPY backend/ ./
 COPY deploy/models/ascend-prod.models.json /app/deploy/models/ascend-prod.models.json
 COPY scripts/verify_models.py /app/scripts/verify_models.py
