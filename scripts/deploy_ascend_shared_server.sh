@@ -113,11 +113,11 @@ ENV PYTHONUNBUFFERED=1 \
     APP_MODEL_DIR=/app/models
 RUN command -v ffmpeg && python3 -c "import cv2, PIL; print('base media dependencies: PASS')"
 WORKDIR /app/backend
-COPY .server-build/wheels/insightface-1.0.1-py3-none-any.whl /tmp/insightface.whl
+COPY .server-build/wheels/insightface-1.0.1-py3-none-any.whl /tmp/insightface-1.0.1-py3-none-any.whl
 COPY .server-build/requirements-server.txt /tmp/requirements-server.txt
-RUN python3 -m pip install --no-index --no-deps /tmp/insightface.whl \
+RUN python3 -m pip install --no-index --no-deps /tmp/insightface-1.0.1-py3-none-any.whl \
     && python3 -m pip install -r /tmp/requirements-server.txt \
-    && rm -f /tmp/insightface.whl /tmp/requirements-server.txt
+    && rm -f /tmp/insightface-1.0.1-py3-none-any.whl /tmp/requirements-server.txt
 COPY backend/ ./
 COPY deploy/models/ascend-prod.models.json /app/deploy/models/ascend-prod.models.json
 COPY scripts/verify_models.py /app/scripts/verify_models.py

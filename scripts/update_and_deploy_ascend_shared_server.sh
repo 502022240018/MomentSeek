@@ -76,10 +76,10 @@ git -C "$SOURCE_DIR" status -sb
 git -C "$SOURCE_DIR" log -4 --oneline
 git -C "$SOURCE_DIR" merge-base --is-ancestor "$MIN_DEPLOY_COMMIT" HEAD \
   || fail "Checkout does not contain required deployment commit $MIN_DEPLOY_COMMIT"
-[[ -x "$SOURCE_DIR/scripts/deploy_ascend_shared_server.sh" ]] \
-  || chmod +x "$SOURCE_DIR/scripts/deploy_ascend_shared_server.sh"
+[[ -f "$SOURCE_DIR/scripts/deploy_ascend_shared_server.sh" ]] \
+  || fail "Deployment script is missing"
 grep -q '"vite": "6.4.3"' "$SOURCE_DIR/frontend/package.json" \
   || fail "Validated frontend toolchain is not present"
 
 log "5/5 Run versioned Ascend deployment"
-exec "$SOURCE_DIR/scripts/deploy_ascend_shared_server.sh"
+exec bash "$SOURCE_DIR/scripts/deploy_ascend_shared_server.sh"
