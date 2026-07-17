@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+MODEL_ROOT="${MODEL_ROOT:-/home/momentseek-29154/models/platform}"
+PROJECT_ROOT="${PROJECT_ROOT:-/home/momentseek-29154/platform}"
+CONTAINER_NAME="${CONTAINER_NAME:-momentseek-29154-platform}"
+HOST_MANIFEST="${HOST_MANIFEST:-$PROJECT_ROOT/deploy/models/ascend-prod.models.json}"
+MANIFEST="/tmp/ascend-prod.models.json"
+LOG_DIR="${LOG_DIR:-/home/momentseek-29154/platform/logs}"
+
+log() { printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+retry() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    "$@" && return 0
+    printf 'attempt=%s/5 failed; retrying in 8 seconds\n' "$attempt" >&2
+    sleep 8
+  done
+  return 1
+}
+
+[[ $(id -u) -eq 0 ]] || die "run this script as root"
+docker inspect "$CONTAINER_NAME" >/dev/null 2>&1 || die "container not found: $CONTAINER_NAME"
+[[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME")" == true ]] || die "container is not running"
+mkdir -p "$MODEL_ROOT" "$LOG_DIR"
+[[ -f "$HOST_MANIFEST" ]] || die "model manifest not found: $HOST_MANIFEST"
+docker cp "$HOST_MANIFEST" "$CONTAINER_NAME:$MANIFEST" >/dev/null
+
+log "1/7 Check model endpoints"
+for url in \
+  https://huggingface.co/ \
+  https://modelscope.cn/ \
+  https://github.com/ \
+  https://www.modelscope.cn/models/RapidAI/RapidOCR; do
+  curl -ILsS --connect-timeout 10 --max-time 30 -o /dev/null \
+    -w 'url=%{url_effective} http=%{http_code} ip=%{remote_ip} time=%{time_total}s error=%{errormsg}\n' \
+    "$url" || true
+done
+
+log "2/7 Download Hugging Face models with resumable cache"
+retry docker exec "$CONTAINER_NAME" python3 -c '
+from huggingface_hub import snapshot_download
+for repo in (
+    "google/siglip2-so400m-patch14-384",
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+):
+    print(f"HF_DOWNLOAD_START={repo}", flush=True)
+    path = snapshot_download(repo_id=repo, cache_dir="/app/models/hf-cache" if repo.startswith("google/") else "/app/models/text-embeddings")
+    print(f"HF_DOWNLOAD_DONE={repo} path={path}", flush=True)
+'
+
+log "3/7 Download SenseVoiceSmall from ModelScope"
+retry docker exec "$CONTAINER_NAME" python3 -c '
+from modelscope import snapshot_download
+repo = "iic/SenseVoiceSmall"
+print(f"MODELSCOPE_DOWNLOAD_START={repo}", flush=True)
+path = snapshot_download(repo, cache_dir="/app/models/funasr")
+print(f"MODELSCOPE_DOWNLOAD_DONE={repo} path={path}", flush=True)
+'
+
+log "4/7 Download InsightFace buffalo_l"
+FACE_DIR="$MODEL_ROOT/insightface/models/buffalo_l"
+mkdir -p "$FACE_DIR"
+if ! find "$FACE_DIR" -type f -name '*.onnx' -size +0c | grep -q .; then
+  retry curl -fL --retry 3 --retry-delay 5 --connect-timeout 15 \
+    -C - -o "$MODEL_ROOT/buffalo_l.zip" \
+    https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+  command -v unzip >/dev/null || die "unzip is required on the host"
+  unzip -oq "$MODEL_ROOT/buffalo_l.zip" -d "$FACE_DIR"
+  rm -f "$MODEL_ROOT/buffalo_l.zip"
+else
+  printf 'SKIP: buffalo_l already exists\n'
+fi
+
+log "5/7 Download RapidOCR PP-OCRv6 assets"
+OCR_DIR="$MODEL_ROOT/rapidocr"
+mkdir -p "$OCR_DIR"
+download_ocr() {
+  local relative="$1" output="$2"
+  [[ -s "$OCR_DIR/$output" ]] && { printf 'SKIP: %s\n' "$output"; return 0; }
+  retry curl -fL --retry 3 --retry-delay 5 --connect-timeout 15 \
+    -C - -o "$OCR_DIR/$output" \
+    "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.0/onnx/$relative"
+}
+download_ocr "PP-OCRv6/det/PP-OCRv6_det_small.onnx" "PP-OCRv6_det_small.onnx"
+download_ocr "PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx" "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
+download_ocr "PP-OCRv6/rec/PP-OCRv6_rec_small.onnx" "PP-OCRv6_rec_small.onnx"
+
+log "6/7 Verify required model files"
+docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
+  --manifest "$MANIFEST" --lock /app/models/models.lock.json
+du -sh "$MODEL_ROOT"
+
+log "7/7 Summary"
+printf 'MODEL_PREP_RESULT=PASS\n'
+printf 'lock=%s/models.lock.json\n' "$MODEL_ROOT"
+printf 'Next: restart the container only if its environment or image changed; model files are visible immediately.\n'

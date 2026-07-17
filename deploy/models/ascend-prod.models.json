@@ -29,14 +29,14 @@
       "kind": "directory",
       "id": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
       "target": "/app/models/funasr/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-      "required": true
+      "required": false
     },
     {
       "name": "funasr_ct_punc",
       "kind": "directory",
       "id": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
       "target": "/app/models/funasr/iic/punc_ct-transformer_cn-en-common-vocab471067-large",
-      "required": true
+      "required": false
     },
     {
       "name": "faster_whisper_turbo",

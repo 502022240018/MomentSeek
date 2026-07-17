@@ -61,7 +61,7 @@ docker inspect -f '{{range .Mounts}}mount={{.Source}} -> {{.Destination}} rw={{.
 
 section "3/6 Model manifest"
 if docker exec "$CONTAINER_NAME" test -f "$MANIFEST"; then
-  docker exec "$CONTAINER_NAME" python3 - "$MANIFEST" <<'PY' || true
+  docker exec -i "$CONTAINER_NAME" python3 - "$MANIFEST" <<'PY' || true
 import json
 import sys
 
