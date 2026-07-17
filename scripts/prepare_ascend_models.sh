@@ -39,42 +39,54 @@ for url in \
     "$url" || true
 done
 
-log "2/7 Download Hugging Face models with resumable cache"
+log "2/7 Download SenseVoiceSmall and MiniLM from ModelScope"
 retry docker exec "$CONTAINER_NAME" python3 -c '
-from huggingface_hub import snapshot_download
-for repo in (
-    "google/siglip2-so400m-patch14-384",
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-):
-    print(f"HF_DOWNLOAD_START={repo}", flush=True)
-    path = snapshot_download(repo_id=repo, cache_dir="/app/models/hf-cache" if repo.startswith("google/") else "/app/models/text-embeddings")
-    print(f"HF_DOWNLOAD_DONE={repo} path={path}", flush=True)
-'
-
-log "3/7 Download SenseVoiceSmall from ModelScope"
-retry docker exec "$CONTAINER_NAME" python3 -c '
+import shutil
+from pathlib import Path
 from modelscope import snapshot_download
+
 repo = "iic/SenseVoiceSmall"
 print(f"MODELSCOPE_DOWNLOAD_START={repo}", flush=True)
 path = snapshot_download(repo, cache_dir="/app/models/funasr")
 print(f"MODELSCOPE_DOWNLOAD_DONE={repo} path={path}", flush=True)
+
+# ModelScope mirror of the upstream sentence-transformers repository.  Copy it
+# into the cache layout expected by the platform local-only resolver.
+repo = "Ceceliachenen/paraphrase-multilingual-MiniLM-L12-v2"
+print(f"MODELSCOPE_DOWNLOAD_START={repo}", flush=True)
+source = Path(snapshot_download(repo, cache_dir="/app/models/modelscope-cache"))
+target = Path("/app/models/text-embeddings/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/snapshots/modelscope")
+target.parent.mkdir(parents=True, exist_ok=True)
+if target.exists():
+    shutil.rmtree(target)
+shutil.copytree(source, target, symlinks=False)
+print(f"MODELSCOPE_DOWNLOAD_DONE={repo} path={target}", flush=True)
 '
 
-log "4/7 Download InsightFace buffalo_l"
+log "3/7 Download InsightFace buffalo_l from ModelScope"
 FACE_DIR="$MODEL_ROOT/insightface/models/buffalo_l"
 mkdir -p "$FACE_DIR"
 if ! find "$FACE_DIR" -type f -name '*.onnx' -size +0c | grep -q .; then
-  retry curl -fL --retry 3 --retry-delay 5 --connect-timeout 15 \
-    -C - -o "$MODEL_ROOT/buffalo_l.zip" \
-    https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
-  command -v unzip >/dev/null || die "unzip is required on the host"
-  unzip -oq "$MODEL_ROOT/buffalo_l.zip" -d "$FACE_DIR"
-  rm -f "$MODEL_ROOT/buffalo_l.zip"
+  retry docker exec "$CONTAINER_NAME" python3 -c '
+import shutil
+from pathlib import Path
+from modelscope import snapshot_download
+
+source = Path(snapshot_download("LumilioPhotos/buffalo_l", cache_dir="/app/models/modelscope-cache"))
+target = Path("/app/models/insightface/models/buffalo_l")
+target.mkdir(parents=True, exist_ok=True)
+files = list(source.rglob("*.onnx"))
+if not files:
+    raise RuntimeError(f"No ONNX files found in {source}")
+for item in files:
+    shutil.copy2(item, target / item.name)
+print(f"BUFFALO_L_DONE files={len(files)} path={target}")
+'
 else
   printf 'SKIP: buffalo_l already exists\n'
 fi
 
-log "5/7 Download RapidOCR PP-OCRv6 assets"
+log "4/7 Download RapidOCR PP-OCRv6 assets"
 OCR_DIR="$MODEL_ROOT/rapidocr"
 mkdir -p "$OCR_DIR"
 download_ocr() {
@@ -87,6 +99,24 @@ download_ocr() {
 download_ocr "PP-OCRv6/det/PP-OCRv6_det_small.onnx" "PP-OCRv6_det_small.onnx"
 download_ocr "PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx" "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
 download_ocr "PP-OCRv6/rec/PP-OCRv6_rec_small.onnx" "PP-OCRv6_rec_small.onnx"
+
+log "5/7 Download SigLIP2 (official endpoint, then mirror)"
+download_siglip() {
+  local endpoint="$1"
+  printf 'SIGLIP_ENDPOINT=%s\n' "$endpoint"
+  docker exec -e "HF_ENDPOINT=$endpoint" -e HF_HUB_DISABLE_XET=1 \
+    "$CONTAINER_NAME" python3 -c '
+from huggingface_hub import snapshot_download
+repo = "google/siglip2-so400m-patch14-384"
+print(f"HF_DOWNLOAD_START={repo}", flush=True)
+path = snapshot_download(repo_id=repo, cache_dir="/app/models/hf-cache")
+print(f"HF_DOWNLOAD_DONE={repo} path={path}", flush=True)
+'
+}
+if ! retry download_siglip "https://huggingface.co"; then
+  printf 'Official Hugging Face endpoint failed; trying hf-mirror.com\n'
+  retry download_siglip "https://hf-mirror.com"
+fi
 
 log "6/7 Verify required model files"
 docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
