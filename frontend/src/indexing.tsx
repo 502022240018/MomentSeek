@@ -100,6 +100,7 @@ export function toIndexOptions(configuration: IndexConfiguration): IndexOptions 
     ocrSampleFps: configuration.ocrSampleFps,
     asrModel: configuration.asrModel,
     asrLanguage: configuration.asrLanguage,
+    asrSpeakerEnabled: configuration.asrSpeakerEnabled,
   };
 }
 
