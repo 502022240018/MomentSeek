@@ -21,7 +21,7 @@
       "name": "funasr_sensevoice_small",
       "kind": "directory",
       "id": "iic/SenseVoiceSmall",
-      "target": "/app/models/funasr/iic/SenseVoiceSmall",
+      "target": "/app/models/funasr/models/iic--SenseVoiceSmall/snapshots/master",
       "required": true
     },
     {

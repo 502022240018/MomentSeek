@@ -42,7 +42,6 @@ done
 
 log "2/7 Download SenseVoiceSmall and MiniLM from ModelScope"
 retry docker exec "$CONTAINER_NAME" python3 -c '
-import os
 import shutil
 from pathlib import Path
 from modelscope import snapshot_download
@@ -51,15 +50,6 @@ repo = "iic/SenseVoiceSmall"
 print(f"MODELSCOPE_DOWNLOAD_START={repo}", flush=True)
 path = snapshot_download(repo, cache_dir="/app/models/funasr")
 print(f"MODELSCOPE_DOWNLOAD_DONE={repo} path={path}", flush=True)
-
-# Normalize ModelScope's cache layout to the stable path declared by the
-# production manifest. Hard links avoid duplicating the ~900 MB checkpoint.
-source = Path(path)
-target = Path("/app/models/funasr/iic/SenseVoiceSmall")
-if not target.exists():
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, target, copy_function=os.link)
-print(f"SENSEVOICE_STABLE_PATH={target}", flush=True)
 
 # ModelScope mirror of the upstream sentence-transformers repository.  Copy it
 # into the cache layout expected by the platform local-only resolver.
