@@ -8,7 +8,7 @@
 - 已确认并获准使用一张空闲实验卡；默认物理 NPU 7。
 - 正式容器 `momentseek-29154-platform` 正常运行，用于解析匹配驱动的基础镜像。
 - 模型已离线传到 `/home/momentseek-29154/vlm-exp/models/Qwen3-VL-2B-Instruct`。
-- 测试图位于 `/home/momentseek-29154/vlm-exp/input/test.jpg`。
+- 可选：测试图位于 `/home/momentseek-29154/vlm-exp/input/test.jpg`。如果不存在，脚本会从 `runtime/uploads` 第一条视频的第 10 秒自动抽帧。
 
 模型目录至少应包含 `config.json`、processor/tokenizer 文件及完整 safetensors 权重。不要在运行时依赖 Hugging Face 或 ModelScope。
 
@@ -22,6 +22,33 @@ npu-smi info -t proc-mem -i 7 -c 0
 
 bash scripts/run_qwen3_vl_ascend_smoke.sh
 ```
+
+测试图有三种来源，优先级如下：
+
+1. 手动上传默认图片：
+
+   ```bash
+   mkdir -p /home/momentseek-29154/vlm-exp/input
+   # 在本地执行：
+   scp test.jpg root@100.199.4.24:/home/momentseek-29154/vlm-exp/input/test.jpg
+   ```
+
+2. 指定服务器上的图片：
+
+   ```bash
+   IMAGE_HOST=/absolute/path/to/test.jpg \
+     bash scripts/run_qwen3_vl_ascend_smoke.sh
+   ```
+
+3. 从 runtime 视频抽帧。默认自动选择 `runtime/uploads` 第一条视频，也可以明确指定视频和时间点：
+
+   ```bash
+   VIDEO_HOST=/home/momentseek-29154/runtime/uploads/example.mp4 \
+   FRAME_TIMESTAMP=25 \
+     bash scripts/run_qwen3_vl_ascend_smoke.sh
+   ```
+
+抽出的图片写入实验目录，不修改 runtime 中的原视频。首次自动抽帧后，后续执行会复用生成的 `test.jpg`；要换帧时删除该测试图，或指定新的 `IMAGE_HOST`。
 
 首次执行会在 `/home/momentseek-29154/vlm-exp/venv` 安装独立的 Transformers 4.57+ 环境。它复用基础镜像中的 Torch/torch-npu，不更改正式容器。后续执行复用该 venv。
 

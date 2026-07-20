@@ -4,11 +4,14 @@ set -Eeuo pipefail
 WORK_ROOT="${WORK_ROOT:-/home/momentseek-29154}"
 SOURCE_DIR="${SOURCE_DIR:-${WORK_ROOT}/platform}"
 EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-${WORK_ROOT}/vlm-exp}"
+RUNTIME_DIR="${RUNTIME_DIR:-${WORK_ROOT}/runtime}"
 PLATFORM_CONTAINER="${PLATFORM_CONTAINER:-momentseek-29154-platform}"
 PHYSICAL_NPU="${PHYSICAL_NPU:-7}"
 MODEL_NAME="${MODEL_NAME:-Qwen3-VL-2B-Instruct}"
 MODEL_HOST="${MODEL_HOST:-${EXPERIMENT_ROOT}/models/${MODEL_NAME}}"
 IMAGE_HOST="${IMAGE_HOST:-${EXPERIMENT_ROOT}/input/test.jpg}"
+VIDEO_HOST="${VIDEO_HOST:-}"
+FRAME_TIMESTAMP="${FRAME_TIMESTAMP:-10}"
 RUNS="${RUNS:-5}"
 WARMUP_RUNS="${WARMUP_RUNS:-1}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-96}"
@@ -31,7 +34,6 @@ done
 [[ -f "$SOURCE_DIR/scripts/qwen3_vl_ascend_smoke.py" ]] || fail "smoke script missing; update the repository"
 [[ -d "$MODEL_HOST" ]] || fail "model directory missing: $MODEL_HOST"
 [[ -f "$MODEL_HOST/config.json" ]] || fail "model config missing: $MODEL_HOST/config.json"
-[[ -f "$IMAGE_HOST" ]] || fail "test image missing: $IMAGE_HOST"
 docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 || fail "image missing: $IMAGE_NAME"
 docker container inspect "$EXPERIMENT_NAME" >/dev/null 2>&1 \
   && fail "experiment container already exists: $EXPERIMENT_NAME"
@@ -41,7 +43,27 @@ printf '%s\n' "$npu_processes"
 grep -q 'No process in device' <<<"$npu_processes" \
   || fail "NPU ${PHYSICAL_NPU} is not empty"
 
-mkdir -p "$EXPERIMENT_ROOT" "$OUTPUT_DIR"
+mkdir -p "$EXPERIMENT_ROOT/input" "$OUTPUT_DIR"
+if [[ ! -f "$IMAGE_HOST" ]]; then
+  if [[ -z "$VIDEO_HOST" ]]; then
+    VIDEO_HOST="$(find "$RUNTIME_DIR/uploads" -type f \
+      \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.avi' -o -iname '*.webm' \) \
+      -print -quit 2>/dev/null || true)"
+  fi
+  [[ -f "$VIDEO_HOST" ]] \
+    || fail "test image is missing and no runtime video was found; set IMAGE_HOST or VIDEO_HOST"
+  printf 'Extracting test frame: video=%s timestamp=%s image=%s\n' \
+    "$VIDEO_HOST" "$FRAME_TIMESTAMP" "$IMAGE_HOST"
+  mkdir -p "$(dirname "$IMAGE_HOST")"
+  docker run --rm --name "${EXPERIMENT_NAME}-frame" \
+    -v "$VIDEO_HOST:/source/video:ro" \
+    -v "$(dirname "$IMAGE_HOST"):/output" \
+    "$IMAGE_NAME" ffmpeg -hide_banner -loglevel error -y \
+      -ss "$FRAME_TIMESTAMP" -i /source/video -frames:v 1 \
+      "/output/$(basename "$IMAGE_HOST")"
+fi
+[[ -f "$IMAGE_HOST" ]] || fail "test image missing after frame extraction: $IMAGE_HOST"
+
 if [[ "$INSTALL_DEPS" == "true" || ( "$INSTALL_DEPS" == "auto" && ! -x "$VENV_HOST/bin/python" ) ]]; then
   docker run --rm --name "${EXPERIMENT_NAME}-env" \
     -v "$EXPERIMENT_ROOT:/work" \
