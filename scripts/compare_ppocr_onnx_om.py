@@ -150,6 +150,86 @@ class StaticOmSession:
             acl.rt.reset_device(self.device_id)
         except Exception:
             pass
+
+
+class DynamicDimsOmSession(StaticOmSession):
+    """Run a multi-gear dynamic-dims OM with one real tensor input."""
+
+    DYNAMIC_INPUT_NAME = "ascend_mbatch_shape_data"
+
+    def infer(self, inputs: list[np.ndarray], output_templates: list[np.ndarray]):
+        if len(inputs) != 1:
+            raise ValueError("dynamic-dims experiment expects one real model input")
+        if len(output_templates) != acl.mdl.get_num_outputs(self.desc):
+            raise ValueError("output count does not match OM model")
+
+        dynamic_index, ret = acl.mdl.get_input_index_by_name(
+            self.desc, self.DYNAMIC_INPUT_NAME
+        )
+        _check("acl.mdl.get_input_index_by_name", ret)
+        if acl.mdl.get_num_inputs(self.desc) != 2:
+            raise ValueError("dynamic-dims OM must expose data plus metadata inputs")
+
+        tensor = np.ascontiguousarray(inputs[0])
+        metadata_size = int(acl.mdl.get_input_size_by_index(self.desc, dynamic_index))
+        metadata = np.zeros(metadata_size, dtype=np.uint8)
+        model_inputs = [None, None]
+        model_inputs[1 - dynamic_index] = tensor
+        model_inputs[dynamic_index] = metadata
+        self.input_dataset, self.input_buffers = self._dataset(model_inputs, output=False)
+
+        output_buffers = []
+        for index, template in enumerate(output_templates):
+            maximum_size = int(acl.mdl.get_output_size_by_index(self.desc, index))
+            if template.nbytes > maximum_size:
+                raise ValueError(
+                    f"output {index} exceeds dynamic OM maximum: "
+                    f"cpu={template.nbytes} om_max={maximum_size}"
+                )
+            output_buffers.append(np.empty(maximum_size, dtype=np.uint8))
+        self.output_dataset, self.output_buffers = self._dataset(
+            output_buffers, output=True
+        )
+
+        dims = {
+            "name": "",
+            "dimCount": tensor.ndim,
+            "dims": [int(value) for value in tensor.shape],
+        }
+        _check(
+            "acl.mdl.set_input_dynamic_dims",
+            acl.mdl.set_input_dynamic_dims(
+                self.model_id, self.input_dataset, dynamic_index, dims
+            ),
+        )
+        started = time.perf_counter()
+        _check(
+            "acl.mdl.execute",
+            acl.mdl.execute(self.model_id, self.input_dataset, self.output_dataset),
+        )
+        elapsed = time.perf_counter() - started
+
+        outputs = []
+        for template, (device_ptr, _, _) in zip(output_templates, self.output_buffers):
+            output = np.empty(template.shape, dtype=template.dtype)
+            host_ptr = acl.util.numpy_to_ptr(output)
+            _check(
+                "acl.rt.memcpy(D2H)",
+                acl.rt.memcpy(
+                    host_ptr,
+                    output.nbytes,
+                    device_ptr,
+                    output.nbytes,
+                    ACL_MEMCPY_DEVICE_TO_HOST,
+                ),
+            )
+            outputs.append(output)
+        self._free_dataset(self.input_dataset, self.input_buffers)
+        self._free_dataset(self.output_dataset, self.output_buffers)
+        self.input_dataset = self.output_dataset = None
+        self.input_buffers = []
+        self.output_buffers = []
+        return outputs, elapsed
         try:
             acl.finalize()
         except Exception:
@@ -188,6 +268,7 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=20260720)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--dynamic-dims", action="store_true")
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -200,7 +281,8 @@ def main() -> int:
     cpu_outputs = cpu_session.run(None, {input_name: tensor})
     cpu_seconds = time.perf_counter() - cpu_started
 
-    om_session = StaticOmSession(args.om, args.device_id)
+    session_type = DynamicDimsOmSession if args.dynamic_dims else StaticOmSession
+    om_session = session_type(args.om, args.device_id)
     try:
         for _ in range(max(0, args.warmup)):
             om_session.infer([tensor], cpu_outputs)
