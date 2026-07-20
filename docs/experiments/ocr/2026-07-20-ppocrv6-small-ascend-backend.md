@@ -31,6 +31,12 @@ APP_PORT=8000 bash scripts/run_ppocr_om_feasibility.sh
 
 脚本会在运行前拒绝与活动索引任务并行，保存 profile/build 日志，并保持正式服务 `OCR_DEVICE=cpu` 不变。
 ATC 调用前会加载容器内 CANN `set_env.sh` 并验证 `tbe`；批量转换前先用一个 Det shape 做门禁编译。
+
+Exact-shape OM 全部生成后，先在独立 NPU 上对比 Det 的 ONNX CPU 与 pyACL OM 原始输出：
+
+```bash
+PHYSICAL_NPU=6 bash scripts/run_ppocr_acl_compare.sh
+```
 5. 通过后实现 `PpOcrSmallOmBackend`，接入现有常驻 daemon；保持 `ocr.npz` schema 不变。
 
 ## 验收门槛

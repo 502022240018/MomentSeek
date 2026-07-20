@@ -329,7 +329,7 @@ docker images momentseek-29154-platform \
 
 ### 13.1 环境快照
 
-当前基础 MindIE 容器曾验证：Python 3.11.6、Torch 2.9.0、torch-npu 2.9.0.post1、Transformers 4.51.0、MindIE 3.0 开发构建、ffmpeg 可用，主机可见 8 张 NPU。NPU 6 的实验板卡识别为 Ascend 910B4；ATC 来自 CANN 9.0.0-beta.2。
+当前基础 MindIE 容器曾验证：Python 3.11.6、Torch 2.9.0、torch-npu 2.9.0.post1、Transformers 4.51.0、MindIE 3.0 开发构建、ffmpeg 可用，主机可见 8 张 NPU。NPU 6 的实验板卡识别为 Ascend 910B4。当前平台容器中的 ATC、pyACL、OPP 和运行库均来自 CANN 8.5.1；早期宿主审计曾出现 9.0 beta 信息，不能用于描述当前容器。
 
 这些是审计快照，不是代码依赖声明。应以当前镜像构建输出和下面命令重新确认：
 
@@ -404,7 +404,7 @@ docker exec -e PYTHONPATH=/app/backend momentseek-29154-platform \
 
 上述命令展示参数和产物约定，但当前正式平台容器只挂载物理 NPU 5；不要为了实验直接修改或重启正式容器。实际编译应使用单独命名、显式挂载 NPU 6 的实验容器。当前 exact-shape manifest 的 `product_ready=false`，只用于可行性验证。
 
-生成的 OM 与 SoC、shape 策略及 CANN/Runtime 版本相关。CANN 9.0.0-beta.2 生成的实验 OM 不能未经验证复制到不同 CANN 版本的正式环境。接入生产前至少完成：CPU ONNX 与 OM 原始输出对齐、端到端文字结果对齐、冷启动/稳态速度、不同分辨率和异常输入测试。
+生成的 OM 与 SoC、shape 策略及 CANN/Runtime 版本相关。当前实验 OM 由 CANN 8.5.1 生成并在同版本 pyACL 上验证，不能未经验证复制到其他 CANN 版本。接入生产前至少完成：CPU ONNX 与 OM 原始输出对齐、端到端文字结果对齐、冷启动/稳态速度、不同分辨率和异常输入测试。
 
 ## 14. 常用命令速查
 
