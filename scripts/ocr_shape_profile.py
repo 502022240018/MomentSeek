@@ -44,19 +44,49 @@ class RecordingSession:
         return getattr(self._session, name)
 
 
-def _wrap_sessions(ocr, records: list[dict]) -> None:
+def _safe_metadata(obj) -> dict:
+    metadata = {"type": f"{type(obj).__module__}.{type(obj).__name__}"}
+    try:
+        attributes = vars(obj)
+    except TypeError:
+        attributes = {}
+    for name, value in attributes.items():
+        lowered = name.casefold()
+        if not any(token in lowered for token in ("model", "path", "shape", "engine")):
+            continue
+        if isinstance(value, (str, int, float, bool, type(None), Path)):
+            metadata[name] = str(value)
+        elif isinstance(value, (list, tuple)) and len(value) <= 20:
+            metadata[name] = [str(item) for item in value]
+    return metadata
+
+
+def _wrap_sessions(ocr, records: list[dict]) -> dict:
+    metadata = {}
     for stage, attr in {"det": "text_det", "cls": "text_cls", "rec": "text_rec"}.items():
         owner = getattr(ocr, attr)
         wrapper = getattr(owner, "session")
+        metadata[stage] = {
+            "owner": _safe_metadata(owner),
+            "wrapper": _safe_metadata(wrapper),
+            "session": _safe_metadata(wrapper.session),
+        }
         wrapper.session = RecordingSession(wrapper.session, stage, records)
+    return metadata
 
 
-def _sample_frame(path: Path, timestamp: float) -> np.ndarray | None:
+def _sample_frame(path: Path, timestamp: float, decode_height: int) -> np.ndarray | None:
     capture = cv2.VideoCapture(str(path))
     try:
         capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, timestamp) * 1000)
         ok, frame = capture.read()
-        return frame if ok else None
+        if not ok:
+            return None
+        height, width = frame.shape[:2]
+        if decode_height > 0 and height > decode_height:
+            output_width = max(2, int(round(width * decode_height / height / 2) * 2))
+            frame = cv2.resize(frame, (output_width, decode_height), interpolation=cv2.INTER_LINEAR)
+        return frame
     finally:
         capture.release()
 
@@ -95,6 +125,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("/app/runtime/ocr-shape-profile.json"))
     parser.add_argument("--frames-per-video", type=int, default=12)
     parser.add_argument("--max-videos", type=int, default=12)
+    parser.add_argument("--decode-height", type=int, default=720)
     args = parser.parse_args()
 
     videos = sorted(
@@ -106,7 +137,7 @@ def main() -> int:
 
     ocr, providers = _load_ocr("cpu", 0, args.model_root, npu_self_test=False)
     records: list[dict] = []
-    _wrap_sessions(ocr, records)
+    runtime_models = _wrap_sessions(ocr, records)
     sampled = []
     for video in videos:
         info = probe_video(video)
@@ -115,7 +146,7 @@ def main() -> int:
         successful = 0
         errors = []
         for timestamp in timestamps:
-            frame = _sample_frame(video, float(timestamp))
+            frame = _sample_frame(video, float(timestamp), args.decode_height)
             if frame is None:
                 continue
             try:
@@ -134,6 +165,8 @@ def main() -> int:
 
     report = {
         "providers": providers,
+        "decode_height": args.decode_height,
+        "runtime_models": runtime_models,
         "videos": sampled,
         "tensor_shapes": _summary(records),
         "raw_records": records,
