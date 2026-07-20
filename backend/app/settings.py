@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     ocr_det_lang: str = "ch"
     ocr_rec_lang: str = "ch"
     ocr_model_type: str = "small"
-    ocr_sample_fps: float = 0.05
+    ocr_sample_fps: float = 0.5
     ocr_decode_height: int = 720
     ocr_min_confidence: float = 0.5
     ocr_semantic_enabled: bool = True

@@ -61,7 +61,7 @@ export const defaultIndexConfiguration: IndexConfiguration = {
   visualShotDetector: "simple",
   visualShotThreshold: 0.2,
   faceSampleFps: 2,
-  ocrSampleFps: 1,
+  ocrSampleFps: 0.5,
   asrModel: "turbo",
   asrLanguage: "auto",
   asrSpeakerEnabled: true,
@@ -194,7 +194,7 @@ export function IndexOptionsPanel({
 
     {selected.has("ocr") && <div className="channel-settings compact-settings">
       <div className="channel-settings-title"><span className="chip ocr">ocr</span><b>画面文字</b></div>
-      <label>采样 fps<input type="number" min="0.05" max="5" step="0.05" value={value.ocrSampleFps} onChange={event => update("ocrSampleFps", Number(event.target.value))} /></label>
+      <label>采样 fps（默认每 2 秒一帧）<input type="number" min="0.05" max="5" step="0.05" value={value.ocrSampleFps} onChange={event => update("ocrSampleFps", Number(event.target.value))} /></label>
     </div>}
   </div>;
 }
