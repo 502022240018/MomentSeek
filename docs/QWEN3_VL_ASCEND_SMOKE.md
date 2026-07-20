@@ -5,7 +5,7 @@
 ## 前置条件
 
 - 服务器为 Atlas 800I A2 / Ascend 910B4，现场 CANN 8.5.1。
-- 已确认并获准使用一张空闲实验卡；默认物理 NPU 6。
+- 已确认并获准使用一张空闲实验卡；默认物理 NPU 7。
 - 正式容器 `momentseek-29154-platform` 正常运行，用于解析匹配驱动的基础镜像。
 - 模型已离线传到 `/home/momentseek-29154/vlm-exp/models/Qwen3-VL-2B-Instruct`。
 - 测试图位于 `/home/momentseek-29154/vlm-exp/input/test.jpg`。
@@ -18,7 +18,7 @@
 cd /home/momentseek-29154/platform
 git pull --ff-only
 
-npu-smi info -t proc-mem -i 6 -c 0
+npu-smi info -t proc-mem -i 7 -c 0
 
 bash scripts/run_qwen3_vl_ascend_smoke.sh
 ```
@@ -35,7 +35,7 @@ bash scripts/run_qwen3_vl_ascend_smoke.sh
 常用覆盖参数：
 
 ```bash
-PHYSICAL_NPU=6 \
+PHYSICAL_NPU=7 \
 MODEL_NAME=Qwen3-VL-4B-Instruct \
 RUNS=20 WARMUP_RUNS=3 MAX_NEW_TOKENS=96 \
   bash scripts/run_qwen3_vl_ascend_smoke.sh
@@ -55,6 +55,6 @@ IMAGE_HOST=/home/momentseek-29154/vlm-exp/input/test.jpg \
 
 - 输出包含合理的中文画面描述。
 - JSON 包含加载时间、p50/p95、token/s、峰值 allocated/reserved HBM。
-- 运行结束后 `npu-smi info -t proc-mem -i 6 -c 0` 不残留实验进程。
+- 运行结束后 `npu-smi info -t proc-mem -i 7 -c 0` 不残留实验进程。
 
 如果出现兼容性错误，保留完整 log，并记录基础镜像、`pip freeze`、`npu-smi info`。不要直接升级宿主 CANN、驱动或正式平台容器的 Python 包。
