@@ -176,8 +176,25 @@ def create_ocr_backend(
     rec_lang: str,
     model_type: str,
     npu_self_test: bool,
+    acl_model_dir: str | Path | None = None,
 ) -> OCRBackend:
     normalized = str(engine or "rapidocr").replace("-", "_").casefold()
+    if normalized == "rapidocr_acl":
+        if device != "npu":
+            raise ValueError("rapidocr_acl 仅支持 device=npu")
+        from app.indexing.ocr_acl import RapidOCRAclBackend
+
+        om_root = Path(acl_model_dir) if acl_model_dir else Path(model_root) / "ascend"
+        return RapidOCRAclBackend(
+            device_id=device_id,
+            model_root=model_root,
+            om_root=om_root,
+            ocr_version=ocr_version,
+            det_lang=det_lang,
+            rec_lang=rec_lang,
+            model_type=model_type,
+            npu_self_test=npu_self_test,
+        )
     if normalized != "rapidocr":
         raise ValueError(f"尚未启用的 OCR backend: {engine}")
     return RapidOCRBackend(
@@ -511,6 +528,7 @@ def build_ocr_index(
     semantic_batch_size: int = 32,
     semantic_local_files_only: bool = True,
     engine: str = "rapidocr",
+    acl_model_dir: str | Path | None = None,
     backend: OCRBackend | None = None,
 ) -> dict:
     if sample_fps <= 0:
@@ -528,6 +546,7 @@ def build_ocr_index(
             rec_lang=rec_lang,
             model_type=model_type,
             npu_self_test=npu_self_test,
+            acl_model_dir=acl_model_dir,
         )
 
     chunks: list[dict] = []

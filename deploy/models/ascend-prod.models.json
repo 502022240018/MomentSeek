@@ -58,6 +58,13 @@
       "id": "PP-OCRv6",
       "target": "/app/models/rapidocr",
       "required": true
+    },
+    {
+      "name": "rapidocr_ppocrv6_acl_om",
+      "kind": "directory",
+      "id": "PP-OCRv6-Ascend910B4-CANN8.5.1",
+      "target": "/app/models/rapidocr/ascend/910b4-cann9-profile",
+      "required": true
     }
   ]
 }

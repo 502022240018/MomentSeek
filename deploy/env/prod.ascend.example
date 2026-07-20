@@ -36,9 +36,10 @@ ASR_SEMANTIC_ENABLED=true
 ASR_SEMANTIC_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 ASR_SEMANTIC_DEVICE=cpu
 ASR_SEMANTIC_LOCAL_FILES_ONLY=true
-OCR_ENGINE=rapidocr
-# Current RapidOCR ONNX models have not passed CANN correctness validation.
-OCR_DEVICE=cpu
+OCR_ENGINE=rapidocr_acl
+# PP-OCRv6 executes as precompiled OM models through the ACL runtime.
+OCR_DEVICE=npu
+OCR_ACL_MODEL_DIR=rapidocr/ascend/910b4-cann9-profile
 OCR_VERSION=PP-OCRv6
 OCR_DET_LANG=ch
 OCR_REC_LANG=ch

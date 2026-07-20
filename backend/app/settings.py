@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     ocr_min_confidence: float = 0.5
     ocr_semantic_enabled: bool = True
     ocr_npu_self_test: bool = True
+    ocr_acl_model_dir: str = "rapidocr/ascend/910b4-cann9-profile"
 
     @property
     def db_path(self) -> Path:

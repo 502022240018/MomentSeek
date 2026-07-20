@@ -53,6 +53,11 @@ grep -q '"lockfileVersion": 3' "$SOURCE_DIR/frontend/package-lock.json" \
 
 log "1/8 Resource and ownership checks"
 mkdir -p "$MODEL_DIR" "$RUNTIME_DIR" "$LOG_DIR" "$BUILD_DIR/wheels"
+OCR_OM_ROOT="$MODEL_DIR/rapidocr/ascend/910b4-cann9-profile"
+[[ -d "$OCR_OM_ROOT/det" ]] || fail "Required OCR Det OM directory is missing: $OCR_OM_ROOT/det"
+[[ -d "$OCR_OM_ROOT/cls" ]] || fail "Required OCR Cls OM directory is missing: $OCR_OM_ROOT/cls"
+[[ -f "$OCR_OM_ROOT/rec-dynamic-width-b5/PP-OCRv6_rec_small-b5-dynamic-width.om" ]] \
+  || fail "Required OCR Rec dynamic OM is missing"
 [[ -f "$INSIGHTFACE_WHEEL" ]] || fail "Required build artifact is missing: $INSIGHTFACE_WHEEL"
 printf '%s  %s\n' "$INSIGHTFACE_SHA256" "$INSIGHTFACE_WHEEL" | sha256sum -c -
 cp -f "$INSIGHTFACE_WHEEL" "$BUILD_DIR/wheels/"
@@ -244,7 +249,9 @@ docker run -d \
   -e ASR_VAD_STRATEGY=silero_12s \
   -e ASR_MODEL_LOCAL_FILES_ONLY=true \
   -e ASR_SEMANTIC_LOCAL_FILES_ONLY=true \
-  -e OCR_DEVICE=cpu \
+  -e OCR_ENGINE=rapidocr_acl \
+  -e OCR_DEVICE=npu \
+  -e OCR_ACL_MODEL_DIR=rapidocr/ascend/910b4-cann9-profile \
   -e MODEL_MANIFEST=/app/deploy/models/ascend-prod.models.json \
   -v "$RUNTIME_DIR:/app/runtime" \
   -v "$MODEL_DIR:/app/models" \
@@ -273,6 +280,27 @@ if [[ "$healthy" != 1 ]]; then
   fi
   fail "Platform health check failed"
 fi
+
+log "Run production OCR ACL backend self-test"
+docker exec -i "$CONTAINER_NAME" python3 - <<'PY'
+from app.indexing.ocr import create_ocr_backend
+
+backend = create_ocr_backend(
+    "rapidocr_acl",
+    device="npu",
+    device_id=0,
+    model_root="/app/models/rapidocr",
+    acl_model_dir="/app/models/rapidocr/ascend/910b4-cann9-profile",
+    ocr_version="PP-OCRv6",
+    det_lang="ch",
+    rec_lang="ch",
+    model_type="small",
+    npu_self_test=True,
+)
+print("ocr_acl_providers=", backend.providers)
+backend.close()
+print("OCR_ACL_BACKEND_SELF_TEST=PASS")
+PY
 
 if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
   docker rm "$ROLLBACK_NAME" >/dev/null

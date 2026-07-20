@@ -94,6 +94,13 @@ class ModelPool:
                 self._on_free(obj)
             except Exception:
                 pass
+        else:
+            close = getattr(obj, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
         del obj
         gc.collect()
         _empty_device_cache()

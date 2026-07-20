@@ -27,6 +27,21 @@ def test_unknown_ocr_backend_fails_explicitly(tmp_path):
         )
 
 
+def test_acl_ocr_requires_npu_device(tmp_path):
+    with pytest.raises(ValueError, match="仅支持 device=npu"):
+        create_ocr_backend(
+            "rapidocr_acl",
+            device="cpu",
+            device_id=0,
+            model_root=tmp_path,
+            ocr_version="PP-OCRv6",
+            det_lang="ch",
+            rec_lang="ch",
+            model_type="small",
+            npu_self_test=False,
+        )
+
+
 def test_face_encoder_requires_local_model_files(monkeypatch, tmp_path):
     class FakeOrt:
         @staticmethod

@@ -144,6 +144,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
                 rec_lang=settings.ocr_rec_lang,
                 model_type=settings.ocr_model_type,
                 npu_self_test=settings.ocr_npu_self_test,
+                acl_model_dir=str(settings.app_model_dir / settings.ocr_acl_model_dir),
             ),
         )
         result = build_ocr_index(
@@ -169,6 +170,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             semantic_batch_size=settings.asr_semantic_batch_size,
             semantic_local_files_only=settings.asr_semantic_local_files_only,
             engine=settings.ocr_engine,
+            acl_model_dir=str(settings.app_model_dir / settings.ocr_acl_model_dir),
             backend=backend,
         )
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
