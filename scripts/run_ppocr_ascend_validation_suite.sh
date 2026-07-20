@@ -112,6 +112,7 @@ done
 python3 - "$STATUS_TSV" "$SUMMARY_JSON" "$SUMMARY_TXT" <<'PY'
 import csv
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -132,6 +133,19 @@ for row in rows:
     row["texts_exact_match"] = final.get("texts_exact_match")
     row["cpu_pipeline_seconds"] = report.get("cpu_pipeline_seconds")
     row["om_pipeline_seconds"] = report.get("om_pipeline_seconds_with_per_stage_load")
+
+for row in rows:
+    if row["status"] == "PASS":
+        continue
+    log_path = Path(row["log"]) if row["log"] else None
+    if not log_path or not log_path.is_file():
+        continue
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    matches = re.findall(
+        r"(?:FileNotFoundError|RuntimeError|ValueError):[^\n]+", log_text
+    )
+    if matches:
+        row["failure_reason"] = matches[-1]
 
 passed = sum(row["status"] == "PASS" for row in rows)
 failed = len(rows) - passed
@@ -157,6 +171,8 @@ for row in rows:
         f"[{row['status']}] {row['kind']} {row['case']} rc={row['exit_code']}{extra}"
     )
     if row["status"] != "PASS":
+        if row.get("failure_reason"):
+            lines.append(f"  reason={row['failure_reason']}")
         lines.append(f"  log={row['log']}")
 text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 print("\n".join(lines))

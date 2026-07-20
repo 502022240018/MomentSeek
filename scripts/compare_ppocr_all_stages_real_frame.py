@@ -21,6 +21,8 @@ MODEL_STEMS = {
     "cls": "ch_ppocr_mobile_v2.0_cls_mobile",
     "rec": "PP-OCRv6_rec_small",
 }
+REC_DYNAMIC_WIDTH_GEARS = (320, 384, 448, 512, 576, 640, 704, 768, 812, 832, 896, 960, 1024)
+REC_DYNAMIC_BATCH = 5
 
 
 class CaptureSession:
@@ -90,6 +92,7 @@ class ExactShapeOmSession:
         session_type = StaticOmSession
         mode = "exact_shape"
         padded_batch = None
+        padded_width = None
         if not om_path.is_file():
             padded_cls = self._find_padded_cls(shape)
             if padded_cls is not None:
@@ -100,11 +103,21 @@ class ExactShapeOmSession:
             and self.stage == "rec"
             and self.rec_dynamic_om is not None
             and self.rec_dynamic_om.is_file()
-            and shape[0] == 5
+            and shape[0] <= REC_DYNAMIC_BATCH
         ):
+            padded_width = next(
+                (width for width in REC_DYNAMIC_WIDTH_GEARS if width >= shape[3]),
+                None,
+            )
+            if padded_width is None:
+                raise ValueError(
+                    f"rec width {shape[3]} exceeds largest dynamic gear "
+                    f"{REC_DYNAMIC_WIDTH_GEARS[-1]}"
+                )
             om_path = self.rec_dynamic_om
             session_type = DynamicDimsOmSession
-            mode = "dynamic_width"
+            padded_batch = REC_DYNAMIC_BATCH
+            mode = "dynamic_width_fixed_batch_padding"
         if not om_path.is_file():
             raise FileNotFoundError(
                 f"missing exact-shape {self.stage} OM for {shape}: {om_path}"
@@ -112,7 +125,7 @@ class ExactShapeOmSession:
 
         inference_inputs = inputs
         inference_templates = baseline["outputs"]
-        if padded_batch is not None:
+        if padded_batch is not None and self.stage == "cls":
             padded_input = np.zeros(
                 (padded_batch, *inputs[0].shape[1:]), dtype=inputs[0].dtype
             )
@@ -122,6 +135,18 @@ class ExactShapeOmSession:
                 np.empty((padded_batch, *output.shape[1:]), dtype=output.dtype)
                 for output in baseline["outputs"]
             ]
+        elif padded_batch is not None and self.stage == "rec":
+            padded_input = np.zeros(
+                (padded_batch, shape[1], shape[2], padded_width),
+                dtype=inputs[0].dtype,
+            )
+            padded_input[: shape[0], :, :, : shape[3]] = inputs[0]
+            inference_inputs = [padded_input]
+            input_name = next(iter((feed or {}).keys()))
+            output_names = args[0] if args else None
+            inference_templates = self.metadata_session.run(
+                output_names, {input_name: padded_input}
+            )
 
         total_started = time.perf_counter()
         session = session_type(om_path, self.device_id, manage_runtime=False)
@@ -132,12 +157,16 @@ class ExactShapeOmSession:
         finally:
             session.close()
         if padded_batch is not None:
-            outputs = [output[: shape[0]] for output in outputs]
+            outputs = [
+                output[tuple(slice(0, size) for size in baseline_output.shape)]
+                for output, baseline_output in zip(outputs, baseline["outputs"])
+            ]
         self.records.append({
             "shape": shape,
             "om": str(om_path),
             "mode": mode,
             "padded_batch": padded_batch,
+            "padded_width": padded_width,
             "execute_seconds": execute_seconds,
             "load_execute_release_seconds": time.perf_counter() - total_started,
             "outputs": [
