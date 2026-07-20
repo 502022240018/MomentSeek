@@ -37,7 +37,7 @@ trap 'rollback_on_error "$LINENO"' ERR
 [[ -d "$SOURCE_DIR/.git" ]] || fail "Git source not found: $SOURCE_DIR"
 [[ -f "$SOURCE_DIR/backend/requirements-ascend.txt" ]] || fail "Missing Ascend requirements"
 [[ -f "$SOURCE_DIR/frontend/package-lock.json" ]] || fail "Missing frontend package-lock.json"
-for command_name in docker git curl npu-smi flock ss sha256sum; do
+for command_name in docker git curl npu-smi flock ss sha256sum python3; do
   command -v "$command_name" >/dev/null 2>&1 || fail "Missing command: $command_name"
 done
 
@@ -173,18 +173,55 @@ DEVICE_ARGS=(
   -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/cann-8.5.1/lib64
 )
 
-log "5/8 Image import and NPU smoke test"
-docker run --rm "${DEVICE_ARGS[@]}" "$IMAGE_NAME" python3 -c \
-  'import torch; import torch_npu; import torchaudio; import funasr; import open_clip; from transformers import Siglip2Model; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); x=torch.arange(4,dtype=torch.float32,device="npu:0"); print("npu_result",(x*2).cpu().tolist()); print("device_imports_and_silero_onnx=PASS"); print("image_smoke=PASS")'
-
-log "6/8 Replace only our named platform container"
+log "5/8 Quiesce previous platform and run NPU smoke test"
 if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
   fail "Stale rollback container exists: ${ROLLBACK_NAME}; inspect it before continuing"
 fi
 if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+  existing_running="$(docker container inspect --format '{{.State.Running}}' "$CONTAINER_NAME")"
+  if [[ "$existing_running" == "true" ]]; then
+    jobs_json="$(curl -fsS --connect-timeout 2 --max-time 10 \
+      "http://127.0.0.1:${APP_PORT}/api/jobs")" \
+      || fail "Cannot audit active jobs before stopping the existing platform"
+    active_jobs="$(python3 -c \
+      'import json,sys; print(sum(j.get("status") in {"queued","running"} for j in json.load(sys.stdin)))' \
+      <<<"$jobs_json")" \
+      || fail "Cannot parse the existing platform job list"
+    [[ "$active_jobs" == 0 ]] \
+      || fail "Existing platform has ${active_jobs} queued/running job(s); cancel them before deployment"
+  fi
   docker rename "$CONTAINER_NAME" "$ROLLBACK_NAME"
-  docker stop "$ROLLBACK_NAME" >/dev/null
+  if [[ "$existing_running" == "true" ]]; then
+    docker stop --time 30 "$ROLLBACK_NAME" >/dev/null
+  fi
 fi
+
+# Resident model pools keep the selected NPU allocated for the lifetime of the
+# old container.  Stop it before starting the temporary smoke-test container;
+# rollback_on_error restores it if the smoke test or replacement fails.
+smoke_ok=0
+for attempt in 1 2 3; do
+  printf 'npu_smoke_attempt=%s/3\n' "$attempt"
+  if docker run --rm "${DEVICE_ARGS[@]}" "$IMAGE_NAME" python3 -c \
+    'import torch; import torch_npu; import torchaudio; import funasr; import open_clip; from transformers import Siglip2Model; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); x=torch.arange(4,dtype=torch.float32,device="npu:0"); print("npu_result",(x*2).cpu().tolist()); print("device_imports_and_silero_onnx=PASS"); print("image_smoke=PASS")'; then
+    smoke_ok=1
+    break
+  fi
+  sleep $((attempt * 2))
+done
+if [[ "$smoke_ok" != 1 ]]; then
+  # fail() exits explicitly and therefore is not guaranteed to fire ERR in all
+  # Bash contexts. Restore here as well so a failed smoke test never leaves the
+  # previously healthy service stopped.
+  if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
+    docker rename "$ROLLBACK_NAME" "$CONTAINER_NAME" >/dev/null
+    docker start "$CONTAINER_NAME" >/dev/null
+    printf 'Previous platform container was restored automatically.\n' >&2
+  fi
+  fail "NPU smoke test failed after 3 attempts"
+fi
+
+log "6/8 Start replacement platform container"
 docker run -d \
   --name "$CONTAINER_NAME" \
   --restart unless-stopped \

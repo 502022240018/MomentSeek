@@ -15,8 +15,9 @@
 7. `docs/RETRIEVAL_CHANNELS.md`：visual / face / ASR / OCR 的索引与召回协议。
 8. `docs/ARCHITECTURE.md`：系统架构、API Surface、模块边界。
 9. `docs/OPERATIONS.md`：共享服务器、公网入口、安全操作规范。
-10. `docs/VALIDATION.md`：验证命令和完成声明规则。
-11. `docs/LESSONS_LEARNED.md`：历史踩坑、事故教训、工具注意事项。
+10. `docs/ASCEND_SHARED_SERVER_RUNBOOK.md`：当前 800IA2 共享 Ascend 服务器的部署与排障手册。
+11. `docs/VALIDATION.md`：验证命令和完成声明规则。
+12. `docs/LESSONS_LEARNED.md`：历史踩坑、事故教训、工具注意事项。
 
 实验结论看 `docs/experiments/README.md`。
 可复现实验资产、manifest、query、schema 看 `eval/README.md` 和对应 `eval/<area>/README.md`。
