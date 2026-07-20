@@ -8,7 +8,9 @@ RUNTIME_DIR="${RUNTIME_DIR:-${WORK_ROOT}/runtime}"
 PLATFORM_CONTAINER="${PLATFORM_CONTAINER:-momentseek-29154-platform}"
 PHYSICAL_NPU="${PHYSICAL_NPU:-7}"
 MODEL_NAME="${MODEL_NAME:-Qwen3-VL-2B-Instruct}"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen3-VL-2B-Instruct}"
 MODEL_HOST="${MODEL_HOST:-${EXPERIMENT_ROOT}/models/${MODEL_NAME}}"
+DOWNLOAD_MODEL="${DOWNLOAD_MODEL:-auto}"
 IMAGE_HOST="${IMAGE_HOST:-${EXPERIMENT_ROOT}/input/test.jpg}"
 VIDEO_HOST="${VIDEO_HOST:-}"
 FRAME_TIMESTAMP="${FRAME_TIMESTAMP:-10}"
@@ -30,10 +32,10 @@ done
 [[ "$PHYSICAL_NPU" =~ ^[0-9]+$ ]] || fail "PHYSICAL_NPU must be numeric"
 [[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || fail "RUNS must be positive"
 [[ "$WARMUP_RUNS" =~ ^[0-9]+$ ]] || fail "WARMUP_RUNS must be non-negative"
+[[ "$DOWNLOAD_MODEL" =~ ^(auto|true|false)$ ]] \
+  || fail "DOWNLOAD_MODEL must be auto, true, or false"
 [[ -d "$SOURCE_DIR" ]] || fail "source directory missing: $SOURCE_DIR"
 [[ -f "$SOURCE_DIR/scripts/qwen3_vl_ascend_smoke.py" ]] || fail "smoke script missing; update the repository"
-[[ -d "$MODEL_HOST" ]] || fail "model directory missing: $MODEL_HOST"
-[[ -f "$MODEL_HOST/config.json" ]] || fail "model config missing: $MODEL_HOST/config.json"
 docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 || fail "image missing: $IMAGE_NAME"
 docker container inspect "$EXPERIMENT_NAME" >/dev/null 2>&1 \
   && fail "experiment container already exists: $EXPERIMENT_NAME"
@@ -64,7 +66,9 @@ if [[ ! -f "$IMAGE_HOST" ]]; then
 fi
 [[ -f "$IMAGE_HOST" ]] || fail "test image missing after frame extraction: $IMAGE_HOST"
 
-if [[ "$INSTALL_DEPS" == "true" || ( "$INSTALL_DEPS" == "auto" && ! -x "$VENV_HOST/bin/python" ) ]]; then
+if [[ "$INSTALL_DEPS" == "true" \
+  || ( "$INSTALL_DEPS" == "auto" \
+    && ( ! -x "$VENV_HOST/bin/python" || ! -x "$VENV_HOST/bin/modelscope" ) ) ]]; then
   docker run --rm --name "${EXPERIMENT_NAME}-env" \
     -v "$EXPERIMENT_ROOT:/work" \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
@@ -76,12 +80,32 @@ if [[ "$INSTALL_DEPS" == "true" || ( "$INSTALL_DEPS" == "auto" && ! -x "$VENV_HO
       python3 -m venv --system-site-packages /work/venv
       /work/venv/bin/python -m pip install --upgrade pip
       /work/venv/bin/pip install \
-        "transformers>=4.57,<5" "qwen-vl-utils==0.0.14" accelerate pillow
+        "transformers>=4.57,<5" "qwen-vl-utils==0.0.14" accelerate pillow modelscope
       /work/venv/bin/python -c \
         "import torch, torch_npu, transformers; print(torch.__version__, torch_npu.__version__, transformers.__version__)"
     '
 fi
 [[ -x "$VENV_HOST/bin/python" ]] || fail "venv missing; run with INSTALL_DEPS=true"
+
+model_complete=false
+if [[ -f "$MODEL_HOST/config.json" ]] \
+  && find "$MODEL_HOST" -maxdepth 1 -type f -name '*.safetensors' -print -quit | grep -q .; then
+  model_complete=true
+fi
+if [[ "$DOWNLOAD_MODEL" == "true" || ( "$DOWNLOAD_MODEL" == "auto" && "$model_complete" != "true" ) ]]; then
+  mkdir -p "$MODEL_HOST"
+  printf 'Downloading model from ModelScope: id=%s target=%s\n' "$MODEL_ID" "$MODEL_HOST"
+  docker run --rm --name "${EXPERIMENT_NAME}-model" \
+    -v "$EXPERIMENT_ROOT:/work" \
+    -v "$(dirname "$MODEL_HOST"):/download" \
+    "$IMAGE_NAME" bash -lc '
+      set -e
+      /work/venv/bin/modelscope download --model "$1" --local_dir "$2"
+    ' bash "$MODEL_ID" "/download/$(basename "$MODEL_HOST")"
+fi
+[[ -f "$MODEL_HOST/config.json" ]] || fail "model config missing after download: $MODEL_HOST/config.json"
+find "$MODEL_HOST" -maxdepth 1 -type f -name '*.safetensors' -print -quit | grep -q . \
+  || fail "model weights missing after download: $MODEL_HOST"
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
 output_host="${OUTPUT_DIR}/${MODEL_NAME}-${timestamp}.json"

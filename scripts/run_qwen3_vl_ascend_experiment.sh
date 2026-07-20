@@ -9,6 +9,7 @@ PLATFORM_CONTAINER="${PLATFORM_CONTAINER:-momentseek-29154-platform}"
 PLATFORM_PORT="${PLATFORM_PORT:-8000}"
 PHYSICAL_NPU="${PHYSICAL_NPU:-7}"
 MODEL_NAME="${MODEL_NAME:-Qwen3-VL-2B-Instruct}"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen3-VL-2B-Instruct}"
 MODEL_HOST="${MODEL_HOST:-${EXPERIMENT_ROOT}/models/${MODEL_NAME}}"
 EXPECTED_BRANCH="${EXPECTED_BRANCH:-agent/ascend-qwen3-vl-smoke}"
 OUTPUT_DIR="${OUTPUT_DIR:-${EXPERIMENT_ROOT}/output}"
@@ -43,13 +44,14 @@ health="$(curl -fsS --connect-timeout 2 --max-time 10 \
 printf 'platform_health=%s\n' "$health"
 
 mkdir -p "$EXPERIMENT_ROOT/models" "$EXPERIMENT_ROOT/input" "$OUTPUT_DIR"
-[[ -d "$MODEL_HOST" ]] || fail "model directory missing: $MODEL_HOST"
-[[ -f "$MODEL_HOST/config.json" ]] || fail "model config missing: $MODEL_HOST/config.json"
-if ! find "$MODEL_HOST" -maxdepth 1 -type f -name '*.safetensors' -print -quit | grep -q .; then
-  fail "no safetensors weights found under $MODEL_HOST"
+if [[ -f "$MODEL_HOST/config.json" ]] \
+  && find "$MODEL_HOST" -maxdepth 1 -type f -name '*.safetensors' -print -quit | grep -q .; then
+  printf 'model=%s\nmodel_size=%s\n' \
+    "$MODEL_HOST" "$(du -sh "$MODEL_HOST" | awk '{print $1}')"
+else
+  printf 'model_missing_or_incomplete=%s\nmodelscope_id=%s\n' "$MODEL_HOST" "$MODEL_ID"
+  printf 'The smoke runner will download the official model from ModelScope.\n'
 fi
-printf 'model=%s\nmodel_size=%s\n' \
-  "$MODEL_HOST" "$(du -sh "$MODEL_HOST" | awk '{print $1}')"
 
 printf '\nAvailable runtime videos (first 10):\n'
 find "$RUNTIME_DIR/uploads" -type f \
@@ -65,6 +67,7 @@ grep -q 'No process in device' <<<"$npu_processes" \
 WORK_ROOT="$WORK_ROOT" SOURCE_DIR="$SOURCE_DIR" EXPERIMENT_ROOT="$EXPERIMENT_ROOT" \
 RUNTIME_DIR="$RUNTIME_DIR" PLATFORM_CONTAINER="$PLATFORM_CONTAINER" \
 PHYSICAL_NPU="$PHYSICAL_NPU" MODEL_NAME="$MODEL_NAME" MODEL_HOST="$MODEL_HOST" \
+MODEL_ID="$MODEL_ID" \
 OUTPUT_DIR="$OUTPUT_DIR" \
   bash scripts/run_qwen3_vl_ascend_smoke.sh
 
