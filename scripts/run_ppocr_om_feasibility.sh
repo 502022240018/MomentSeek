@@ -60,6 +60,23 @@ docker exec "$CONTAINER_NAME" sh -c '
   test -f /app/models/rapidocr/PP-OCRv6_rec_small.onnx
   python3 -c "import cv2, numpy, onnxruntime, rapidocr; print(\"OCR experiment imports: PASS\")"
 '
+CANN_ENV_SCRIPT="$(docker exec "$CONTAINER_NAME" sh -c '
+  for candidate in \
+    /usr/local/Ascend/cann/set_env.sh \
+    /usr/local/Ascend/ascend-toolkit/set_env.sh \
+    /usr/local/Ascend/ascend-toolkit/latest/set_env.sh; do
+    if [ -f "$candidate" ]; then
+      printf "%s\n" "$candidate"
+      exit 0
+    fi
+  done
+  exit 1
+')" || fail "Cannot find the CANN set_env.sh inside the container"
+printf 'cann_env_script=%s\n' "$CANN_ENV_SCRIPT"
+docker exec -e CANN_ENV_SCRIPT="$CANN_ENV_SCRIPT" "$CONTAINER_NAME" sh -lc '
+  . "$CANN_ENV_SCRIPT"
+  python3 -c "import tbe; print(\"CANN TBE import: PASS\")"
+' || fail "CANN set_env.sh did not make the tbe module importable"
 
 log "3/6 Stage versioned experiment scripts in the container"
 docker cp "$SOURCE_DIR/scripts/ocr_shape_profile.py" \
@@ -95,13 +112,25 @@ print(json.dumps(data["tensor_shapes"], ensure_ascii=False, indent=2))
 PY
 
 BUILD_LOG="$LOG_DIR/ppocr-om-build-${RUN_ID}.log"
-docker exec -e PYTHONPATH=/app/backend "$CONTAINER_NAME" \
-  python3 /tmp/build_ppocr_om_from_profile.py \
-  --profile "$PROFILE" \
-  --model-root "$MODEL_ROOT" \
-  --output-dir "$OUTPUT_DIR" \
-  --soc-version "$SOC_VERSION" \
-  --precision-mode "$PRECISION_MODE" \
+log "Compile one detector artifact as the ATC gate"
+docker exec -e CANN_ENV_SCRIPT="$CANN_ENV_SCRIPT" "$CONTAINER_NAME" sh -lc \
+  '. "$CANN_ENV_SCRIPT"
+   export PYTHONPATH="/app/backend:${PYTHONPATH:-}"
+   python3 /tmp/build_ppocr_om_from_profile.py \
+     --profile "$1" --model-root "$2" --output-dir "$3" \
+     --soc-version "$4" --precision-mode "$5" \
+     --stages det --max-artifacts 1' \
+  sh "$PROFILE" "$MODEL_ROOT" "$OUTPUT_DIR" "$SOC_VERSION" "$PRECISION_MODE" \
+  2>&1 | tee -a "$BUILD_LOG"
+
+log "ATC gate passed; compile all remaining exact-shape artifacts"
+docker exec -e CANN_ENV_SCRIPT="$CANN_ENV_SCRIPT" "$CONTAINER_NAME" sh -lc \
+  '. "$CANN_ENV_SCRIPT"
+   export PYTHONPATH="/app/backend:${PYTHONPATH:-}"
+   python3 /tmp/build_ppocr_om_from_profile.py \
+     --profile "$1" --model-root "$2" --output-dir "$3" \
+     --soc-version "$4" --precision-mode "$5"' \
+  sh "$PROFILE" "$MODEL_ROOT" "$OUTPUT_DIR" "$SOC_VERSION" "$PRECISION_MODE" \
   2>&1 | tee "$BUILD_LOG"
 
 log "6/6 Verify build manifest"

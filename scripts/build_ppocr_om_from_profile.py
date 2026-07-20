@@ -52,6 +52,8 @@ def main() -> int:
     )
     parser.add_argument("--soc-version", default="Ascend910B4")
     parser.add_argument("--precision-mode", default="must_keep_origin_dtype")
+    parser.add_argument("--stages", nargs="+", choices=STAGES, default=list(STAGES))
+    parser.add_argument("--max-artifacts", type=int, default=0)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -75,7 +77,8 @@ def main() -> int:
         "artifacts": [],
     }
 
-    for stage in STAGES:
+    artifact_limit_reached = False
+    for stage in args.stages:
         raw_model_path = profile["runtime_models"][stage]["session"].get("_model_path")
         if not raw_model_path:
             raise ValueError(f"profile does not expose runtime model path for {stage}")
@@ -135,6 +138,11 @@ def main() -> int:
                 f"seconds={artifact['elapsed_seconds']} om={artifact['om_exists']}",
                 flush=True,
             )
+            if args.max_artifacts > 0 and len(manifest["artifacts"]) >= args.max_artifacts:
+                artifact_limit_reached = True
+                break
+        if artifact_limit_reached:
+            break
 
     manifest["success"] = all(item["returncode"] == 0 and item["om_exists"] for item in manifest["artifacts"])
     manifest_path = args.output_dir / "build-manifest.json"

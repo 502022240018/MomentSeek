@@ -30,6 +30,7 @@ APP_PORT=8000 bash scripts/run_ppocr_om_feasibility.sh
 ```
 
 脚本会在运行前拒绝与活动索引任务并行，保存 profile/build 日志，并保持正式服务 `OCR_DEVICE=cpu` 不变。
+ATC 调用前会加载容器内 CANN `set_env.sh` 并验证 `tbe`；批量转换前先用一个 Det shape 做门禁编译。
 5. 通过后实现 `PpOcrSmallOmBackend`，接入现有常驻 daemon；保持 `ocr.npz` schema 不变。
 
 ## 验收门槛
