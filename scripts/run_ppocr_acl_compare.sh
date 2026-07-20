@@ -53,6 +53,7 @@ docker run --rm \
   -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/cann-8.5.1/lib64 \
   "$IMAGE_NAME" sh -lc '
     set -eu
+    export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
     . /usr/local/Ascend/cann/set_env.sh
     python3 /work/scripts/compare_ppocr_onnx_om.py \
       --onnx /app/models/rapidocr/PP-OCRv6_det_small.onnx \
