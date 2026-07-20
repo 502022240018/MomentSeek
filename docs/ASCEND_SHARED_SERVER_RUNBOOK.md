@@ -2,6 +2,8 @@
 
 本文档面向第一次接手服务器部署、更新和排障的同事，记录 `800IA2` 共享昇腾服务器上 MomentSeek 的实际约定。通用发布原则见 [DEPLOYMENT.md](DEPLOYMENT.md)，共享环境安全规则见 [OPERATIONS.md](OPERATIONS.md)。
 
+日常查看/创建/取消任务、日志跟踪、资源监控和故障信息采集命令见 [ASCEND_OPERATIONS_COMMANDS.md](ASCEND_OPERATIONS_COMMANDS.md)。
+
 > 状态快照：2026-07-20。IP、空闲 NPU、镜像版本和 Git 提交都可能变化，写操作前必须重新检查。
 
 ## 1. 当前服务器约定
