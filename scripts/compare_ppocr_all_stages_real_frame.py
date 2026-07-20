@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import cv2
+import acl
 import numpy as np
 
 from app.indexing.ocr import _load_ocr
@@ -60,6 +61,21 @@ class ExactShapeOmSession:
         self.call_index = 0
         self.records: list[dict] = []
 
+    def _find_padded_cls(self, shape: list[int]) -> tuple[Path, int] | None:
+        if self.stage != "cls" or len(shape) != 4:
+            return None
+        suffix = "x".join(str(value) for value in shape[1:])
+        candidates: list[tuple[int, Path]] = []
+        for path in (self.om_root / "cls").glob(
+            f"{MODEL_STEMS['cls']}-*x{suffix}.om"
+        ):
+            batch_text = path.name.removeprefix(
+                f"{MODEL_STEMS['cls']}-"
+            ).split("x", 1)[0]
+            if batch_text.isdigit() and int(batch_text) >= shape[0]:
+                candidates.append((int(batch_text), path))
+        return min(candidates, key=lambda item: item[0]) if candidates else None
+
     def run(self, *args, **kwargs):
         if self.call_index >= len(self.calls):
             raise RuntimeError(f"{self.stage} OM replay received more calls than CPU baseline")
@@ -73,6 +89,12 @@ class ExactShapeOmSession:
         om_path = self.om_root / self.stage / f"{MODEL_STEMS[self.stage]}-{shape_slug}.om"
         session_type = StaticOmSession
         mode = "exact_shape"
+        padded_batch = None
+        if not om_path.is_file():
+            padded_cls = self._find_padded_cls(shape)
+            if padded_cls is not None:
+                padded_batch, om_path = padded_cls
+                mode = "fixed_batch_padding"
         if (
             not om_path.is_file()
             and self.stage == "rec"
@@ -88,16 +110,34 @@ class ExactShapeOmSession:
                 f"missing exact-shape {self.stage} OM for {shape}: {om_path}"
             )
 
+        inference_inputs = inputs
+        inference_templates = baseline["outputs"]
+        if padded_batch is not None:
+            padded_input = np.zeros(
+                (padded_batch, *inputs[0].shape[1:]), dtype=inputs[0].dtype
+            )
+            padded_input[: shape[0]] = inputs[0]
+            inference_inputs = [padded_input]
+            inference_templates = [
+                np.empty((padded_batch, *output.shape[1:]), dtype=output.dtype)
+                for output in baseline["outputs"]
+            ]
+
         total_started = time.perf_counter()
-        session = session_type(om_path, self.device_id)
+        session = session_type(om_path, self.device_id, manage_runtime=False)
         try:
-            outputs, execute_seconds = session.infer(inputs, baseline["outputs"])
+            outputs, execute_seconds = session.infer(
+                inference_inputs, inference_templates
+            )
         finally:
             session.close()
+        if padded_batch is not None:
+            outputs = [output[: shape[0]] for output in outputs]
         self.records.append({
             "shape": shape,
             "om": str(om_path),
             "mode": mode,
+            "padded_batch": padded_batch,
             "execute_seconds": execute_seconds,
             "load_execute_release_seconds": time.perf_counter() - total_started,
             "outputs": [
@@ -199,13 +239,23 @@ def main() -> int:
     }
     for stage, wrapper in wrappers.items():
         wrapper.session = replays.get(stage, originals[stage])
+    acl_initialized = False
     try:
+        ret = acl.init()
+        if ret != 0:
+            raise RuntimeError(f"acl.init failed: ret={ret}")
+        acl_initialized = True
         om_started = time.perf_counter()
         om_result = ocr(frame)
         om_pipeline_seconds = time.perf_counter() - om_started
     finally:
         for stage, wrapper in wrappers.items():
             wrapper.session = originals[stage]
+        if acl_initialized:
+            try:
+                acl.rt.reset_device(args.device_id)
+            finally:
+                acl.finalize()
 
     cpu_payload = _payload(cpu_result)
     om_payload = _payload(om_result)

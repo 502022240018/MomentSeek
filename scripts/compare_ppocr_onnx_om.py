@@ -29,7 +29,7 @@ def _check(name: str, ret: int) -> None:
 
 
 class StaticOmSession:
-    def __init__(self, model_path: Path, device_id: int):
+    def __init__(self, model_path: Path, device_id: int, manage_runtime: bool = True):
         self.model_path = model_path
         self.device_id = device_id
         self.context = None
@@ -39,8 +39,10 @@ class StaticOmSession:
         self.output_dataset = None
         self.input_buffers: list[tuple[int, int, int]] = []
         self.output_buffers: list[tuple[int, int, int]] = []
+        self.manage_runtime = manage_runtime
 
-        _check("acl.init", acl.init())
+        if self.manage_runtime:
+            _check("acl.init", acl.init())
         try:
             _check("acl.rt.set_device", acl.rt.set_device(device_id))
             self.context, ret = acl.rt.create_context(device_id)
@@ -146,10 +148,15 @@ class StaticOmSession:
         if self.context:
             acl.rt.destroy_context(self.context)
             self.context = None
-        try:
-            acl.rt.reset_device(self.device_id)
-        except Exception:
-            pass
+        if self.manage_runtime:
+            try:
+                acl.rt.reset_device(self.device_id)
+            except Exception:
+                pass
+            try:
+                acl.finalize()
+            except Exception:
+                pass
 
 
 class DynamicDimsOmSession(StaticOmSession):
@@ -230,10 +237,6 @@ class DynamicDimsOmSession(StaticOmSession):
         self.input_buffers = []
         self.output_buffers = []
         return outputs, elapsed
-        try:
-            acl.finalize()
-        except Exception:
-            pass
 
 
 def _metrics(cpu: np.ndarray, npu: np.ndarray) -> dict:
