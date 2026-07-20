@@ -4,7 +4,7 @@ import re
 import unicodedata
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -122,6 +122,74 @@ def _load_ocr(
         if npu_self_test:
             _run_npu_self_test(ocr)
     return ocr, providers
+
+
+class OCRBackend(Protocol):
+    """Stable boundary between OCR indexing and a device-specific runtime."""
+
+    engine: str
+    device: str
+    providers: dict[str, list[str]]
+
+    def __call__(self, frame: np.ndarray): ...
+
+
+class RapidOCRBackend:
+    engine = "rapidocr"
+
+    def __init__(
+        self,
+        *,
+        device: str,
+        device_id: int,
+        model_root: str | Path,
+        ocr_version: str,
+        det_lang: str,
+        rec_lang: str,
+        model_type: str,
+        npu_self_test: bool,
+    ):
+        self.device = device
+        self.ocr, self.providers = _load_ocr(
+            device,
+            device_id,
+            model_root,
+            ocr_version=ocr_version,
+            det_lang=det_lang,
+            rec_lang=rec_lang,
+            model_type=model_type,
+            npu_self_test=npu_self_test,
+        )
+
+    def __call__(self, frame: np.ndarray):
+        return self.ocr(frame)
+
+
+def create_ocr_backend(
+    engine: str,
+    *,
+    device: str,
+    device_id: int,
+    model_root: str | Path,
+    ocr_version: str,
+    det_lang: str,
+    rec_lang: str,
+    model_type: str,
+    npu_self_test: bool,
+) -> OCRBackend:
+    normalized = str(engine or "rapidocr").replace("-", "_").casefold()
+    if normalized != "rapidocr":
+        raise ValueError(f"尚未启用的 OCR backend: {engine}")
+    return RapidOCRBackend(
+        device=device,
+        device_id=device_id,
+        model_root=model_root,
+        ocr_version=ocr_version,
+        det_lang=det_lang,
+        rec_lang=rec_lang,
+        model_type=model_type,
+        npu_self_test=npu_self_test,
+    )
 
 
 _PUNCT_RE = re.compile(r"^[\W_]+$", re.UNICODE)
@@ -442,21 +510,25 @@ def build_ocr_index(
     semantic_model_dir: str | Path = "models/text-embeddings",
     semantic_batch_size: int = 32,
     semantic_local_files_only: bool = True,
+    engine: str = "rapidocr",
+    backend: OCRBackend | None = None,
 ) -> dict:
     if sample_fps <= 0:
         raise ValueError("ocr_sample_fps 必须大于 0")
     started = time.perf_counter()
     Path(working_dir).mkdir(parents=True, exist_ok=True)
-    ocr, providers = _load_ocr(
-        device,
-        device_id,
-        model_root,
-        ocr_version=ocr_version,
-        det_lang=det_lang,
-        rec_lang=rec_lang,
-        model_type=model_type,
-        npu_self_test=npu_self_test,
-    )
+    if backend is None:
+        backend = create_ocr_backend(
+            engine,
+            device=device,
+            device_id=device_id,
+            model_root=model_root,
+            ocr_version=ocr_version,
+            det_lang=det_lang,
+            rec_lang=rec_lang,
+            model_type=model_type,
+            npu_self_test=npu_self_test,
+        )
 
     chunks: list[dict] = []
     interval = 1.0 / sample_fps
@@ -473,7 +545,7 @@ def build_ocr_index(
         decoded_frames += 1
         frame_start = time.perf_counter()
         try:
-            output = ocr(frame)
+            output = backend(frame)
         except Exception as exc:
             ocr_elapsed += time.perf_counter() - frame_start
             ocr_failed_frames += 1
@@ -511,9 +583,9 @@ def build_ocr_index(
         })
 
     result = {
-        "engine": "rapidocr",
-        "device": device,
-        "providers": providers,
+        "engine": backend.engine,
+        "device": backend.device,
+        "providers": backend.providers,
         "ocr_version": ocr_version,
         "det_lang": det_lang,
         "rec_lang": rec_lang,

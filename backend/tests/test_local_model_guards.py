@@ -4,12 +4,27 @@ import sys
 import pytest
 
 from app.indexing.faces import FaceEncoder
-from app.indexing.ocr import _load_ocr
+from app.indexing.ocr import _load_ocr, create_ocr_backend
 
 
 def test_rapidocr_requires_local_model_files(tmp_path):
     with pytest.raises(FileNotFoundError, match="本地 RapidOCR 模型缺失"):
         _load_ocr("cpu", 0, tmp_path, npu_self_test=False)
+
+
+def test_unknown_ocr_backend_fails_explicitly(tmp_path):
+    with pytest.raises(ValueError, match="尚未启用的 OCR backend"):
+        create_ocr_backend(
+            "ppocr_om",
+            device="npu",
+            device_id=0,
+            model_root=tmp_path,
+            ocr_version="PP-OCRv6",
+            det_lang="ch",
+            rec_lang="ch",
+            model_type="small",
+            npu_self_test=True,
+        )
 
 
 def test_face_encoder_requires_local_model_files(monkeypatch, tmp_path):

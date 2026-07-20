@@ -163,6 +163,7 @@ def run(stage: str, job_id: str) -> dict:
             semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
             semantic_batch_size=settings.asr_semantic_batch_size,
             semantic_local_files_only=settings.asr_semantic_local_files_only,
+            engine=settings.ocr_engine,
         )
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result

@@ -125,11 +125,27 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result
     if stage == "ocr":
-        from app.indexing.ocr import build_ocr_index
+        from app.indexing.ocr import build_ocr_index, create_ocr_backend
 
         device = settings.ocr_device
         if device == "auto":
             device = "npu" if settings.npu_enabled else "cpu"
+        model_root = str(settings.app_model_dir / "rapidocr")
+        key = f"ocr:{settings.ocr_engine}:{settings.ocr_version}:{settings.ocr_model_type}:{device}:{settings.npu_device_id}"
+        backend = pool.get(
+            key,
+            lambda: create_ocr_backend(
+                settings.ocr_engine,
+                device=device,
+                device_id=settings.npu_device_id,
+                model_root=model_root,
+                ocr_version=settings.ocr_version,
+                det_lang=settings.ocr_det_lang,
+                rec_lang=settings.ocr_rec_lang,
+                model_type=settings.ocr_model_type,
+                npu_self_test=settings.ocr_npu_self_test,
+            ),
+        )
         result = build_ocr_index(
             video_path=video_path,
             output_path=str(video_index_dir / "ocr.npz"),
@@ -139,7 +155,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             min_confidence=settings.ocr_min_confidence,
             device=device,
             device_id=settings.npu_device_id,
-            model_root=str(settings.app_model_dir / "rapidocr"),
+            model_root=model_root,
             ocr_version=settings.ocr_version,
             det_lang=settings.ocr_det_lang,
             rec_lang=settings.ocr_rec_lang,
@@ -152,6 +168,8 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
             semantic_batch_size=settings.asr_semantic_batch_size,
             semantic_local_files_only=settings.asr_semantic_local_files_only,
+            engine=settings.ocr_engine,
+            backend=backend,
         )
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result
