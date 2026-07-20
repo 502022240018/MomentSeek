@@ -6,6 +6,7 @@ SOURCE_DIR="${SOURCE_DIR:-${WORK_ROOT}/platform}"
 RUNTIME_DIR="${RUNTIME_DIR:-${WORK_ROOT}/runtime}"
 LOG_ROOT="${LOG_ROOT:-${WORK_ROOT}/logs}"
 PHYSICAL_NPU="${PHYSICAL_NPU:-6}"
+PLATFORM_CONTAINER="${PLATFORM_CONTAINER:-momentseek-29154-platform}"
 MAX_VIDEOS="${MAX_VIDEOS:-3}"
 RUN_ID="${RUN_ID:-$(date '+%F-%H%M%S')}"
 SUITE_DIR="${LOG_ROOT}/ocr-ascend-suite-${RUN_ID}"
@@ -54,8 +55,12 @@ printf '[%s] OCR Ascend validation suite\n' "$(date '+%F %T')"
 printf 'suite_dir=%s\nphysical_npu=%s\nmax_videos=%s\n' \
   "$SUITE_DIR" "$PHYSICAL_NPU" "$MAX_VIDEOS"
 
-if ! command -v ffprobe >/dev/null 2>&1; then
-  printf 'ffprobe is required\n' >&2
+if ! docker container inspect "$PLATFORM_CONTAINER" >/dev/null 2>&1; then
+  printf 'Platform container is required: %s\n' "$PLATFORM_CONTAINER" >&2
+  exit 1
+fi
+if ! docker exec "$PLATFORM_CONTAINER" command -v ffprobe >/dev/null 2>&1; then
+  printf 'ffprobe is required inside platform container: %s\n' "$PLATFORM_CONTAINER" >&2
   exit 1
 fi
 if ! npu-smi info -t proc-mem -i "$PHYSICAL_NPU" -c 0 2>&1 \
@@ -76,8 +81,10 @@ fi
 video_index=0
 for video in "${videos[@]}"; do
   video_index=$((video_index + 1))
-  duration="$(ffprobe -v error -show_entries format=duration \
-    -of default=noprint_wrappers=1:nokey=1 "$video" 2>/dev/null || true)"
+  video_relative="${video#${RUNTIME_DIR}/}"
+  duration="$(docker exec "$PLATFORM_CONTAINER" ffprobe -v error \
+    -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \
+    "/app/runtime/$video_relative" 2>/dev/null || true)"
   midpoint="$(python3 - "$duration" <<'PY'
 import sys
 try:
