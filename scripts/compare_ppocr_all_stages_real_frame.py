@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from app.indexing.ocr import _load_ocr
-from compare_ppocr_onnx_om import StaticOmSession, _metrics
+from compare_ppocr_onnx_om import DynamicDimsOmSession, StaticOmSession, _metrics
 
 
 STAGE_ATTRS = {"det": "text_det", "cls": "text_cls", "rec": "text_rec"}
@@ -42,12 +42,21 @@ class CaptureSession:
 
 
 class ExactShapeOmSession:
-    def __init__(self, metadata_session, stage: str, calls: list[dict], om_root: Path, device_id: int):
+    def __init__(
+        self,
+        metadata_session,
+        stage: str,
+        calls: list[dict],
+        om_root: Path,
+        device_id: int,
+        rec_dynamic_om: Path | None = None,
+    ):
         self.metadata_session = metadata_session
         self.stage = stage
         self.calls = calls
         self.om_root = om_root
         self.device_id = device_id
+        self.rec_dynamic_om = rec_dynamic_om
         self.call_index = 0
         self.records: list[dict] = []
 
@@ -62,13 +71,25 @@ class ExactShapeOmSession:
         shape = list(inputs[0].shape)
         shape_slug = "x".join(str(value) for value in shape)
         om_path = self.om_root / self.stage / f"{MODEL_STEMS[self.stage]}-{shape_slug}.om"
+        session_type = StaticOmSession
+        mode = "exact_shape"
+        if (
+            not om_path.is_file()
+            and self.stage == "rec"
+            and self.rec_dynamic_om is not None
+            and self.rec_dynamic_om.is_file()
+            and shape[0] == 5
+        ):
+            om_path = self.rec_dynamic_om
+            session_type = DynamicDimsOmSession
+            mode = "dynamic_width"
         if not om_path.is_file():
             raise FileNotFoundError(
                 f"missing exact-shape {self.stage} OM for {shape}: {om_path}"
             )
 
         total_started = time.perf_counter()
-        session = StaticOmSession(om_path, self.device_id)
+        session = session_type(om_path, self.device_id)
         try:
             outputs, execute_seconds = session.infer(inputs, baseline["outputs"])
         finally:
@@ -76,6 +97,7 @@ class ExactShapeOmSession:
         self.records.append({
             "shape": shape,
             "om": str(om_path),
+            "mode": mode,
             "execute_seconds": execute_seconds,
             "load_execute_release_seconds": time.perf_counter() - total_started,
             "outputs": [
@@ -146,6 +168,7 @@ def main() -> int:
     parser.add_argument("--model-root", type=Path, default=Path("/app/models/rapidocr"))
     parser.add_argument("--om-root", type=Path, required=True)
     parser.add_argument("--device-id", type=int, default=0)
+    parser.add_argument("--rec-dynamic-om", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -169,7 +192,8 @@ def main() -> int:
 
     replays = {
         stage: ExactShapeOmSession(
-            originals[stage], stage, captures[stage].calls, args.om_root, args.device_id
+            originals[stage], stage, captures[stage].calls, args.om_root,
+            args.device_id, args.rec_dynamic_om
         )
         for stage in STAGE_ATTRS if captures[stage].calls
     }
