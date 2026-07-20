@@ -474,13 +474,18 @@ ID:
 状态：open
 范围：indexing performance
 问题或目标：
-  当前子进程模型生命周期更安全，但每个阶段/任务都要重新加载模型。
+  Ascend 产品模式已改为单个串行 indexer daemon；Visual 和 Face 已接入 ModelPool 并可常驻。
+  SenseVoice/FunASR 的 AutoModel、Silero VAD，以及 ASR/OCR 文本 embedding encoder 尚未接入池，
+  因此每次进入 ASR 通道仍会重新构造模型，尚未实现完整的索引模型常驻复用。
 影响：
-  长视频和重复建索引会付出明显 cold-start 成本。
+  连续构建多个视频的 ASR 索引仍会重复承担模型加载和 NPU 预热成本。
 证据或上下文：
-  历史 910B benchmark 观察到固定模型加载成本，并实现过 warm pool / indexer daemon。
+  2026-07-20 已在 Ascend 部署中启用 resident daemon 和串行通道调度；当前 `_funasr()`
+  仍在每次调用时执行 `AutoModel(...)`，与已经支持 encoder 注入的 Visual/Face 不同。
 下一步：
-  在测量常驻资源和共享服务器安全性的前提下，决定是否部署 `indexer_daemon.py` 和 model pool。
+  抽象 SenseVoiceEngine，将 AutoModel、Silero VAD session 和文本 embedding encoder 以明确生命周期
+  注入索引流程；每个任务使用独立推理 cache，任务结束清理状态但保留权重。补充连续多视频回归，
+  测量冷启动、热启动、常驻 HBM、异常恢复和容器退出释放，再决定 faster-whisper probe 是否一并常驻。
 相关文件或实验：
   backend/app/model_pool.py
   backend/app/indexer_daemon.py
