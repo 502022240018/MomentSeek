@@ -161,6 +161,7 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .status.ready, .status.completed { color: #4d743d; background: #eaf3e5; }
 .status.indexing, .status.running { color: #725194; background: #f0e8f6; }
 .status.failed { color: #9b4c45; background: #f8e8e5; }
+.status.cancelled { color: #66635d; background: #e8e7e3; }
 .outline { padding: 8px 11px; border: 1px solid #cdccc7; border-radius: 9px; background: white; cursor: pointer; font-size: 10px; }
 .outline:disabled { opacity: .45; cursor: not-allowed; }
 .index-action { white-space: nowrap; }
@@ -172,6 +173,7 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .job-state.running { color: #8252aa; animation: spin 2s linear infinite; }
 .job-state.completed { color: white; background: #719b5b; }
 .job-state.failed { color: white; background: #c86861; }
+.job-state.cancelled { color: white; background: #85817a; }
 .progress { width: 100%; max-width: 500px; height: 3px; margin-top: 8px; border-radius: 3px; background: #ecece8; overflow: hidden; }
 .progress span { display: block; height: 100%; background: #8c62b3; transition: width .4s; }
 .job-row > p { max-width: 280px; color: #a1504a; font-size: 9px; }

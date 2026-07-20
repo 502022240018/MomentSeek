@@ -180,6 +180,8 @@ def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool: ModelPo
     job = catalog.get_job(job_id)
     if not job:
         return
+    if not catalog.claim_queued_job(job_id):
+        return
     video = catalog.get_video(job["video_id"])
     if not video:
         catalog.update_job(job_id, status="failed", stage="failed", error="视频不存在")
@@ -187,7 +189,7 @@ def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool: ModelPo
 
     metrics = {"stages": {}, "total_elapsed_seconds": None}
     job_start = time.perf_counter()
-    catalog.update_job(job_id, status="running", stage="starting", progress=0.01, error=None, metrics=metrics)
+    catalog.update_job(job_id, metrics=metrics)
     catalog.update_video(video["id"], status="indexing")
     completed = set(video.get("indexed_modalities", []))
     options = job.get("options") or {}

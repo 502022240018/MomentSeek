@@ -186,6 +186,21 @@ class Catalog:
                 (*values.values(), job_id),
             )
 
+    def claim_queued_job(self, job_id: str, *, worker_pid: int | None = None) -> bool:
+        """Atomically transition one queued job to running.
+
+        Cancellation and queue consumers can race across processes. The status
+        predicate ensures a cancelled job can never be revived by a stale worker.
+        """
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE jobs SET status='running',stage='starting',progress=0.01,
+                   error=NULL,worker_pid=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND status='queued'""",
+                (worker_pid, job_id),
+            )
+        return cursor.rowcount == 1
+
     def create_entity(self, record: dict) -> dict:
         with self.connect() as connection:
             connection.execute(

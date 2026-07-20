@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -34,6 +37,8 @@ from app.worker import launch_job, subprocess_environment
 settings = get_settings()
 catalog = Catalog(settings.db_path)
 search_engine = SearchEngine(settings, catalog)
+_indexer_daemon_process: subprocess.Popen | None = None
+_indexer_daemon_lock = threading.RLock()
 
 
 def _spawn_indexer_daemon():
@@ -59,15 +64,60 @@ def _spawn_indexer_daemon():
     )
 
 
+def _terminate_process_group(pid: int | None, expected_job_id: str | None = None) -> bool:
+    """Terminate one detached worker process group without risking an unrelated PID."""
+    if not pid or pid <= 1 or pid == os.getpid():
+        return False
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    if expected_job_id and cmdline_path.exists():
+        cmdline = cmdline_path.read_bytes().replace(b"\0", b" ").decode("utf-8", errors="replace")
+        if "app.worker" not in cmdline or expected_job_id not in cmdline:
+            return False
+    try:
+        process_group = os.getpgid(pid)
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        return False
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return True
+
+
+def _restart_indexer_daemon() -> None:
+    """Stop the current daemon process group, then start a fresh queue consumer."""
+    global _indexer_daemon_process
+    with _indexer_daemon_lock:
+        process = _indexer_daemon_process
+        if process is not None and process.poll() is None:
+            _terminate_process_group(process.pid)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        _indexer_daemon_process = _spawn_indexer_daemon()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global _indexer_daemon_process
     settings.ensure_dirs()
-    daemon = _spawn_indexer_daemon() if settings.indexer_mode == "daemon" else None
+    _indexer_daemon_process = _spawn_indexer_daemon() if settings.indexer_mode == "daemon" else None
     try:
         yield
     finally:
+        daemon = _indexer_daemon_process
         if daemon is not None and daemon.poll() is None:
-            daemon.terminate()
+            _terminate_process_group(daemon.pid)
+        _indexer_daemon_process = None
 
 
 app = FastAPI(
@@ -450,6 +500,48 @@ def get_job(job_id: str) -> dict:
 @app.get("/api/jobs")
 def list_jobs(video_id: str | None = None) -> list[dict]:
     return catalog.list_jobs(video_id)
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict:
+    """Cancel one queued/running job while preserving all other queued work."""
+    with _indexer_daemon_lock:
+        job = catalog.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if job["status"] == "cancelled":
+            return job
+        if job["status"] not in {"queued", "running"}:
+            raise HTTPException(status_code=409, detail="只有排队中或运行中的任务可以取消")
+
+        previous_status = job["status"]
+        catalog.update_job(
+            job_id,
+            status="cancelled",
+            stage="cancelled",
+            error="用户取消任务",
+            worker_pid=None,
+        )
+
+        if settings.indexer_mode == "daemon":
+            # A queued job needs no process action. A running job executes inside
+            # the daemon, so restart that one queue consumer; other queued jobs
+            # remain in SQLite and are picked up by the fresh daemon.
+            if previous_status == "running":
+                _restart_indexer_daemon()
+        else:
+            # Detached subprocess workers may be running or waiting on the
+            # single-worker lock. Terminate only the process group recorded for
+            # this job; PID/cmdline validation avoids killing an unrelated PID.
+            _terminate_process_group(job.get("worker_pid"), expected_job_id=job_id)
+
+        video = catalog.get_video(job["video_id"])
+        if video:
+            catalog.update_video(
+                video["id"],
+                status="ready" if video.get("indexed_modalities") else "uploaded",
+            )
+        return catalog.get_job(job_id)
 
 
 @app.post("/api/entities", status_code=201)

@@ -77,12 +77,11 @@ def execute_job(job_id: str) -> None:
 
     lock_path = settings.app_data_dir / "index-worker.lock"
     with exclusive_worker_lock(lock_path):
+        if not catalog.claim_queued_job(job_id, worker_pid=os.getpid()):
+            return
         metrics = {"stages": {}, "total_elapsed_seconds": None}
         job_start = time.perf_counter()
-        catalog.update_job(
-            job_id, status="running", stage="starting", progress=0.01,
-            error=None, metrics=metrics, worker_pid=os.getpid(),
-        )
+        catalog.update_job(job_id, metrics=metrics)
         catalog.update_video(video["id"], status="indexing")
         completed = set(video.get("indexed_modalities", []))
         stages = job["modalities"]

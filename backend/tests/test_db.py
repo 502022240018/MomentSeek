@@ -28,6 +28,8 @@ def test_catalog_video_job_and_entity_roundtrip(tmp_path):
         "options": {"visual_sample_fps": 1},
     })
     assert job["modalities"] == ["visual"]
+    assert catalog.claim_queued_job("job-1", worker_pid=123) is True
+    assert catalog.claim_queued_job("job-1", worker_pid=456) is False
     catalog.update_job("job-1", status="completed", progress=1)
     assert catalog.get_job("job-1")["progress"] == 1
 
@@ -63,4 +65,3 @@ def test_rename_and_delete_video_removes_jobs(tmp_path):
     assert catalog.get_job("job-video-2") is not None
     # deleting a missing video reports no row removed
     assert catalog.delete_video("video-1") is False
-

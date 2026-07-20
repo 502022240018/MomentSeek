@@ -121,6 +121,8 @@ async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
 export const api = {
   videos: () => json<Video[]>("/api/videos"),
   jobs: () => json<Job[]>("/api/jobs"),
+  cancelJob: (jobId: string) =>
+    json<Job>(`/api/jobs/${jobId}/cancel`, { method: "POST" }),
   entities: () => json<Entity[]>("/api/entities"),
   renameEntity: (entityId: string, name: string) =>
     json<Entity>(`/api/entities/${entityId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }),
