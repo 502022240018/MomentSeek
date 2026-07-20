@@ -91,8 +91,11 @@ def main() -> int:
             shape_slug = "x".join(str(value) for value in shape)
             output_prefix = args.output_dir / stage / f"{model_path.stem}-{shape_slug}"
             output_prefix.parent.mkdir(parents=True, exist_ok=True)
-            om_path = output_prefix.with_suffix(".om")
-            log_path = output_prefix.with_suffix(".atc.log")
+            # ATC appends extensions to the complete --output prefix.  Do not use
+            # Path.with_suffix(): model stems such as ch_ppocr_mobile_v2.0_* have
+            # an embedded dot that pathlib treats as an existing suffix.
+            om_path = Path(f"{output_prefix}.om")
+            log_path = Path(f"{output_prefix}.atc.log")
             command = [
                 atc,
                 f"--model={model_path}",
