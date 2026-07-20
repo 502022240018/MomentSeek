@@ -55,3 +55,18 @@ def test_face_encoder_accepts_local_model_files(monkeypatch, tmp_path):
     assert encoder.provider == "cpu"
     assert isinstance(encoder.app, FakeFaceAnalysis)
     assert Path(encoder.app.root) == tmp_path
+
+
+def test_face_encoder_cann_does_not_silently_fall_back_to_cpu(monkeypatch, tmp_path):
+    class FakeOrt:
+        @staticmethod
+        def get_available_providers():
+            return ["CPUExecutionProvider"]
+
+    model_dir = tmp_path / "models" / "buffalo_l"
+    model_dir.mkdir(parents=True)
+    (model_dir / "det_10g.onnx").write_bytes(b"weights")
+    monkeypatch.setitem(sys.modules, "onnxruntime", FakeOrt())
+
+    with pytest.raises(RuntimeError, match="CANNExecutionProvider"):
+        FaceEncoder("buffalo_l", "cann", 0, str(tmp_path))

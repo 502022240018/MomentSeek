@@ -72,7 +72,7 @@ log "2/8 Generate openEuler/MindIE build overlay"
 cat >"$BUILD_DIR/requirements-server.txt" <<'REQ'
 numpy==1.26.4
 onnx==1.17.0
-onnxruntime>=1.20,<2
+onnxruntime-cann==1.24.4
 scikit-image==0.25.2
 tifffile==2025.6.11
 scenedetect==0.7
@@ -140,7 +140,7 @@ COPY --from=frontend-build /src/frontend/dist /tmp/frontend-dist
 RUN rm -rf ./app/static \
     && mv /tmp/frontend-dist ./app/static
 RUN mkdir -p /app/runtime /app/models \
-    && python3 -c "from importlib.metadata import version; import fastapi, uvicorn, cv2, PIL, transformers, funasr, onnxruntime, rapidocr, insightface; assert version('open-clip-torch') == '3.3.0'; assert version('silero-vad') == '5.1.2'; from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); print('device-neutral imports and Silero ONNX session: PASS')"
+    && python3 -c "from importlib.metadata import version; import fastapi, uvicorn, cv2, PIL, transformers, funasr, onnxruntime, rapidocr, insightface; assert version('open-clip-torch') == '3.3.0'; assert version('silero-vad') == '5.1.2'; assert version('onnxruntime-cann') == '1.24.4'; assert 'CANNExecutionProvider' in onnxruntime.get_available_providers(); from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); print('device-neutral imports, CANN EP and Silero ONNX session: PASS')"
 EXPOSE 18500
 HEALTHCHECK --interval=20s --timeout=5s --retries=6 CMD python3 -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('APP_PORT', '18500') + '/api/health', timeout=3)"
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT:-18500} --workers 1"]
@@ -196,11 +196,12 @@ docker run -d \
   -e APP_MODEL_DIR=/app/models \
   -e NPU_ENABLED=true \
   -e NPU_DEVICE_ID=0 \
-  -e MODEL_IDLE_POLICY=process_exit \
-  -e INDEXER_MODE=subprocess \
+  -e MODEL_IDLE_POLICY=resident \
+  -e INDEXER_MODE=daemon \
+  -e INDEXER_IDLE_TIMEOUT_SECONDS=0 \
   -e VISUAL_MODEL=siglip2-so400m-384 \
   -e VISUAL_HF_CACHE_DIR=/app/models/hf-cache \
-  -e FACE_PROVIDER=cpu \
+  -e FACE_PROVIDER=cann \
   -e ASR_ENGINE=funasr \
   -e ASR_DEVICE=auto \
   -e ASR_VAD_STRATEGY=silero_12s \

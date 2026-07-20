@@ -31,10 +31,11 @@ class Settings(BaseSettings):
     # Indexing execution mode:
     #   "subprocess" (default) — API spawns a per-job worker; models load+exit per
     #     stage (process_exit). Safe, no resident NPU memory.
-    #   "daemon" — API only enqueues jobs and starts the warm-pool indexer daemon,
-    #     which keeps CLIP/InsightFace resident and releases them after idle. Skips
-    #     ~14.5s model load + kernel compile per job. Holds ~2.3GB while active.
+    #   "daemon" — API only enqueues jobs and starts the single warm-pool indexer
+    #     daemon. Jobs and their channels run serially; pooled CLIP/InsightFace
+    #     models can stay resident and skip reload/kernel compilation.
     indexer_mode: str = "subprocess"
+    # <= 0 keeps pooled models resident until daemon/container shutdown.
     indexer_idle_timeout_seconds: float = 300.0
     indexer_poll_seconds: float = 2.0
 

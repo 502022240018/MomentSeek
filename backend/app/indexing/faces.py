@@ -42,10 +42,16 @@ class FaceEncoder:
     def __init__(self, model_name: str, provider: str = "cpu", device_id: int = 0, root: str | None = None):
         face_root = _resolve_insightface_root(root, model_name)
         import onnxruntime as ort
-        from insightface.app import FaceAnalysis
 
         available = ort.get_available_providers()
-        if provider == "cann" and "CANNExecutionProvider" in available:
+        if provider == "cann" and "CANNExecutionProvider" not in available:
+            raise RuntimeError(
+                "Face 已配置为 CANN NPU，但 onnxruntime 未提供 CANNExecutionProvider；"
+                f"available_providers={available}。为避免产品环境静默回落 CPU，任务已终止。"
+            )
+        from insightface.app import FaceAnalysis
+
+        if provider == "cann":
             providers = [("CANNExecutionProvider", {"device_id": device_id}), "CPUExecutionProvider"]
             ctx_id = device_id
         else:
@@ -53,7 +59,7 @@ class FaceEncoder:
             ctx_id = -1
         self.app = FaceAnalysis(name=model_name, providers=providers, root=str(face_root))
         self.app.prepare(ctx_id=ctx_id, det_size=(640, 640))
-        self.provider = provider if provider == "cann" and "CANNExecutionProvider" in available else "cpu"
+        self.provider = provider
 
     def detect(self, frame_bgr: np.ndarray):
         return self.app.get(frame_bgr)

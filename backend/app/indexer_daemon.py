@@ -2,9 +2,9 @@
 
 A long-lived alternative to the per-job `process_exit` subprocess worker. It polls
 the job queue and runs stages in-process, keeping the CLIP / InsightFace models
-resident in a ModelPool so back-to-back jobs skip the ~14.5s model load + NPU
-kernel compile. Models are released after `indexer_idle_timeout_seconds` of no
-work, so on a shared NPU card we only hold the ~2.3GB while actively indexing.
+resident in a ModelPool so back-to-back jobs skip model loading and NPU kernel
+compilation. A positive `indexer_idle_timeout_seconds` releases idle models;
+zero keeps them resident until the daemon stops on a dedicated indexing card.
 
 Run instead of relying on launch_job's subprocess fan-out:
 
