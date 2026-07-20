@@ -19,7 +19,9 @@ trap 'printf "\nPPOCR_ALL_STAGES_FAILED_AT_LINE=%s\n" "$LINENO" >&2' ERR
 
 [[ -f "$VIDEO_HOST" ]] || fail "Video is missing; set VIDEO_HOST explicitly"
 case "$VIDEO_HOST" in "$RUNTIME_DIR"/uploads/*) ;; *) fail "VIDEO_HOST must be under uploads" ;; esac
+case "$REPORT_HOST" in "$LOG_DIR"/*) ;; *) fail "REPORT_HOST must be under LOG_DIR" ;; esac
 VIDEO_RELATIVE="${VIDEO_HOST#${RUNTIME_DIR}/}"
+REPORT_RELATIVE="${REPORT_HOST#${LOG_DIR}/}"
 mkdir -p "$LOG_DIR"
 npu_processes="$(npu-smi info -t proc-mem -i "$PHYSICAL_NPU" -c 0 2>&1)"
 printf '%s\n' "$npu_processes"
@@ -46,8 +48,8 @@ docker run --rm --name "$EXPERIMENT_NAME" \
       --model-root /app/models/rapidocr \
       --om-root /app/models/rapidocr/ascend/910b4-cann9-profile \
       --rec-dynamic-om /app/models/rapidocr/ascend/910b4-cann9-profile/rec-dynamic-width-b5/PP-OCRv6_rec_small-b5-dynamic-width.om \
-      --device-id 0 --output /work/logs/ppocr-all-stages-compare.json
-  ' sh "/app/runtime/$VIDEO_RELATIVE" "$TIMESTAMP"
+      --device-id 0 --output "/work/logs/$3"
+  ' sh "/app/runtime/$VIDEO_RELATIVE" "$TIMESTAMP" "$REPORT_RELATIVE"
 
 python3 -m json.tool "$REPORT_HOST"
 npu-smi info -t proc-mem -i "$PHYSICAL_NPU" -c 0 || true
