@@ -24,7 +24,10 @@ mkdir -p "$LOG_DIR"
 
 log "1/4 Verify the approved experiment NPU and image"
 printf 'image=%s\nphysical_npu=%s\n' "$IMAGE_NAME" "$PHYSICAL_NPU"
-npu-smi info -t proc-mem -i "$PHYSICAL_NPU" -c 0
+npu_processes="$(npu-smi info -t proc-mem -i "$PHYSICAL_NPU" -c 0 2>&1)"
+printf '%s\n' "$npu_processes"
+grep -q 'No process in device' <<<"$npu_processes" \
+  || fail "Physical NPU ${PHYSICAL_NPU} is not empty; refusing to interfere with another process"
 if docker container inspect "$EXPERIMENT_NAME" >/dev/null 2>&1; then
   fail "Experiment container already exists: $EXPERIMENT_NAME"
 fi
