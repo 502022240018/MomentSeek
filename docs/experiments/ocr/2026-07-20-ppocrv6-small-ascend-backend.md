@@ -21,6 +21,15 @@
 3. 使用 ATC/PaddleX HPI 将相同 ONNX 权重转换为 OM；检测与识别均不得静默回退 CPU。
    首先运行 `scripts/build_ppocr_om_from_profile.py`，对 profile 中真实出现过的每个完整 Shape分别编译，确认三个模型和全部必要算子可以由 ATC生成 OM；这些 exact-shape OM 标记为非产品产物。
 4. 在同一批真实帧上对比 RapidOCR CPU 与 OM NPU 的 box、文字、置信度和耗时。
+
+服务器上的 shape profile 与 exact-shape OM 可行性编译可统一运行：
+
+```bash
+cd /home/momentseek-29154/platform
+APP_PORT=8000 bash scripts/run_ppocr_om_feasibility.sh
+```
+
+脚本会在运行前拒绝与活动索引任务并行，保存 profile/build 日志，并保持正式服务 `OCR_DEVICE=cpu` 不变。
 5. 通过后实现 `PpOcrSmallOmBackend`，接入现有常驻 daemon；保持 `ocr.npz` schema 不变。
 
 ## 验收门槛
