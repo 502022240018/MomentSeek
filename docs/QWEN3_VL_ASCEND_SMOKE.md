@@ -14,14 +14,17 @@
 
 ## 执行
 
+模型准备好后，推荐使用一键入口。它会检查实验分支、正式服务 health、模型文件、NPU 7 和 runtime 视频，运行 smoke 后展示最新 JSON 并检查 NPU 是否释放：
+
 ```bash
 cd /home/momentseek-29154/platform
+git fetch origin agent/ascend-qwen3-vl-smoke
+git switch agent/ascend-qwen3-vl-smoke
 git pull --ff-only
-
-npu-smi info -t proc-mem -i 7 -c 0
-
-bash scripts/run_qwen3_vl_ascend_smoke.sh
+bash scripts/run_qwen3_vl_ascend_experiment.sh
 ```
+
+前三条 Git 命令只在首次进入或更新实验分支时需要。之后重复测试只需执行最后一条命令。脚本不会自动切换分支或修改 tracked 文件。
 
 测试图有三种来源，优先级如下：
 
