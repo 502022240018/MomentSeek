@@ -70,6 +70,7 @@ if [[ "$INSTALL_DEPS" == "true" \
   || ( "$INSTALL_DEPS" == "auto" \
     && ( ! -x "$VENV_HOST/bin/python" || ! -x "$VENV_HOST/bin/modelscope" ) ) ]]; then
   docker run --rm --name "${EXPERIMENT_NAME}-env" \
+    --network host \
     -v "$EXPERIMENT_ROOT:/work" \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
     -e TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
@@ -96,6 +97,7 @@ if [[ "$DOWNLOAD_MODEL" == "true" || ( "$DOWNLOAD_MODEL" == "auto" && "$model_co
   mkdir -p "$MODEL_HOST"
   printf 'Downloading model from ModelScope: id=%s target=%s\n' "$MODEL_ID" "$MODEL_HOST"
   docker run --rm --name "${EXPERIMENT_NAME}-model" \
+    --network host \
     -v "$EXPERIMENT_ROOT:/work" \
     -v "$(dirname "$MODEL_HOST"):/download" \
     "$IMAGE_NAME" bash -lc '
