@@ -81,9 +81,12 @@ if [[ "$INSTALL_DEPS" == "true" \
       python3 -m venv --system-site-packages /work/venv
       /work/venv/bin/python -m pip install --upgrade pip
       /work/venv/bin/pip install \
-        "transformers>=4.57,<5" "qwen-vl-utils==0.0.14" accelerate pillow modelscope
+        "transformers>=4.57,<5" "qwen-vl-utils==0.0.14" accelerate pillow
+      /work/venv/bin/pip install --ignore-installed --no-deps modelscope
+      export PYTHONPATH="/work/venv/lib/python3.11/site-packages:/work/venv/lib64/python3.11/site-packages:${PYTHONPATH:-}"
       /work/venv/bin/python -c \
-        "import torch, torch_npu, transformers; print(torch.__version__, torch_npu.__version__, transformers.__version__)"
+        "from packaging.version import Version; import torch, torch_npu, transformers; assert Version(transformers.__version__) >= Version('4.57'); print(torch.__version__, torch_npu.__version__, transformers.__version__, transformers.__file__)"
+      test -x /work/venv/bin/modelscope
     '
 fi
 [[ -x "$VENV_HOST/bin/python" ]] || fail "venv missing; run with INSTALL_DEPS=true"
@@ -102,6 +105,7 @@ if [[ "$DOWNLOAD_MODEL" == "true" || ( "$DOWNLOAD_MODEL" == "auto" && "$model_co
     -v "$(dirname "$MODEL_HOST"):/download" \
     "$IMAGE_NAME" bash -lc '
       set -e
+      export PYTHONPATH="/work/venv/lib/python3.11/site-packages:/work/venv/lib64/python3.11/site-packages:${PYTHONPATH:-}"
       /work/venv/bin/modelscope download --model "$1" --local_dir "$2"
     ' bash "$MODEL_ID" "/download/$(basename "$MODEL_HOST")"
 fi
@@ -126,6 +130,7 @@ docker run --rm --name "$EXPERIMENT_NAME" \
   "$IMAGE_NAME" bash -lc '
     set -e
     source /usr/local/Ascend/cann/set_env.sh
+    export PYTHONPATH="/work/venv/lib/python3.11/site-packages:/work/venv/lib64/python3.11/site-packages:${PYTHONPATH:-}"
     /work/venv/bin/python /work/repo-scripts/qwen3_vl_ascend_smoke.py \
       --model "$1" --image "$2" --runs "$3" --warmup-runs "$4" \
       --max-new-tokens "$5" --output "$6"

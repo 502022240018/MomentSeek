@@ -56,6 +56,7 @@ bash scripts/run_qwen3_vl_ascend_experiment.sh
 首次执行会在 `/home/momentseek-29154/vlm-exp/venv` 安装独立的 Transformers 4.57+、ModelScope 等依赖，并在需要时下载模型。它复用基础镜像中的 Torch/torch-npu，不更改正式容器。后续执行复用 venv 和模型文件。
 
 依赖安装和 ModelScope 下载容器使用宿主网络，以复用共享服务器已验证的 DNS 和软件源连通性；不开放新的监听端口。
+基础镜像的系统包仍可供 Torch/torch-npu 使用；脚本会显式优先加载实验 venv 中的 Transformers 4.57+ 和 ModelScope，并在下载模型前校验实际导入版本与 CLI。
 
 结果写入：
 
