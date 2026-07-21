@@ -38,6 +38,7 @@ docker run --rm --name "$EXPERIMENT_NAME" \
   --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
   -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
   -v "$MODEL_DIR:/app/models:ro" -v "$RUNTIME_DIR:/app/runtime:ro" \
+  -v "$SOURCE_DIR/backend:/work/backend:ro" \
   -v "$SOURCE_DIR/scripts:/work/scripts:ro" -v "$OUTPUT_HOST:/work/output" \
   -e TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
   -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/cann-8.5.1/lib64 \
@@ -45,7 +46,7 @@ docker run --rm --name "$EXPERIMENT_NAME" \
     set -eu
     export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
     . /usr/local/Ascend/cann/set_env.sh
-    export PYTHONPATH="/app/backend:/work/scripts:${PYTHONPATH:-}"
+    export PYTHONPATH="/work/backend:/work/scripts:${PYTHONPATH:-}"
     python3 /work/scripts/ocr_acl_diagnostic.py \
       --video "$1" --timestamps ${2} --decode-height 720 \
       --model-root /app/models/rapidocr \
