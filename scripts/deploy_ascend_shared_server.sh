@@ -12,7 +12,7 @@ IMAGE_NAME="${IMAGE_NAME:-}"
 CONTAINER_NAME="${CONTAINER_NAME:-momentseek-29154-platform}"
 ROLLBACK_NAME="${CONTAINER_NAME}-rollback"
 NPU_ID="${NPU_ID:-5}"
-APP_PORT="${APP_PORT:-18500}"
+APP_PORT="${APP_PORT:-}"
 BUILD_DIR="${SOURCE_DIR}/.server-build"
 INSIGHTFACE_WHEEL="${INSIGHTFACE_WHEEL:-${SOURCE_DIR}/vendor-wheels/insightface-1.0.1-py3-none-any.whl}"
 INSIGHTFACE_SHA256="5f373f6fedbdda5cbc59a34ca386a75a2995cdaf6899402590ae9eb4308fc2e8"
@@ -40,6 +40,22 @@ trap 'rollback_on_error "$LINENO"' ERR
 for command_name in docker git curl npu-smi flock ss sha256sum python3; do
   command -v "$command_name" >/dev/null 2>&1 || fail "Missing command: $command_name"
 done
+
+APP_PORT_SOURCE="explicit"
+if [[ -z "$APP_PORT" ]]; then
+  APP_PORT_SOURCE="default"
+  if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+    APP_PORT="$(docker container inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+      "$CONTAINER_NAME" 2>/dev/null | sed -n 's/^APP_PORT=//p' | tail -1)"
+    if [[ -n "$APP_PORT" ]]; then
+      APP_PORT_SOURCE="existing-container"
+    fi
+  fi
+  APP_PORT="${APP_PORT:-18500}"
+fi
+[[ "$APP_PORT" =~ ^[0-9]+$ ]] && ((APP_PORT >= 1 && APP_PORT <= 65535)) \
+  || fail "Invalid APP_PORT: $APP_PORT"
+printf 'app_port=%s source=%s\n' "$APP_PORT" "$APP_PORT_SOURCE"
 
 exec 9>"$WORK_ROOT/.platform-deploy.lock"
 flock -n 9 || fail "Another MomentSeek deployment is running"
