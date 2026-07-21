@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "dataset_id": "vlm_rerank_visual_smoke_v1",
+  "source_dataset": "runtime/eval/vlm_rerank_phase1_channel_union",
+  "query_ids": [
+    "vis_001",
+    "vis_002",
+    "vis_003",
+    "vis_004",
+    "vis_005",
+    "vis_006"
+  ],
+  "queries": 6,
+  "candidates": 120,
+  "frames": 480,
+  "labels": {
+    "0": 105,
+    "1": 4,
+    "2": 6,
+    "3": 5
+  },
+  "complete": true
+}
