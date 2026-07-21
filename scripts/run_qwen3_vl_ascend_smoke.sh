@@ -17,6 +17,8 @@ FRAME_TIMESTAMP="${FRAME_TIMESTAMP:-10}"
 RUNS="${RUNS:-5}"
 WARMUP_RUNS="${WARMUP_RUNS:-1}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-96}"
+MIN_VISUAL_TOKENS="${MIN_VISUAL_TOKENS:-256}"
+MAX_VISUAL_TOKENS="${MAX_VISUAL_TOKENS:-512}"
 VENV_HOST="${VENV_HOST:-${EXPERIMENT_ROOT}/venv}"
 OUTPUT_DIR="${OUTPUT_DIR:-${EXPERIMENT_ROOT}/output}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-momentseek-qwen3-vl-smoke}"
@@ -32,6 +34,10 @@ done
 [[ "$PHYSICAL_NPU" =~ ^[0-9]+$ ]] || fail "PHYSICAL_NPU must be numeric"
 [[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || fail "RUNS must be positive"
 [[ "$WARMUP_RUNS" =~ ^[0-9]+$ ]] || fail "WARMUP_RUNS must be non-negative"
+[[ "$MIN_VISUAL_TOKENS" =~ ^[1-9][0-9]*$ ]] || fail "MIN_VISUAL_TOKENS must be positive"
+[[ "$MAX_VISUAL_TOKENS" =~ ^[1-9][0-9]*$ ]] || fail "MAX_VISUAL_TOKENS must be positive"
+(( MIN_VISUAL_TOKENS <= MAX_VISUAL_TOKENS )) \
+  || fail "MIN_VISUAL_TOKENS cannot exceed MAX_VISUAL_TOKENS"
 [[ "$DOWNLOAD_MODEL" =~ ^(auto|true|false)$ ]] \
   || fail "DOWNLOAD_MODEL must be auto, true, or false"
 [[ -d "$SOURCE_DIR" ]] || fail "source directory missing: $SOURCE_DIR"
@@ -133,9 +139,12 @@ docker run --rm --name "$EXPERIMENT_NAME" \
     export PYTHONPATH="/work/venv/lib/python3.11/site-packages:/work/venv/lib64/python3.11/site-packages:${PYTHONPATH:-}"
     /work/venv/bin/python /work/repo-scripts/qwen3_vl_ascend_smoke.py \
       --model "$1" --image "$2" --runs "$3" --warmup-runs "$4" \
-      --max-new-tokens "$5" --output "$6"
+      --max-new-tokens "$5" --min-visual-tokens "$6" \
+      --max-visual-tokens "$7" --output "$8"
   ' bash /vlm/model /vlm/input \
-    "$RUNS" "$WARMUP_RUNS" "$MAX_NEW_TOKENS" "/work/output/$(basename "$output_host")" \
+    "$RUNS" "$WARMUP_RUNS" "$MAX_NEW_TOKENS" \
+    "$MIN_VISUAL_TOKENS" "$MAX_VISUAL_TOKENS" \
+    "/work/output/$(basename "$output_host")" \
   2>&1 | tee "$log_host"
 
 [[ -f "$output_host" ]] || fail "result was not written: $output_host"

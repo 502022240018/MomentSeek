@@ -74,6 +74,15 @@ RUNS=20 WARMUP_RUNS=3 MAX_NEW_TOKENS=96 \
   bash scripts/run_qwen3_vl_ascend_smoke.sh
 ```
 
+单图默认限制为 256–512 个视觉 token，避免 Transformers eager attention 对高清原图产生平方级显存开销。确认 512 token 稳定后，可以单变量提高预算：
+
+```bash
+MIN_VISUAL_TOKENS=256 MAX_VISUAL_TOKENS=768 \
+  bash scripts/run_qwen3_vl_ascend_experiment.sh
+```
+
+比较 2B/4B 时必须使用相同图片和相同视觉 token 预算。每次结果 JSON 会记录原图尺寸、processor size、`image_grid_thw` 和输入张量形状。
+
 模型或图片不在默认位置时：
 
 ```bash

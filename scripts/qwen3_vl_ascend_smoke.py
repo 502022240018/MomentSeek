@@ -13,6 +13,8 @@ import torch_npu  # noqa: F401 - registers the Ascend backend with PyTorch
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
+QWEN3_VL_SPATIAL_COMPRESSION = 32
+
 
 def _gib(value: int) -> float:
     return round(value / 1024**3, 3)
@@ -38,10 +40,14 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--warmup-runs", type=int, default=1)
     parser.add_argument("--max-new-tokens", type=int, default=96)
+    parser.add_argument("--min-visual-tokens", type=int, default=256)
+    parser.add_argument("--max-visual-tokens", type=int, default=512)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.runs < 1 or args.warmup_runs < 0:
         parser.error("--runs must be positive and --warmup-runs cannot be negative")
+    if args.min_visual_tokens < 1 or args.max_visual_tokens < args.min_visual_tokens:
+        parser.error("visual token limits must satisfy 1 <= min <= max")
     if not args.model.is_dir():
         parser.error(f"model directory does not exist: {args.model}")
     if not args.image.is_file():
@@ -52,6 +58,10 @@ def main() -> None:
     device = torch.device("npu:0")
     load_started = time.perf_counter()
     processor = AutoProcessor.from_pretrained(args.model, local_files_only=True)
+    processor.image_processor.size = {
+        "shortest_edge": args.min_visual_tokens * QWEN3_VL_SPATIAL_COMPRESSION**2,
+        "longest_edge": args.max_visual_tokens * QWEN3_VL_SPATIAL_COMPRESSION**2,
+    }
     model = AutoModelForImageTextToText.from_pretrained(
         args.model,
         local_files_only=True,
@@ -75,6 +85,16 @@ def main() -> None:
     )
     inputs = processor(
         text=[rendered], images=[image], padding=True, return_tensors="pt"
+    )
+    input_shapes = {
+        key: list(value.shape)
+        for key, value in inputs.items()
+        if isinstance(value, torch.Tensor)
+    }
+    image_grid_thw = (
+        inputs["image_grid_thw"].tolist()
+        if "image_grid_thw" in inputs
+        else None
     )
     inputs = {
         key: value.to(device) if isinstance(value, torch.Tensor) else value
@@ -115,6 +135,14 @@ def main() -> None:
         "image": str(args.image),
         "device": str(device),
         "dtype": "bfloat16",
+        "original_image_size": list(image.size),
+        "visual_tokens": {
+            "min": args.min_visual_tokens,
+            "max": args.max_visual_tokens,
+            "processor_size": dict(processor.image_processor.size),
+            "image_grid_thw": image_grid_thw,
+            "input_shapes": input_shapes,
+        },
         "runs": args.runs,
         "warmup_runs": args.warmup_runs,
         "load_seconds": round(load_seconds, 3),
