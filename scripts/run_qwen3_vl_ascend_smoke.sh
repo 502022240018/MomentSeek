@@ -85,7 +85,7 @@ if [[ "$INSTALL_DEPS" == "true" \
       /work/venv/bin/pip install --ignore-installed --no-deps modelscope
       export PYTHONPATH="/work/venv/lib/python3.11/site-packages:/work/venv/lib64/python3.11/site-packages:${PYTHONPATH:-}"
       /work/venv/bin/python -c \
-        "from packaging.version import Version; import torch, torch_npu, transformers; assert Version(transformers.__version__) >= Version('4.57'); print(torch.__version__, torch_npu.__version__, transformers.__version__, transformers.__file__)"
+        "import importlib.metadata as m; from packaging.version import Version; import transformers; version=transformers.__version__; assert Version(version) >= Version(\"4.57\"); print(m.version(\"torch\"), m.version(\"torch-npu\"), version, transformers.__file__)"
       test -x /work/venv/bin/modelscope
     '
 fi
