@@ -132,6 +132,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             device = "npu" if settings.npu_enabled else "cpu"
         model_root = str(settings.app_model_dir / "rapidocr")
         key = f"ocr:{settings.ocr_engine}:{settings.ocr_version}:{settings.ocr_model_type}:{device}:{settings.npu_device_id}"
+        backend_pool_started = time.perf_counter()
         backend = pool.get(
             key,
             lambda: create_ocr_backend(
@@ -147,6 +148,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
                 acl_model_dir=str(settings.app_model_dir / settings.ocr_acl_model_dir),
             ),
         )
+        backend_pool_elapsed = time.perf_counter() - backend_pool_started
         result = build_ocr_index(
             video_path=video_path,
             output_path=str(video_index_dir / "ocr.npz"),
@@ -173,6 +175,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             acl_model_dir=str(settings.app_model_dir / settings.ocr_acl_model_dir),
             backend=backend,
         )
+        result["backend_pool_get_elapsed_seconds"] = round(backend_pool_elapsed, 3)
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result
     raise ValueError(f"未知索引阶段: {stage}")

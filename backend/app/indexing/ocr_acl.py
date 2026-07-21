@@ -14,6 +14,10 @@ ACL_MEMCPY_HOST_TO_DEVICE = 1
 ACL_MEMCPY_DEVICE_TO_HOST = 2
 ACL_ERROR_REPEAT_INITIALIZE = 100002
 _SHAPE_RE = re.compile(r"-(\d+)x(\d+)x(\d+)x(\d+)\.om$")
+_REC_DYNAMIC_WIDTH_GEARS = (
+    320, 384, 448, 512, 576, 640, 704, 768, 812, 832, 896, 960, 1024,
+    1088, 1152, 1216, 1280, 1344, 1408, 1472, 1536, 1600, 1920, 2048,
+)
 
 
 def _check(name: str, ret: int) -> None:
@@ -24,6 +28,32 @@ def _check(name: str, ret: int) -> None:
 def _shape_from_name(path: Path) -> tuple[int, int, int, int] | None:
     match = _SHAPE_RE.search(path.name)
     return tuple(int(value) for value in match.groups()) if match else None
+
+
+def _choose_rec_width(width: int) -> int:
+    target = next((value for value in _REC_DYNAMIC_WIDTH_GEARS if value >= width), None)
+    if target is None:
+        raise ValueError(
+            f"OCR Rec input width={width} exceeds maximum gear {_REC_DYNAMIC_WIDTH_GEARS[-1]}"
+        )
+    return target
+
+
+def _limit_rec_tensor_width(tensor: np.ndarray) -> tuple[np.ndarray, int]:
+    max_width = _REC_DYNAMIC_WIDTH_GEARS[-1]
+    if tensor.shape[-1] <= max_width:
+        return tensor, 0
+    import cv2
+
+    resized = np.stack([
+        cv2.resize(
+            np.transpose(sample, (1, 2, 0)),
+            (max_width, int(tensor.shape[2])),
+            interpolation=cv2.INTER_AREA,
+        ).transpose(2, 0, 1)
+        for sample in tensor
+    ]).astype(tensor.dtype, copy=False)
+    return np.ascontiguousarray(resized), int(tensor.shape[0])
 
 
 def _choose_covering_shape(
@@ -276,6 +306,13 @@ class RapidOCRAclBackend:
             rec_lang=rec_lang,
             model_type=model_type,
             npu_self_test=False,
+            # These CPU sessions only provide RapidOCR preprocessing and
+            # postprocessing metadata before their inference calls are
+            # replaced by ACL OM sessions below. ORT's default creates a
+            # host-sized pool per model and can exhaust the container PID
+            # limit on large shared servers.
+            ort_intra_op_threads=1,
+            ort_inter_op_threads=1,
         )
         self.runtime = _AclRuntime(device_id)
         self.models: dict[Path, _AclOmModel] = {}
@@ -286,9 +323,21 @@ class RapidOCRAclBackend:
         self.rec_path = (
             self.om_root
             / "rec-dynamic-width-b5"
-            / "PP-OCRv6_rec_small-b5-dynamic-width.om"
+            / "PP-OCRv6_rec_small-b5-dynamic-width-1600.om"
         )
-        if not self.det_shapes or not self.cls_shapes or not self.rec_path.is_file():
+        self.rec_wide_path = (
+            self.om_root
+            / "rec-dynamic-width-b5"
+            / "PP-OCRv6_rec_small-b5-dynamic-width-2048.om"
+        )
+        self.rec_resized_inputs = 0
+        self.rec_max_input_width = 0
+        if (
+            not self.det_shapes
+            or not self.cls_shapes
+            or not self.rec_path.is_file()
+            or not self.rec_wide_path.is_file()
+        ):
             self.close()
             raise FileNotFoundError(
                 "OCR ACL 模型不完整，需要 Det/Cls 静态档位和 Rec 动态宽度 OM"
@@ -359,12 +408,13 @@ class RapidOCRAclBackend:
         raise ValueError(f"未知 OCR ACL stage: {stage}")
 
     def _infer_rec(self, tensor: np.ndarray) -> np.ndarray:
+        self.rec_max_input_width = max(self.rec_max_input_width, int(tensor.shape[-1]))
+        tensor, resized_inputs = _limit_rec_tensor_width(tensor)
+        self.rec_resized_inputs += resized_inputs
         batch, channels, height, width = tensor.shape
-        gears = (320, 384, 448, 512, 576, 640, 704, 768, 812, 832, 896, 960, 1024)
-        target_width = next((value for value in gears if value >= width), None)
-        if target_width is None:
-            raise ValueError(f"OCR Rec 输入 width={width} 超过最大档位 {gears[-1]}")
-        model = self._model(self.rec_path, dynamic_dims=True)
+        target_width = _choose_rec_width(width)
+        model_path = self.rec_wide_path if target_width > 1600 else self.rec_path
+        model = self._model(model_path, dynamic_dims=True)
         outputs = []
         for offset in range(0, batch, 5):
             chunk = tensor[offset : offset + 5]

@@ -291,6 +291,14 @@ def test_ocr_index_writes_box_level_arrays_and_chunk_semantics(tmp_path, monkeyp
     assert result["schema_version"] == 3
     assert result["chunks"] == 1
     assert result["semantic_chunks"] == 1
+    assert result["ocr_rec_resized_inputs"] == 0
+    assert result["ocr_rec_max_input_width"] == 0
+    assert result["backend_init_elapsed_seconds"] >= 0
+    assert result["frame_loop_elapsed_seconds"] >= result["ocr_elapsed_seconds"]
+    assert result["decode_postprocess_elapsed_seconds"] >= 0
+    assert result["semantic_elapsed_seconds"] >= 0
+    assert result["index_save_elapsed_seconds"] >= 0
+    assert result["total_elapsed_seconds"] >= result["frame_loop_elapsed_seconds"]
 
 
 def test_face_index_writes_track_times_without_precomputed_thumbnails(tmp_path, monkeypatch):

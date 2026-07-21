@@ -13,6 +13,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-momentseek-29154-platform}"
 ROLLBACK_NAME="${CONTAINER_NAME}-rollback"
 NPU_ID="${NPU_ID:-5}"
 APP_PORT="${APP_PORT:-}"
+CPU_THREAD_LIMIT="${CPU_THREAD_LIMIT:-8}"
 BUILD_DIR="${SOURCE_DIR}/.server-build"
 INSIGHTFACE_WHEEL="${INSIGHTFACE_WHEEL:-${SOURCE_DIR}/vendor-wheels/insightface-1.0.1-py3-none-any.whl}"
 INSIGHTFACE_SHA256="5f373f6fedbdda5cbc59a34ca386a75a2995cdaf6899402590ae9eb4308fc2e8"
@@ -37,6 +38,7 @@ trap 'rollback_on_error "$LINENO"' ERR
 [[ -d "$SOURCE_DIR/.git" ]] || fail "Git source not found: $SOURCE_DIR"
 [[ -f "$SOURCE_DIR/backend/requirements-ascend.txt" ]] || fail "Missing Ascend requirements"
 [[ -f "$SOURCE_DIR/frontend/package-lock.json" ]] || fail "Missing frontend package-lock.json"
+[[ "$CPU_THREAD_LIMIT" =~ ^[1-9][0-9]*$ ]] || fail "CPU_THREAD_LIMIT must be a positive integer"
 for command_name in docker git curl npu-smi flock ss sha256sum python3; do
   command -v "$command_name" >/dev/null 2>&1 || fail "Missing command: $command_name"
 done
@@ -72,8 +74,10 @@ mkdir -p "$MODEL_DIR" "$RUNTIME_DIR" "$LOG_DIR" "$BUILD_DIR/wheels"
 OCR_OM_ROOT="$MODEL_DIR/rapidocr/ascend/910b4-cann9-profile"
 [[ -d "$OCR_OM_ROOT/det" ]] || fail "Required OCR Det OM directory is missing: $OCR_OM_ROOT/det"
 [[ -d "$OCR_OM_ROOT/cls" ]] || fail "Required OCR Cls OM directory is missing: $OCR_OM_ROOT/cls"
-[[ -f "$OCR_OM_ROOT/rec-dynamic-width-b5/PP-OCRv6_rec_small-b5-dynamic-width.om" ]] \
+[[ -f "$OCR_OM_ROOT/rec-dynamic-width-b5/PP-OCRv6_rec_small-b5-dynamic-width-1600.om" ]] \
   || fail "Required OCR Rec dynamic OM is missing"
+[[ -f "$OCR_OM_ROOT/rec-dynamic-width-b5/PP-OCRv6_rec_small-b5-dynamic-width-2048.om" ]] \
+  || fail "Required OCR Rec wide dynamic OM is missing"
 [[ -f "$INSIGHTFACE_WHEEL" ]] || fail "Required build artifact is missing: $INSIGHTFACE_WHEEL"
 printf '%s  %s\n' "$INSIGHTFACE_SHA256" "$INSIGHTFACE_WHEEL" | sha256sum -c -
 cp -f "$INSIGHTFACE_WHEEL" "$BUILD_DIR/wheels/"
@@ -141,6 +145,13 @@ USER root
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+    OPENBLAS_NUM_THREADS=8 \
+    OPENBLAS_DEFAULT_NUM_THREADS=8 \
+    OMP_NUM_THREADS=8 \
+    MKL_NUM_THREADS=8 \
+    NUMEXPR_NUM_THREADS=8 \
+    BLIS_NUM_THREADS=8 \
+    TOKENIZERS_PARALLELISM=false \
     APP_DATA_DIR=/app/runtime \
     APP_MODEL_DIR=/app/models \
     APP_PORT=18500
@@ -257,6 +268,13 @@ docker run -d \
   -e MODEL_IDLE_POLICY=resident \
   -e INDEXER_MODE=daemon \
   -e INDEXER_IDLE_TIMEOUT_SECONDS=0 \
+  -e OPENBLAS_NUM_THREADS="$CPU_THREAD_LIMIT" \
+  -e OPENBLAS_DEFAULT_NUM_THREADS="$CPU_THREAD_LIMIT" \
+  -e OMP_NUM_THREADS="$CPU_THREAD_LIMIT" \
+  -e MKL_NUM_THREADS="$CPU_THREAD_LIMIT" \
+  -e NUMEXPR_NUM_THREADS="$CPU_THREAD_LIMIT" \
+  -e BLIS_NUM_THREADS="$CPU_THREAD_LIMIT" \
+  -e TOKENIZERS_PARALLELISM=false \
   -e VISUAL_MODEL=siglip2-so400m-384 \
   -e VISUAL_HF_CACHE_DIR=/app/models/hf-cache \
   -e FACE_PROVIDER=cann \

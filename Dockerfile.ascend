@@ -10,7 +10,15 @@ RUN npm run build
 # Override this with a portable CANN/torch_npu ARM64 base image on another server.
 FROM ${ASCEND_RUNTIME_IMAGE}
 USER root
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    OPENBLAS_NUM_THREADS=8 \
+    OPENBLAS_DEFAULT_NUM_THREADS=8 \
+    OMP_NUM_THREADS=8 \
+    MKL_NUM_THREADS=8 \
+    NUMEXPR_NUM_THREADS=8 \
+    BLIS_NUM_THREADS=8 \
+    TOKENIZERS_PARALLELISM=false
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*

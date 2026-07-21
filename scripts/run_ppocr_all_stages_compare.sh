@@ -47,7 +47,7 @@ docker run --rm --name "$EXPERIMENT_NAME" \
       --video "$1" --timestamp "$2" --decode-height 720 \
       --model-root /app/models/rapidocr \
       --om-root /app/models/rapidocr/ascend/910b4-cann9-profile \
-      --rec-dynamic-om /app/models/rapidocr/ascend/910b4-cann9-profile/rec-dynamic-width-b5/PP-OCRv6_rec_small-b5-dynamic-width.om \
+      --rec-dynamic-om /app/models/rapidocr/ascend/910b4-cann9-profile/rec-dynamic-width-b5/PP-OCRv6_rec_small-b5-dynamic-width-1600.om \
       --device-id 0 --output "/work/logs/$3"
   ' sh "/app/runtime/$VIDEO_RELATIVE" "$TIMESTAMP" "$REPORT_RELATIVE"
 
