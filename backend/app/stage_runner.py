@@ -69,6 +69,8 @@ def run(stage: str, job_id: str) -> dict:
             model_root=str(settings.app_model_dir / "insightface"),
             decode_height=settings.face_decode_height,
             prefer_ffmpeg=settings.frame_reader == "ffmpeg",
+            ort_intra_op_threads=settings.face_ort_intra_op_threads,
+            ort_inter_op_threads=settings.face_ort_inter_op_threads,
         )
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result

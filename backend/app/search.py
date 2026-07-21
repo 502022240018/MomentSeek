@@ -904,7 +904,12 @@ class SearchEngine:
             from app.indexing.faces import FaceEncoder
 
             self._face_encoder = FaceEncoder(
-                self.settings.face_model, "cpu", 0, str(self.settings.app_model_dir / "insightface")
+                self.settings.face_model,
+                "cpu",
+                0,
+                str(self.settings.app_model_dir / "insightface"),
+                self.settings.face_ort_intra_op_threads,
+                self.settings.face_ort_inter_op_threads,
             )
         return self._face_encoder
 

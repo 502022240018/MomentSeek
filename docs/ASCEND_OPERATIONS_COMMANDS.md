@@ -497,6 +497,17 @@ docker logs --since 30m --timestamps "$MS_CONTAINER" | tail -300
 
 优先记录第一个 traceback 和其前面的错误，不要只截取最后一行。常见方向：模型路径缺失、模型加载失败、NPU 资源忙、视频解码失败、磁盘满、CANN/算子错误、内存不足。
 
+若出现 `107003`、`stream is not in current context`，先确认正式容器为隔离模式并查看各阶段记录的 worker PID：
+
+```bash
+docker inspect "$MS_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep '^NPU_WORKER_MODE='
+curl -fsS "${MS_API}/api/jobs/${JOB_ID}" | python3 -m json.tool \
+  | grep -E 'isolated_worker_pid|isolated_worker_attempts|107003|current context'
+```
+
+期望 `NPU_WORKER_MODE=isolated`，不同通道 PID 不同，同一通道跨连续任务 PID 相同。不要仅重启后继续使用 `legacy`；那只会暂时清空 context，下一次混用运行时仍可能复现。
+
 ### 9.5 NPU 无进程
 
 - 无任务时：正常，模型可能尚未加载或已随容器重启释放。

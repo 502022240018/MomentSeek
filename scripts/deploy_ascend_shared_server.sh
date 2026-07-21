@@ -14,6 +14,8 @@ ROLLBACK_NAME="${CONTAINER_NAME}-rollback"
 NPU_ID="${NPU_ID:-5}"
 APP_PORT="${APP_PORT:-}"
 CPU_THREAD_LIMIT="${CPU_THREAD_LIMIT:-8}"
+CONTAINER_CPU_LIMIT="${CONTAINER_CPU_LIMIT:-24}"
+CONTAINER_PID_LIMIT="${CONTAINER_PID_LIMIT:-2048}"
 BUILD_DIR="${SOURCE_DIR}/.server-build"
 INSIGHTFACE_WHEEL="${INSIGHTFACE_WHEEL:-${SOURCE_DIR}/vendor-wheels/insightface-1.0.1-py3-none-any.whl}"
 INSIGHTFACE_SHA256="5f373f6fedbdda5cbc59a34ca386a75a2995cdaf6899402590ae9eb4308fc2e8"
@@ -39,6 +41,8 @@ trap 'rollback_on_error "$LINENO"' ERR
 [[ -f "$SOURCE_DIR/backend/requirements-ascend.txt" ]] || fail "Missing Ascend requirements"
 [[ -f "$SOURCE_DIR/frontend/package-lock.json" ]] || fail "Missing frontend package-lock.json"
 [[ "$CPU_THREAD_LIMIT" =~ ^[1-9][0-9]*$ ]] || fail "CPU_THREAD_LIMIT must be a positive integer"
+[[ "$CONTAINER_CPU_LIMIT" =~ ^[1-9][0-9]*$ ]] || fail "CONTAINER_CPU_LIMIT must be a positive integer"
+[[ "$CONTAINER_PID_LIMIT" =~ ^[1-9][0-9]*$ ]] || fail "CONTAINER_PID_LIMIT must be a positive integer"
 for command_name in docker git curl npu-smi flock ss sha256sum python3; do
   command -v "$command_name" >/dev/null 2>&1 || fail "Missing command: $command_name"
 done
@@ -258,6 +262,8 @@ docker run -d \
   --name "$CONTAINER_NAME" \
   --restart unless-stopped \
   --network host \
+  --cpus "$CONTAINER_CPU_LIMIT" \
+  --pids-limit "$CONTAINER_PID_LIMIT" \
   "${DEVICE_ARGS[@]}" \
   -e ENV_PROFILE=prod.ascend \
   -e APP_PORT="$APP_PORT" \
@@ -267,6 +273,7 @@ docker run -d \
   -e NPU_DEVICE_ID=0 \
   -e MODEL_IDLE_POLICY=resident \
   -e INDEXER_MODE=daemon \
+  -e NPU_WORKER_MODE=isolated \
   -e INDEXER_IDLE_TIMEOUT_SECONDS=0 \
   -e OPENBLAS_NUM_THREADS="$CPU_THREAD_LIMIT" \
   -e OPENBLAS_DEFAULT_NUM_THREADS="$CPU_THREAD_LIMIT" \
@@ -278,6 +285,8 @@ docker run -d \
   -e VISUAL_MODEL=siglip2-so400m-384 \
   -e VISUAL_HF_CACHE_DIR=/app/models/hf-cache \
   -e FACE_PROVIDER=cann \
+  -e FACE_ORT_INTRA_OP_THREADS="$CPU_THREAD_LIMIT" \
+  -e FACE_ORT_INTER_OP_THREADS=1 \
   -e ASR_ENGINE=funasr \
   -e ASR_DEVICE=auto \
   -e ASR_VAD_STRATEGY=silero_12s \

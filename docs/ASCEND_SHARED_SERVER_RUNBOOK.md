@@ -162,16 +162,23 @@ NPU_ENABLED=true
 NPU_DEVICE_ID=0
 MODEL_IDLE_POLICY=resident
 INDEXER_MODE=daemon
+NPU_WORKER_MODE=isolated
 INDEXER_IDLE_TIMEOUT_SECONDS=0
 VISUAL_MODEL=siglip2-so400m-384
 FACE_PROVIDER=cann
+FACE_ORT_INTRA_OP_THREADS=8
+FACE_ORT_INTER_OP_THREADS=1
 ASR_ENGINE=funasr
 ASR_DEVICE=auto
 ASR_VAD_STRATEGY=silero_12s
-OCR_DEVICE=cpu
+OCR_ENGINE=rapidocr_acl
+OCR_DEVICE=npu
+OCR_ACL_MODEL_DIR=rapidocr/ascend/910b4-cann9-profile
 ```
 
-索引由常驻 daemon 串行调度通道，已纳入模型池的模型不因空闲超时释放。Face 走 CANN。当前 PP-OCRv6 Small 的 ONNX Runtime CANN 路径结果不正确，因此正式服务仍用 CPU OCR；OM + ACL 是独立实验候选，验证前不要把 `OCR_DEVICE` 改成 NPU。
+索引由 daemon 串行调度；visual、face、ASR、OCR 各自在独立的常驻子进程中持有模型和 NPU context，禁止把 Torch-NPU、ORT CANN 和原生 ACL 合回同一进程。正式 OCR 使用已验证的 PP-OCRv6 OM + ACL 路径，不使用结果不正确的 ONNX Runtime CANN OCR 路径。
+
+`CPU_THREAD_LIMIT=8` 约束 BLAS、OpenMP 和 CPU ORT，但不能约束 CANN EP 与 ffmpeg 自己的线程。2026-07-21 回归峰值约 810 PID、19.7 GiB 宿主内存；部署脚本因此默认增加 24 CPU 配额和 2048 PID 上限。不要把 PID 上限直接压到 1024，初始化峰值余量太小。
 
 容器使用 `--network host`，Uvicorn 直接监听宿主机 `0.0.0.0:8000`，不是 Docker `-p` 映射。
 

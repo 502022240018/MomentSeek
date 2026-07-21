@@ -172,3 +172,23 @@ def test_ascend_profiles_cap_cpu_inference_thread_pools():
     assert 'TOKENIZERS_PARALLELISM: "${TOKENIZERS_PARALLELISM:-false}"' in compose
     assert deploy_script.count("TOKENIZERS_PARALLELISM=false") >= 2
     assert 'CPU_THREAD_LIMIT="${CPU_THREAD_LIMIT:-8}"' in deploy_script
+
+
+def test_production_ascend_uses_isolated_resident_workers():
+    prod = _parse_env("deploy/env/prod.ascend.example")
+    staging = _parse_env("deploy/env/staging.ascend.example")
+    compose = _read("compose.ascend.yml")
+    deploy_script = _read("scripts/deploy_ascend_shared_server.sh")
+
+    assert prod["INDEXER_MODE"] == "daemon"
+    assert prod["MODEL_IDLE_POLICY"] == "resident"
+    assert prod["NPU_WORKER_MODE"] == "isolated"
+    assert staging["NPU_WORKER_MODE"] == "legacy"
+    assert 'NPU_WORKER_MODE: "${NPU_WORKER_MODE:-isolated}"' in compose
+    assert "-e NPU_WORKER_MODE=isolated" in deploy_script
+    assert 'CONTAINER_CPU_LIMIT="${CONTAINER_CPU_LIMIT:-24}"' in deploy_script
+    assert 'CONTAINER_PID_LIMIT="${CONTAINER_PID_LIMIT:-2048}"' in deploy_script
+    assert '--cpus "$CONTAINER_CPU_LIMIT"' in deploy_script
+    assert '--pids-limit "$CONTAINER_PID_LIMIT"' in deploy_script
+    assert '-e FACE_ORT_INTRA_OP_THREADS="$CPU_THREAD_LIMIT"' in deploy_script
+    assert "-e FACE_ORT_INTER_OP_THREADS=1" in deploy_script

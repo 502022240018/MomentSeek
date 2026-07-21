@@ -90,16 +90,24 @@ def test_face_encoder_requires_local_model_files(monkeypatch, tmp_path):
 
 
 def test_face_encoder_accepts_local_model_files(monkeypatch, tmp_path):
+    class FakeSessionOptions:
+        intra_op_num_threads = 0
+        inter_op_num_threads = 0
+
     class FakeOrt:
+        SessionOptions = FakeSessionOptions
+
         @staticmethod
         def get_available_providers():
             return ["CPUExecutionProvider"]
 
     class FakeFaceAnalysis:
-        def __init__(self, name, providers, root):
+        def __init__(self, name, providers, root, allowed_modules, sess_options):
             self.name = name
             self.providers = providers
             self.root = root
+            self.allowed_modules = allowed_modules
+            self.sess_options = sess_options
 
         def prepare(self, ctx_id, det_size):
             self.ctx_id = ctx_id
@@ -115,11 +123,14 @@ def test_face_encoder_accepts_local_model_files(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "onnxruntime", FakeOrt())
     monkeypatch.setitem(sys.modules, "insightface.app", FakeInsightfaceApp())
 
-    encoder = FaceEncoder("buffalo_l", "cpu", 0, str(tmp_path))
+    encoder = FaceEncoder("buffalo_l", "cpu", 0, str(tmp_path), 3, 1)
 
     assert encoder.provider == "cpu"
     assert isinstance(encoder.app, FakeFaceAnalysis)
     assert Path(encoder.app.root) == tmp_path
+    assert encoder.app.allowed_modules == ["detection", "recognition"]
+    assert encoder.app.sess_options.intra_op_num_threads == 3
+    assert encoder.app.sess_options.inter_op_num_threads == 1
 
 
 def test_face_encoder_cann_does_not_silently_fall_back_to_cpu(monkeypatch, tmp_path):
