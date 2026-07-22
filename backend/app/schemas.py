@@ -219,3 +219,5 @@ class HealthResponse(BaseModel):
     npu_device_id: int | None
     cuda_enabled: bool = False
     model_idle_policy: str
+    indexer_mode: str
+    npu_worker_mode: str

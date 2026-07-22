@@ -64,6 +64,7 @@ def test_worker_environment_propagates_indexing_profile_settings(tmp_path):
         asr_semantic_local_files_only=True,
         ocr_device="auto",
         ocr_version="PP-OCRv6",
+        npu_worker_mode="isolated",
     )
 
     environment = worker_environment(settings)
@@ -82,6 +83,7 @@ def test_worker_environment_propagates_indexing_profile_settings(tmp_path):
     assert environment["ASR_SEMANTIC_LOCAL_FILES_ONLY"] == "true"
     assert environment["OCR_DEVICE"] == "auto"
     assert environment["OCR_VERSION"] == "PP-OCRv6"
+    assert environment["NPU_WORKER_MODE"] == "isolated"
 
 
 def test_selective_rebuild_preserves_existing_modalities(monkeypatch, tmp_path):

@@ -21,6 +21,8 @@ def _rapidocr_params(
     det_lang: str = "ch",
     rec_lang: str = "ch",
     model_type: str = "small",
+    ort_intra_op_threads: int = 8,
+    ort_inter_op_threads: int = 1,
 ) -> dict[str, Any]:
     from rapidocr.utils.typings import EngineType, LangDet, LangRec, ModelType, OCRVersion
 
@@ -41,6 +43,9 @@ def _rapidocr_params(
     if model_type_value is None:
         raise ValueError(f"不支持的 OCR model_type: {model_type}")
 
+    if ort_intra_op_threads < 1 or ort_inter_op_threads < 1:
+        raise ValueError("RapidOCR ONNX Runtime thread limits must be positive")
+
     params: dict[str, Any] = {
         "Det.engine_type": EngineType.ONNXRUNTIME,
         "Cls.engine_type": EngineType.ONNXRUNTIME,
@@ -53,6 +58,8 @@ def _rapidocr_params(
         "Rec.model_type": model_type_value,
         "Global.model_root_dir": str(model_root),
         "Global.log_level": "warning",
+        "EngineConfig.onnxruntime.intra_op_num_threads": int(ort_intra_op_threads),
+        "EngineConfig.onnxruntime.inter_op_num_threads": int(ort_inter_op_threads),
     }
     if device == "npu":
         params.update({
@@ -101,6 +108,8 @@ def _load_ocr(
     rec_lang: str = "ch",
     model_type: str = "small",
     npu_self_test: bool = True,
+    ort_intra_op_threads: int = 8,
+    ort_inter_op_threads: int = 1,
 ):
     if not _has_local_rapidocr_assets(model_root):
         raise FileNotFoundError(f"本地 RapidOCR 模型缺失: {model_root}")
@@ -110,7 +119,17 @@ def _load_ocr(
     except ImportError as exc:
         raise RuntimeError("OCR 依赖 rapidocr 未安装；请安装 rapidocr 后重试") from exc
 
-    ocr = RapidOCR(params=_rapidocr_params(device, device_id, model_root, ocr_version, det_lang, rec_lang, model_type))
+    ocr = RapidOCR(params=_rapidocr_params(
+        device,
+        device_id,
+        model_root,
+        ocr_version,
+        det_lang,
+        rec_lang,
+        model_type,
+        ort_intra_op_threads=ort_intra_op_threads,
+        ort_inter_op_threads=ort_inter_op_threads,
+    ))
     providers = _session_providers(ocr)
     if device == "npu":
         missing = [name for name, values in providers.items() if "CANNExecutionProvider" not in values]
@@ -535,6 +554,7 @@ def build_ocr_index(
         raise ValueError("ocr_sample_fps 必须大于 0")
     started = time.perf_counter()
     Path(working_dir).mkdir(parents=True, exist_ok=True)
+    backend_init_started = time.perf_counter()
     if backend is None:
         backend = create_ocr_backend(
             engine,
@@ -548,6 +568,7 @@ def build_ocr_index(
             npu_self_test=npu_self_test,
             acl_model_dir=acl_model_dir,
         )
+    backend_init_elapsed = time.perf_counter() - backend_init_started
 
     chunks: list[dict] = []
     interval = 1.0 / sample_fps
@@ -558,6 +579,7 @@ def build_ocr_index(
     ocr_filtered_items = 0
     ocr_error_samples: list[dict] = []
 
+    frame_loop_started = time.perf_counter()
     for frame_index, (timestamp, frame) in enumerate(
         read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg)
     ):
@@ -600,6 +622,7 @@ def build_ocr_index(
             "score": round(max(item["score"] for item in items), 4),
             "frame_shape": frame.shape[:2],
         })
+    frame_loop_elapsed = time.perf_counter() - frame_loop_started
 
     result = {
         "engine": backend.engine,
@@ -614,15 +637,20 @@ def build_ocr_index(
         "chunks": len(chunks),
         "ocr_failed_frames": ocr_failed_frames,
         "ocr_filtered_items": ocr_filtered_items,
+        "ocr_rec_resized_inputs": int(getattr(backend, "rec_resized_inputs", 0)),
+        "ocr_rec_max_input_width": int(getattr(backend, "rec_max_input_width", 0)),
         "ocr_error_samples": ocr_error_samples,
+        "backend_init_elapsed_seconds": round(backend_init_elapsed, 3),
+        "frame_loop_elapsed_seconds": round(frame_loop_elapsed, 3),
+        "decode_postprocess_elapsed_seconds": round(max(0.0, frame_loop_elapsed - ocr_elapsed), 3),
         "ocr_elapsed_seconds": round(ocr_elapsed, 3),
-        "total_elapsed_seconds": round(time.perf_counter() - started, 3),
         "schema_version": 3,
         "decode_status": "complete" if decoded_frames else "empty",
     }
     semantic_result: dict
     embeddings: np.ndarray
     embedding_frame_indices: np.ndarray
+    semantic_started = time.perf_counter()
     if not semantic_enabled:
         if semantic_output_path is not None:
             Path(semantic_output_path).unlink(missing_ok=True)
@@ -667,14 +695,22 @@ def build_ocr_index(
                 "semantic_status": "unavailable",
                 "semantic_error": str(exc),
             }
+    semantic_elapsed = time.perf_counter() - semantic_started
+    save_started = time.perf_counter()
     _save_ocr_npz(
         output_path,
         chunks,
         embeddings,
         embedding_frame_indices,
     )
+    save_elapsed = time.perf_counter() - save_started
 
     result.update(semantic_result)
+    result.update({
+        "semantic_elapsed_seconds": round(semantic_elapsed, 3),
+        "index_save_elapsed_seconds": round(save_elapsed, 3),
+        "total_elapsed_seconds": round(time.perf_counter() - started, 3),
+    })
     return result
 
 

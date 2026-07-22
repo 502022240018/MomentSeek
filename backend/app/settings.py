@@ -35,9 +35,16 @@ class Settings(BaseSettings):
     #     daemon. Jobs and their channels run serially; pooled CLIP/InsightFace
     #     models can stay resident and skip reload/kernel compilation.
     indexer_mode: str = "subprocess"
+    # Worker isolation inside daemon mode:
+    #   "legacy" keeps every runtime/model in the daemon process itself.
+    #   "isolated" gives each modality a persistent child process and its own
+    #   NPU context, while the daemon remains the single serial scheduler.
+    npu_worker_mode: str = "legacy"
     # <= 0 keeps pooled models resident until daemon/container shutdown.
     indexer_idle_timeout_seconds: float = 300.0
     indexer_poll_seconds: float = 2.0
+    indexer_worker_start_timeout_seconds: float = 30.0
+    indexer_stage_max_attempts: int = 2
 
     # Frame source for indexing decode:
     #   "ffmpeg" (default) — ffmpeg multithreaded decode + fps/scale in one C pass,
@@ -67,6 +74,11 @@ class Settings(BaseSettings):
     face_model: str = "buffalo_l"
     face_sample_fps: float = 2.0
     face_provider: str = "cpu"
+    # ONNX Runtime otherwise creates one intra-op thread per physical CPU core
+    # for every InsightFace session. On the shared Ascend host that means
+    # hundreds of threads for the detector + recognizer alone.
+    face_ort_intra_op_threads: int = 8
+    face_ort_inter_op_threads: int = 1
 
     asr_engine: str = "auto"
     # Used by ASR_ENGINE=whisper or ASR_ENGINE=faster-whisper. In auto mode this

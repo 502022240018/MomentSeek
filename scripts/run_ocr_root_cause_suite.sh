@@ -17,17 +17,35 @@ CASE_TIMEOUT_SECONDS="${CASE_TIMEOUT_SECONDS:-900}"
 CPU_LIMIT="${CPU_LIMIT:-16}"
 MEMORY_LIMIT="${MEMORY_LIMIT:-32g}"
 PIDS_LIMIT="${PIDS_LIMIT:-512}"
+THREAD_LIMIT="${THREAD_LIMIT:-}"
+CASES_CSV="${CASES_CSV:-semantic_only,ocr_only,ocr_semantic,face_ocr_semantic}"
+CONTAINER_PREFIX="${CONTAINER_PREFIX:-momentseek-ocr-root}"
 RUN_ID="${RUN_ID:-$(date '+%F-%H%M%S')}"
 SUITE_DIR="${SUITE_DIR:-${LOG_DIR}/ocr-root-cause-suite-${RUN_ID}}"
 ARCHIVE="${SUITE_DIR}.tar.gz"
 IMAGE_NAME="${IMAGE_NAME:-$(docker container inspect --format '{{.Config.Image}}' "$PLATFORM_CONTAINER")}"
-CASES=(semantic_only ocr_only ocr_semantic face_ocr_semantic)
+IFS=',' read -r -a CASES <<<"$CASES_CSV"
 
 fail() { printf '\nOCR_ROOT_CAUSE_SUITE_FAILED: %s\n' "$*" >&2; exit 1; }
 trap 'printf "\nOCR_ROOT_CAUSE_SUITE_FAILED_AT_LINE=%s\n" "$LINENO" >&2' ERR
 
 [[ -f "$VIDEO_HOST" ]] || fail "video is missing: $VIDEO_HOST"
 case "$VIDEO_HOST" in "$RUNTIME_DIR"/uploads/*) ;; *) fail "VIDEO_HOST must be under runtime/uploads" ;; esac
+(( ${#CASES[@]} > 0 )) || fail "CASES_CSV must contain at least one case"
+for case_name in "${CASES[@]}"; do
+  case "$case_name" in
+    semantic_only|ocr_only|ocr_semantic|face_ocr_semantic) ;;
+    *) fail "unsupported case in CASES_CSV: $case_name" ;;
+  esac
+done
+THREAD_ENV_ARGS=()
+if [[ -n "$THREAD_LIMIT" ]]; then
+  [[ "$THREAD_LIMIT" =~ ^[1-9][0-9]*$ ]] || fail "THREAD_LIMIT must be a positive integer"
+  for variable in OPENBLAS_NUM_THREADS OPENBLAS_DEFAULT_NUM_THREADS OMP_NUM_THREADS MKL_NUM_THREADS NUMEXPR_NUM_THREADS BLIS_NUM_THREADS; do
+    THREAD_ENV_ARGS+=( -e "${variable}=${THREAD_LIMIT}" )
+  done
+  THREAD_ENV_ARGS+=( -e TOKENIZERS_PARALLELISM=false )
+fi
 VIDEO_RELATIVE="${VIDEO_HOST#${RUNTIME_DIR}/}"
 command -v timeout >/dev/null || fail "host command is missing: timeout"
 mkdir -p "$SUITE_DIR/cases"
@@ -53,6 +71,9 @@ case_timeout_seconds=$CASE_TIMEOUT_SECONDS
 cpu_limit=$CPU_LIMIT
 memory_limit=$MEMORY_LIMIT
 pids_limit=$PIDS_LIMIT
+thread_limit=${THREAD_LIMIT:-unset}
+cases=$CASES_CSV
+container_prefix=$CONTAINER_PREFIX
 EOF
 cat "$SUITE_DIR/config.txt"
 
@@ -104,7 +125,7 @@ wait_npu_idle() {
 run_case() {
   local case_name="$1"
   local case_dir="$SUITE_DIR/cases/$case_name"
-  local container="momentseek-ocr-root-${case_name//_/-}"
+  local container="${CONTAINER_PREFIX}-${case_name//_/-}"
   mkdir -p "$case_dir"
   docker container inspect "$container" >/dev/null 2>&1 && fail "stale case container exists: $container"
   printf '\n[%s] case=%s\n' "$(date '+%F %T')" "$case_name"
@@ -113,6 +134,7 @@ run_case() {
   timeout --signal=TERM --kill-after=30s "$CASE_TIMEOUT_SECONDS" \
     docker run --name "$container" \
       --cpus "$CPU_LIMIT" --memory "$MEMORY_LIMIT" --pids-limit "$PIDS_LIMIT" \
+      "${THREAD_ENV_ARGS[@]}" \
       --device "/dev/davinci${PHYSICAL_NPU}" \
       --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
@@ -162,8 +184,9 @@ for case_name in "${CASES[@]}"; do
   run_case "$case_name"
 done
 
-python3 "$SOURCE_DIR/scripts/summarize_ocr_root_cause_suite.py" --suite-dir "$SUITE_DIR"
-tar -czf "$ARCHIVE" -C "$LOG_DIR" "$(basename "$SUITE_DIR")"
+python3 "$SOURCE_DIR/scripts/summarize_ocr_root_cause_suite.py" \
+  --suite-dir "$SUITE_DIR" --cases "$CASES_CSV"
+tar -czf "$ARCHIVE" -C "$(dirname "$SUITE_DIR")" "$(basename "$SUITE_DIR")"
 npu-smi info -t proc-mem -i "$PHYSICAL_NPU" -c 0 || true
 printf '\nOCR_ROOT_CAUSE_SUITE_COMPLETE=1\nSUMMARY=%s\nJSON=%s\nARCHIVE=%s\n' \
   "$SUITE_DIR/summary.txt" "$SUITE_DIR/summary.json" "$ARCHIVE"

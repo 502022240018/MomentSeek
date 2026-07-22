@@ -55,22 +55,27 @@ ocr    -> 抽帧 -> RapidOCR boxes + 可选文本语义向量 -> ocr.npz
 
 ## 模型生命周期
 
-默认设计是 API 进程不长期加载重型索引模型。索引阶段在子进程中运行，阶段结束后释放 NPU 上下文和显存。
-
-当前服务器 health 显示：
+生产 Ascend 部署使用一个串行调度 daemon，但每种加速运行时放在独立的常驻子进程：
 
 ```text
-model_idle_policy = process_exit
+indexer daemon（只调度，不创建 NPU context）
+  -> visual worker：torch_npu / SigLIP2
+  -> face worker：ONNX Runtime CANN / InsightFace
+  -> asr worker：FunASR
+  -> ocr worker：ACL / PP-OCRv6 OM
 ```
 
-仓库里已有 warm model pool 和 indexer daemon 相关代码：
+同一通道的模型和 NPU context 可跨任务复用，不同通道不会在一个进程里混用 Torch-NPU、ORT CANN 和原生 ACL。这样保留热启动收益，同时避免运行时切换后出现 `107003 stream is not in current context`。任何加速器异常都会销毁该通道进程；仅上下文错误或进程意外退出允许在全新进程中重试一次。
+
+相关实现：
 
 ```text
 backend/app/model_pool.py
 backend/app/indexer_daemon.py
+backend/app/isolated_stage_workers.py
 ```
 
-是否启用它们是部署决策，因为它会改变显存常驻和队列行为。相关性能/资源问题记录在 `docs/ISSUES_AND_ROADMAP.md`。
+开发和回退环境仍可使用 `NPU_WORKER_MODE=legacy`；生产必须使用 `INDEXER_MODE=daemon`、`NPU_WORKER_MODE=isolated`。检索 API 在独立的 Uvicorn 进程中，索引任务仍全局串行，避免同一 NPU 上多个重型阶段争抢资源。
 
 ## 后端模块
 
