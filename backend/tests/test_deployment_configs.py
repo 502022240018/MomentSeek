@@ -181,7 +181,8 @@ def test_production_ascend_uses_isolated_resident_workers():
     deploy_script = _read("scripts/deploy_ascend_shared_server.sh")
 
     assert prod["INDEXER_MODE"] == "daemon"
-    assert prod["MODEL_IDLE_POLICY"] == "resident"
+    assert "MODEL_IDLE_POLICY" not in prod
+    assert "MODEL_IDLE_POLICY" not in staging
     assert prod["NPU_WORKER_MODE"] == "isolated"
     assert staging["NPU_WORKER_MODE"] == "legacy"
     assert 'NPU_WORKER_MODE: "${NPU_WORKER_MODE:-isolated}"' in compose

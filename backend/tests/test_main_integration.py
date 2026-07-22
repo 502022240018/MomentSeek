@@ -118,6 +118,7 @@ def test_health_endpoint_serializes_release_manifest_metadata(monkeypatch, tmp_p
     assert body["status"] == "ok"
     assert body["env_profile"] == "staging.ascend"
     assert body["release_id"] == "2026-07-03-health"
+    assert body["model_idle_policy"] == settings.model_idle_policy
     assert body["indexer_mode"] == settings.indexer_mode
     assert body["npu_worker_mode"] == settings.npu_worker_mode
     assert body["git_commit"] == "abc123"

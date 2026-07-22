@@ -7,6 +7,7 @@ import sys
 import time
 import types
 import wave
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterable
@@ -438,6 +439,88 @@ def _join_word_texts(parts: list[str]) -> str:
     return text.strip()
 
 
+@dataclass
+class _WhisperWordChunk:
+    words: list[str] = field(default_factory=list)
+    start_time: float | None = None
+    end_time: float | None = None
+
+    def add(self, text: str, start_time: float, end_time: float) -> None:
+        if self.start_time is None:
+            self.start_time = start_time
+        self.end_time = max(start_time, end_time)
+        self.words.append(text)
+
+    def flush(self) -> dict | None:
+        text = _join_word_texts(self.words)
+        result = None
+        if text and self.start_time is not None and self.end_time is not None:
+            result = {
+                "start_time": float(self.start_time),
+                "end_time": max(float(self.start_time), float(self.end_time)),
+                "text": text,
+            }
+        self.words.clear()
+        self.start_time = None
+        self.end_time = None
+        return result
+
+
+def _word_chunk_boundary(
+    text: str,
+    duration: float,
+    max_chunk_seconds: float,
+    soft_punctuation_seconds: float,
+) -> bool:
+    stripped = text.rstrip()
+    return (
+        (stripped.endswith(_STRONG_PUNCTUATION) and duration >= 1.5)
+        or (stripped.endswith(_SOFT_PUNCTUATION) and duration >= soft_punctuation_seconds)
+        or duration >= max_chunk_seconds
+    )
+
+
+def _split_faster_whisper_segment(
+    segment: object,
+    *,
+    max_chunk_seconds: float,
+    soft_punctuation_seconds: float,
+    speech_gap_seconds: float,
+) -> list[dict]:
+    segment_start = float(getattr(segment, "start", 0.0) or 0.0)
+    segment_end = float(getattr(segment, "end", segment_start) or segment_start)
+    words = list(getattr(segment, "words", None) or [])
+    if not words:
+        text = str(getattr(segment, "text", "") or "").strip()
+        return [{"start_time": segment_start, "end_time": max(segment_start, segment_end), "text": text}] if text else []
+    chunks = []
+    current = _WhisperWordChunk()
+    for word in words:
+        text = _word_text(word)
+        if not text:
+            continue
+        start_time = _word_start(word, segment_start)
+        end_time = _word_end(word, start_time)
+        if current.end_time is not None and start_time - current.end_time > speech_gap_seconds:
+            flushed = current.flush()
+            if flushed is not None:
+                chunks.append(flushed)
+        current.add(text, start_time, end_time)
+        if _word_chunk_boundary(
+            text,
+            float(current.end_time - current.start_time),
+            max_chunk_seconds,
+            soft_punctuation_seconds,
+        ):
+            flushed = current.flush()
+            if flushed is not None:
+                chunks.append(flushed)
+    flushed = current.flush()
+    if flushed is not None:
+        chunks.append(flushed)
+    return chunks
+
+
 def _split_faster_whisper_segments(
     segments: Iterable[object],
     *,
@@ -446,59 +529,13 @@ def _split_faster_whisper_segments(
     speech_gap_seconds: float = 1.5,
 ) -> list[dict]:
     chunks: list[dict] = []
-
-    def append_chunk(start_time: float, end_time: float, text: str) -> None:
-        cleaned = str(text or "").strip()
-        if cleaned:
-            chunks.append({
-                "start_time": float(start_time),
-                "end_time": max(float(start_time), float(end_time)),
-                "text": cleaned,
-            })
-
     for segment in segments:
-        segment_start = float(getattr(segment, "start", 0.0) or 0.0)
-        segment_end = float(getattr(segment, "end", segment_start) or segment_start)
-        words = list(getattr(segment, "words", None) or [])
-        if not words:
-            append_chunk(segment_start, segment_end, str(getattr(segment, "text", "") or ""))
-            continue
-
-        current_words: list[str] = []
-        current_start: float | None = None
-        current_end: float | None = None
-
-        def flush() -> None:
-            nonlocal current_words, current_start, current_end
-            if current_start is not None and current_end is not None:
-                append_chunk(current_start, current_end, _join_word_texts(current_words))
-            current_words = []
-            current_start = None
-            current_end = None
-
-        for word in words:
-            text = _word_text(word)
-            if not text:
-                continue
-            start_time = _word_start(word, segment_start)
-            end_time = _word_end(word, start_time)
-            if current_end is not None and start_time - current_end > speech_gap_seconds:
-                flush()
-            if current_start is None:
-                current_start = start_time
-            current_end = max(start_time, end_time)
-            current_words.append(text)
-
-            duration = current_end - current_start
-            if text.rstrip().endswith(_STRONG_PUNCTUATION) and duration >= 1.5:
-                flush()
-            elif text.rstrip().endswith(_SOFT_PUNCTUATION) and duration >= soft_punctuation_seconds:
-                flush()
-            elif duration >= max_chunk_seconds:
-                flush()
-
-        flush()
-
+        chunks.extend(_split_faster_whisper_segment(
+            segment,
+            max_chunk_seconds=max_chunk_seconds,
+            soft_punctuation_seconds=soft_punctuation_seconds,
+            speech_gap_seconds=speech_gap_seconds,
+        ))
     return chunks
 
 
@@ -828,6 +865,327 @@ def _empty_chunk_builder_stats() -> dict[str, int]:
     }
 
 
+@dataclass(frozen=True)
+class _AsrDecodeRequest:
+    audio_path: Path
+    engine: str
+    model_name: str
+    device: str
+    model_dir: str
+    requested_language: str
+    funasr_model: str
+    funasr_model_dir: str | None
+    faster_whisper_model_dir: str | None
+    model_local_files_only: bool
+    working_dir: str
+    vad_strategy: str
+
+
+@dataclass
+class _AsrDecodeResult:
+    raw_items: list[RawTranscriptItem]
+    used_engine: str
+    effective_model: str
+    requested_language: str
+    detected_language: str = ""
+    task: str = "transcribe"
+    tag_source: str = ""
+    language_route: str = ""
+    route_reason: str = ""
+    vad_strategy: str = "funasr_fsmn"
+    raw_parser_stats: dict[str, int] = field(default_factory=dict)
+
+
+def _resolve_decode_route(request: _AsrDecodeRequest) -> tuple[str, str, str, str, str]:
+    normalized_engine = request.engine.replace("_", "-").casefold()
+    route_engine = normalized_engine
+    detected_language = ""
+    language_route = ""
+    route_reason = ""
+    if normalized_engine == "auto":
+        if _is_auto_language(request.requested_language):
+            detected_language, probability = _detect_language_with_faster_whisper(
+                str(request.audio_path),
+                request.model_name,
+                request.device,
+                request.faster_whisper_model_dir or str(Path(request.model_dir).parent / "faster-whisper"),
+                local_files_only=request.model_local_files_only,
+            )
+            route_engine = "funasr" if _is_chinese_language(detected_language) else "faster-whisper"
+            language_route = f"auto:probe={detected_language or 'unknown'}->{route_engine}"
+            route_reason = f"auto language probe probability={probability:.3f}"
+        elif _is_chinese_language(request.requested_language):
+            route_engine = "funasr"
+            language_route = "auto:explicit-zh->funasr"
+            route_reason = "explicit Chinese ASR language"
+        else:
+            route_engine = "faster-whisper"
+            language_route = f"auto:explicit-{request.requested_language}->faster-whisper"
+            route_reason = "explicit non-Chinese ASR language"
+    decode_language = request.requested_language
+    if normalized_engine == "auto" and _is_auto_language(request.requested_language) and detected_language:
+        decode_language = detected_language
+    return route_engine, detected_language, decode_language, language_route, route_reason
+
+
+def _decode_faster_whisper_route(
+    request: _AsrDecodeRequest,
+    *,
+    decode_language: str,
+    detected_language: str,
+    language_route: str,
+    route_reason: str,
+    fallback: bool = False,
+) -> _AsrDecodeResult:
+    model_chunks, metadata = _faster_whisper(
+        audio_path=str(request.audio_path),
+        model_name=request.model_name,
+        device=request.device,
+        model_dir=request.faster_whisper_model_dir or str(Path(request.model_dir).parent / "faster-whisper"),
+        language=decode_language,
+        local_files_only=request.model_local_files_only,
+    )
+    detected_language = str(metadata.get("detected_language") or "")
+    if fallback:
+        language_route = language_route or "auto:funasr-fallback->faster-whisper"
+        route_reason = route_reason or "FunASR route failed; fell back to faster-whisper"
+    else:
+        language_route = language_route or f"faster-whisper:{detected_language or request.requested_language}"
+        route_reason = route_reason or (
+            "explicit language" if request.requested_language != "auto" else "explicit faster-whisper engine"
+        )
+    return _AsrDecodeResult(
+        raw_items=raw_items_from_chunks(model_chunks, source="faster_whisper"),
+        used_engine="faster-whisper",
+        effective_model=request.model_name,
+        requested_language=request.requested_language,
+        detected_language=detected_language,
+        task=str(metadata.get("task") or "transcribe"),
+        language_route=language_route,
+        route_reason=route_reason,
+        vad_strategy=str(metadata.get("vad_strategy") or request.vad_strategy),
+    )
+
+
+def _decode_funasr_route(
+    request: _AsrDecodeRequest,
+    *,
+    normalized_engine: str,
+    decode_language: str,
+    detected_language: str,
+    language_route: str,
+    route_reason: str,
+) -> _AsrDecodeResult:
+    try:
+        model_chunks = _funasr(
+            str(request.audio_path),
+            request.funasr_model,
+            request.device,
+            model_root=request.funasr_model_dir or str(Path(request.model_dir).parent / "funasr"),
+            local_files_only=request.model_local_files_only,
+            language=request.requested_language,
+            vad_strategy=request.vad_strategy,
+            temp_dir=Path(request.working_dir) / "asr_silero_clips",
+        )
+    except Exception:
+        if normalized_engine == "funasr":
+            raise
+        return _decode_faster_whisper_route(
+            request,
+            decode_language=decode_language,
+            detected_language=detected_language,
+            language_route=language_route,
+            route_reason=route_reason,
+            fallback=True,
+        )
+    if (
+        detected_language
+        or request.requested_language == "zh"
+        or "zh" in request.funasr_model.casefold()
+        or "paraformer" in request.funasr_model.casefold()
+    ):
+        detected_language = detected_language or "zh"
+    return _AsrDecodeResult(
+        raw_items=raw_items_from_chunks(model_chunks, source="funasr"),
+        used_engine="funasr",
+        effective_model=request.funasr_model,
+        requested_language=request.requested_language,
+        detected_language=detected_language,
+        tag_source="sensevoice" if _is_sensevoice_model(request.funasr_model) else "",
+        language_route=language_route,
+        route_reason=route_reason,
+        vad_strategy=request.vad_strategy,
+    )
+
+
+def _decode_whisper_route(
+    request: _AsrDecodeRequest,
+    *,
+    language_route: str,
+    route_reason: str,
+) -> _AsrDecodeResult:
+    model_chunks, metadata = _whisper(
+        str(request.audio_path),
+        request.model_name,
+        request.device,
+        request.model_dir,
+        request.requested_language,
+        local_files_only=request.model_local_files_only,
+    )
+    detected_language = str(metadata.get("detected_language") or "")
+    return _AsrDecodeResult(
+        raw_items=raw_items_from_chunks(model_chunks, source="whisper"),
+        used_engine="whisper",
+        effective_model=request.model_name,
+        requested_language=request.requested_language,
+        detected_language=detected_language,
+        task=str(metadata.get("task") or "transcribe"),
+        language_route=language_route or f"whisper:{detected_language or request.requested_language}",
+        route_reason=route_reason or (
+            "explicit language" if request.requested_language != "auto" else "explicit whisper engine"
+        ),
+        vad_strategy=request.vad_strategy,
+    )
+
+
+def _decode_audio(request: _AsrDecodeRequest) -> _AsrDecodeResult:
+    route_engine, detected, decode_language, language_route, route_reason = _resolve_decode_route(request)
+    normalized_engine = request.engine.replace("_", "-").casefold()
+    if route_engine == "funasr":
+        return _decode_funasr_route(
+            request,
+            normalized_engine=normalized_engine,
+            decode_language=decode_language,
+            detected_language=detected,
+            language_route=language_route,
+            route_reason=route_reason,
+        )
+    if route_engine == "faster-whisper":
+        return _decode_faster_whisper_route(
+            request,
+            decode_language=decode_language,
+            detected_language=detected,
+            language_route=language_route,
+            route_reason=route_reason,
+        )
+    return _decode_whisper_route(request, language_route=language_route, route_reason=route_reason)
+
+
+def _no_audio_result(
+    output_path: str,
+    semantic_target: Path | None,
+    *,
+    model_name: str,
+    requested_language: str,
+    vad_strategy: str,
+) -> dict:
+    _save_asr_npz(output_path, [], np.empty((0, 0), dtype=np.float16), np.empty((0,), dtype=np.int32))
+    if semantic_target is not None:
+        semantic_target.unlink(missing_ok=True)
+    return {
+        "chunks": 0,
+        "raw_chunks": 0,
+        "raw_items": 0,
+        "retrieval_chunks": 0,
+        "engine": "no_audio",
+        "model": model_name,
+        "language": requested_language,
+        "task": "transcribe",
+        "requested_language": requested_language,
+        "detected_language": "",
+        "language_route": "no_audio",
+        "route_reason": "no audio stream found",
+        "vad_strategy": vad_strategy,
+        "raw_parser_stats": {},
+        "chunk_builder_stats": _empty_chunk_builder_stats(),
+        "text_profile": asr_text_profile([]),
+        "schema_version": 3,
+        "decode_status": "empty",
+        "semantic_status": "empty",
+        "semantic_chunks": 0,
+        "warning": "no audio stream found",
+    }
+
+
+def _build_asr_semantic_result(
+    chunks: list[dict],
+    *,
+    enabled: bool,
+    target: Path | None,
+    model_name: str,
+    model_dir: str,
+    device: str,
+    batch_size: int,
+    local_files_only: bool,
+) -> dict:
+    if not enabled:
+        if target is not None:
+            target.unlink(missing_ok=True)
+        return {
+            "embeddings": np.empty((0, 0), dtype=np.float16),
+            "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
+            "semantic_chunks": 0,
+            "semantic_status": "disabled",
+        }
+    try:
+        return build_text_semantic_arrays(
+            chunks=chunks,
+            model_name=model_name,
+            model_dir=model_dir,
+            device=resolve_text_embedding_device(device, cuda_enabled=False),
+            batch_size=batch_size,
+            local_files_only=local_files_only,
+        )
+    except Exception as exc:
+        if target is not None:
+            target.unlink(missing_ok=True)
+        return {
+            "embeddings": np.empty((0, 0), dtype=np.float16),
+            "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
+            "semantic_chunks": 0,
+            "semantic_model": model_name,
+            "semantic_status": "unavailable",
+            "semantic_error": str(exc),
+        }
+
+
+def _asr_result_payload(
+    decode: _AsrDecodeResult,
+    chunks: list[dict],
+    chunk_builder_stats: dict[str, int],
+    semantic_result: dict,
+) -> dict:
+    result = {
+        "chunks": len(chunks),
+        "raw_chunks": len(decode.raw_items),
+        "raw_items": len(decode.raw_items),
+        "retrieval_chunks": len(chunks),
+        "engine": decode.used_engine,
+        "model": decode.effective_model,
+        "language": decode.detected_language or decode.requested_language,
+        "task": decode.task,
+        "requested_language": decode.requested_language,
+        "detected_language": decode.detected_language,
+        "language_route": decode.language_route or f"{decode.used_engine}:{decode.detected_language or decode.requested_language}",
+        "route_reason": decode.route_reason or (
+            "explicit language" if decode.requested_language != "auto" else "default auto language"
+        ),
+        "vad_strategy": decode.vad_strategy,
+        "raw_parser_stats": decode.raw_parser_stats,
+        "chunk_builder_stats": chunk_builder_stats,
+        "text_profile": asr_text_profile(chunk.get("text", "") for chunk in chunks),
+        "tag_source": decode.tag_source,
+        "schema_version": 3,
+        "decode_status": "complete" if chunks else "empty",
+    }
+    result.update({
+        key: value
+        for key, value in semantic_result.items()
+        if key not in {"embeddings", "embedding_chunk_indices"}
+    })
+    return result
+
+
 def build_asr_index(
     video_path: str,
     output_path: str,
@@ -854,247 +1212,75 @@ def build_asr_index(
     debug_output_dir: str | None = None,
     vad_strategy: str = "funasr_fsmn",
 ) -> dict:
-    effective_model = model_name
-    semantic_result: dict | None = None
     semantic_target = Path(semantic_output_path) if semantic_output_path else None
     requested_language = language or "auto"
-    detected_language = ""
-    task = "transcribe"
-    raw_parser_stats: dict[str, int] = {}
-    tag_source = ""
-    language_route = ""
-    route_reason = ""
-
     if sidecar_path:
-        raw_items = raw_items_from_chunks(load_sidecar(sidecar_path), source="sidecar")
-        used_engine = "sidecar"
+        decode = _AsrDecodeResult(
+            raw_items=raw_items_from_chunks(load_sidecar(sidecar_path), source="sidecar"),
+            used_engine="sidecar",
+            effective_model=model_name,
+            requested_language=requested_language,
+            vad_strategy=vad_strategy,
+        )
     else:
         try:
             audio_path = extract_audio(video_path, Path(working_dir) / "audio.wav")
         except subprocess.CalledProcessError:
-            chunks: list[dict] = []
-            used_engine = "no_audio"
-            empty_chunk_builder_stats = _empty_chunk_builder_stats()
-            _save_asr_npz(output_path, chunks, np.empty((0, 0), dtype=np.float16), np.empty((0,), dtype=np.int32))
-            if semantic_target is not None:
-                semantic_target.unlink(missing_ok=True)
-            return {
-                "chunks": 0,
-                "raw_chunks": 0,
-                "raw_items": 0,
-                "retrieval_chunks": 0,
-                "engine": used_engine,
-                "model": effective_model,
-                "language": requested_language,
-                "task": task,
-                "requested_language": requested_language,
-                "detected_language": detected_language,
-                "language_route": "no_audio",
-                "route_reason": "no audio stream found",
-                "vad_strategy": vad_strategy,
-                "raw_parser_stats": {},
-                "chunk_builder_stats": empty_chunk_builder_stats,
-                "text_profile": asr_text_profile([]),
-                "schema_version": 3,
-                "decode_status": "empty",
-                "semantic_status": "empty",
-                "semantic_chunks": 0,
-                "warning": "no audio stream found",
-            }
-
-        normalized_engine = engine.replace("_", "-").casefold()
-        route_engine = normalized_engine
-        if normalized_engine == "auto":
-            if _is_auto_language(requested_language):
-                probe_language, probe_probability = _detect_language_with_faster_whisper(
-                    str(audio_path),
-                    model_name,
-                    device,
-                    faster_whisper_model_dir or str(Path(model_dir).parent / "faster-whisper"),
-                    local_files_only=model_local_files_only,
-                )
-                detected_language = probe_language
-                if _is_chinese_language(probe_language):
-                    route_engine = "funasr"
-                else:
-                    route_engine = "faster-whisper"
-                language_route = f"auto:probe={probe_language or 'unknown'}->{route_engine}"
-                route_reason = f"auto language probe probability={probe_probability:.3f}"
-            elif _is_chinese_language(requested_language):
-                route_engine = "funasr"
-                language_route = "auto:explicit-zh->funasr"
-                route_reason = "explicit Chinese ASR language"
-            else:
-                route_engine = "faster-whisper"
-                language_route = f"auto:explicit-{requested_language}->faster-whisper"
-                route_reason = "explicit non-Chinese ASR language"
-
-        decode_language = requested_language
-        if normalized_engine == "auto" and _is_auto_language(requested_language) and detected_language:
-            decode_language = detected_language
-
-        if route_engine == "funasr":
-            try:
-                model_chunks = _funasr(
-                    str(audio_path),
-                    funasr_model,
-                    device,
-                    model_root=funasr_model_dir or str(Path(model_dir).parent / "funasr"),
-                    local_files_only=model_local_files_only,
-                    language=requested_language,
-                    vad_strategy=vad_strategy,
-                    temp_dir=Path(working_dir) / "asr_silero_clips",
-                )
-                raw_items = raw_items_from_chunks(model_chunks, source="funasr")
-                used_engine = "funasr"
-                effective_model = funasr_model
-                if _is_sensevoice_model(funasr_model):
-                    tag_source = "sensevoice"
-                if (
-                    detected_language
-                    or requested_language == "zh"
-                    or "zh" in funasr_model.casefold()
-                    or "paraformer" in funasr_model.casefold()
-                ):
-                    detected_language = detected_language or "zh"
-            except Exception:
-                if normalized_engine == "funasr":
-                    raise
-                model_chunks, whisper_metadata = _faster_whisper(
-                    audio_path=str(audio_path),
-                    model_name=model_name,
-                    device=device,
-                    model_dir=faster_whisper_model_dir or str(Path(model_dir).parent / "faster-whisper"),
-                    language=decode_language,
-                    local_files_only=model_local_files_only,
-                )
-                raw_items = raw_items_from_chunks(model_chunks, source="faster_whisper")
-                used_engine = "faster-whisper"
-                task = str(whisper_metadata.get("task") or task)
-                detected_language = str(whisper_metadata.get("detected_language") or "")
-                vad_strategy = str(whisper_metadata.get("vad_strategy") or vad_strategy)
-                language_route = language_route or "auto:funasr-fallback->faster-whisper"
-                route_reason = route_reason or "FunASR route failed; fell back to faster-whisper"
-        elif route_engine == "faster-whisper":
-            model_chunks, whisper_metadata = _faster_whisper(
-                audio_path=str(audio_path),
+            return _no_audio_result(
+                output_path,
+                semantic_target,
                 model_name=model_name,
-                device=device,
-                model_dir=faster_whisper_model_dir or str(Path(model_dir).parent / "faster-whisper"),
-                language=decode_language,
-                local_files_only=model_local_files_only,
+                requested_language=requested_language,
+                vad_strategy=vad_strategy,
             )
-            raw_items = raw_items_from_chunks(model_chunks, source="faster_whisper")
-            used_engine = "faster-whisper"
-            task = str(whisper_metadata.get("task") or task)
-            detected_language = str(whisper_metadata.get("detected_language") or "")
-            vad_strategy = str(whisper_metadata.get("vad_strategy") or vad_strategy)
-            language_route = language_route or f"{used_engine}:{detected_language or requested_language}"
-            route_reason = route_reason or ("explicit language" if requested_language != "auto" else "explicit faster-whisper engine")
-        else:
-            model_chunks, whisper_metadata = _whisper(
-                str(audio_path),
-                model_name,
-                device,
-                model_dir,
-                requested_language,
-                local_files_only=model_local_files_only,
-            )
-            raw_items = raw_items_from_chunks(model_chunks, source="whisper")
-            used_engine = "whisper"
-            task = str(whisper_metadata.get("task") or task)
-            detected_language = str(whisper_metadata.get("detected_language") or "")
-            language_route = language_route or f"{used_engine}:{detected_language or requested_language}"
-            route_reason = route_reason or ("explicit language" if requested_language != "auto" else "explicit whisper engine")
+        decode = _decode_audio(_AsrDecodeRequest(
+            audio_path=Path(audio_path),
+            engine=engine,
+            model_name=model_name,
+            device=device,
+            model_dir=model_dir,
+            requested_language=requested_language,
+            funasr_model=funasr_model,
+            funasr_model_dir=funasr_model_dir,
+            faster_whisper_model_dir=faster_whisper_model_dir,
+            model_local_files_only=model_local_files_only,
+            working_dir=working_dir,
+            vad_strategy=vad_strategy,
+        ))
 
     retrieval_chunks, chunk_builder_stats = build_retrieval_chunks(
-        raw_items,
+        decode.raw_items,
         config=RetrievalChunkConfig(),
     )
     chunks = [chunk.to_search_dict() for chunk in retrieval_chunks]
-
-    if not semantic_enabled:
-        if semantic_target is not None:
-            semantic_target.unlink(missing_ok=True)
-        semantic_result = {
-            "embeddings": np.empty((0, 0), dtype=np.float16),
-            "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
-            "semantic_chunks": 0,
-            "semantic_status": "disabled",
-        }
-    else:
-        try:
-            resolved_device = resolve_text_embedding_device(semantic_device, cuda_enabled=False)
-            semantic_result = build_text_semantic_arrays(
-                chunks=chunks,
-                model_name=semantic_model,
-                model_dir=semantic_model_dir or str(Path(model_dir).parent / "text-embeddings"),
-                device=resolved_device,
-                batch_size=semantic_batch_size,
-                local_files_only=semantic_local_files_only,
-            )
-        except Exception as exc:
-            # Keep ASR itself usable even if the optional semantic model is not
-            # installed or unavailable. Search falls back to lexical matching.
-            if semantic_target is not None:
-                semantic_target.unlink(missing_ok=True)
-            semantic_result = {
-                "embeddings": np.empty((0, 0), dtype=np.float16),
-                "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
-                "semantic_chunks": 0,
-                "semantic_model": semantic_model,
-                "semantic_status": "unavailable",
-                "semantic_error": str(exc),
-            }
+    semantic_result = _build_asr_semantic_result(
+        chunks,
+        enabled=semantic_enabled,
+        target=semantic_target,
+        model_name=semantic_model,
+        model_dir=semantic_model_dir or str(Path(model_dir).parent / "text-embeddings"),
+        device=semantic_device,
+        batch_size=semantic_batch_size,
+        local_files_only=semantic_local_files_only,
+    )
 
     debug_dir = Path(debug_output_dir) if debug_output_dir else Path(output_path).parent / "debug"
     write_asr_debug_artifacts(
         debug_dir=debug_dir,
         enabled=debug_artifacts_enabled,
         save_raw_transcript=save_raw_transcript,
-        raw_items=raw_items,
+        raw_items=decode.raw_items,
         retrieval_chunks=retrieval_chunks,
-        repair_stats={**chunk_builder_stats, **raw_parser_stats},
+        repair_stats={**chunk_builder_stats, **decode.raw_parser_stats},
     )
 
     _save_asr_npz(
         output_path,
         chunks,
-        np.asarray(semantic_result["embeddings"], dtype=np.float16)
-        if semantic_result is not None
-        else np.empty((0, 0), dtype=np.float16),
-        np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32)
-        if semantic_result is not None
-        else np.empty((0,), dtype=np.int32),
+        np.asarray(semantic_result["embeddings"], dtype=np.float16),
+        np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32),
     )
-    result = {
-        "chunks": len(chunks),
-        "raw_chunks": len(raw_items),
-        "raw_items": len(raw_items),
-        "retrieval_chunks": len(chunks),
-        "engine": used_engine,
-        "model": effective_model,
-        "language": detected_language or requested_language,
-        "task": task,
-        "requested_language": requested_language,
-        "detected_language": detected_language,
-        "language_route": language_route or f"{used_engine}:{detected_language or requested_language}",
-        "route_reason": route_reason or ("explicit language" if requested_language != "auto" else "default auto language"),
-        "vad_strategy": vad_strategy,
-        "raw_parser_stats": raw_parser_stats,
-        "chunk_builder_stats": chunk_builder_stats,
-        "text_profile": asr_text_profile(chunk.get("text", "") for chunk in chunks),
-        "tag_source": tag_source,
-        "schema_version": 3,
-        "decode_status": "complete" if chunks else "empty",
-    }
-    if semantic_result is not None:
-        result.update({
-            key: value
-            for key, value in semantic_result.items()
-            if key not in {"embeddings", "embedding_chunk_indices"}
-        })
-    return result
+    return _asr_result_payload(decode, chunks, chunk_builder_stats, semantic_result)
 
 
 def _save_asr_npz(

@@ -154,28 +154,17 @@ def _semantic_arrays(data) -> tuple[np.ndarray | None, np.ndarray | None]:
     return np.asarray(embeddings, dtype=np.float32), indices
 
 
-def _visual_candidates(
-    data,
-    query: np.ndarray,
-    video_id: str,
-    duration_ms: int,
-    segment_ms: int,
-    profile: str = "balanced",
-    limit: int = 72,
-    segment_strategy: str = "fixed",
-) -> list[Candidate]:
+def _visual_index_arrays(data) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
     required = {"frame_embeddings", "frame_times_ms", "segment_frame_offsets"}
     if not required.issubset(set(data.files)):
         raise ValueError("visual v3 索引缺少必要数组，请重跑 visual 索引")
-    frame_embeddings = np.asarray(data["frame_embeddings"], dtype=np.float32)
+    embeddings = np.asarray(data["frame_embeddings"], dtype=np.float32)
     frame_times_ms = data["frame_times_ms"].astype(np.int32)
     offsets = data["segment_frame_offsets"].astype(np.int32)
-    if frame_embeddings.ndim != 2 or len(frame_embeddings) != len(frame_times_ms):
+    if embeddings.ndim != 2 or len(embeddings) != len(frame_times_ms):
         raise ValueError("visual v3 索引数组长度不一致，请重跑 visual 索引")
     if len(offsets) < 2 or offsets[0] != 0 or offsets[-1] != len(frame_times_ms) or np.any(np.diff(offsets) < 0):
         raise ValueError("visual v3 segment_frame_offsets 无效，请重跑 visual 索引")
-    if not len(frame_embeddings):
-        return []
     segment_times_ms = None
     if "segment_times_ms" in data.files:
         segment_times_ms = data["segment_times_ms"].astype(np.int32)
@@ -183,9 +172,14 @@ def _visual_candidates(
             raise ValueError("visual v3 segment_times_ms 无效，请重跑 visual 索引")
         if np.any(segment_times_ms[:, 1] < segment_times_ms[:, 0]):
             raise ValueError("visual v3 segment_times_ms 时间范围无效，请重跑 visual 索引")
+    return embeddings, frame_times_ms, offsets, segment_times_ms
 
-    query = normalize(query)
-    frame_scores = frame_embeddings @ query
+
+def _visual_segment_scores(
+    frame_scores: np.ndarray,
+    frame_times_ms: np.ndarray,
+    offsets: np.ndarray,
+) -> tuple[list[int], np.ndarray, list[float], list[float], list[int]]:
     segment_ids: list[int] = []
     raw_scores: list[float] = []
     top3_scores: list[float] = []
@@ -203,10 +197,76 @@ def _visual_candidates(
         top3_scores.append(float(np.mean(top_values[:min(3, len(top_values))])))
         mean_scores.append(float(np.mean(bucket_scores)))
         best_times_ms.append(int(frame_times_ms[start + int(order[0])]))
+    return segment_ids, np.asarray(raw_scores, dtype=np.float32), top3_scores, mean_scores, best_times_ms
 
-    if not raw_scores:
+
+def _visual_decision(
+    profile: str,
+    reliable: bool,
+    local_index: int,
+    fallback_indices: set[int],
+    raw_score: float,
+    ranking_score: float,
+    percentile: float,
+    z_score: float,
+    sample_count: int,
+) -> tuple[str, bool, str]:
+    if not reliable:
+        decision, above = ("fallback", True) if local_index in fallback_indices else ("weak", False)
+        detail = (
+            f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
+            f" · distribution fallback (n={sample_count})"
+        )
+        return decision, above, detail
+    if z_score >= 2.0 or percentile >= 0.975:
+        decision, above = "strong", True
+    elif percentile >= 0.80:
+        qualifies = not (
+            (profile == "balanced" and not (z_score >= 1.0 or percentile >= 0.90))
+            or profile == "precision"
+        )
+        decision, above = (("fuzzy", True) if qualifies else ("weak", False))
+    else:
+        decision, above = "weak", False
+    detail = (
+        f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
+        f" · percentile={percentile * 100:.1f}% · robust_z={z_score:.2f}"
+    )
+    return decision, above, detail
+
+
+def _visual_segment_bounds(
+    segment_id: int,
+    segment_times_ms: np.ndarray | None,
+    segment_ms: int,
+    duration_ms: int,
+) -> tuple[int, int, str]:
+    if segment_times_ms is not None:
+        start_ms, end_ms = [int(value) for value in segment_times_ms[segment_id]]
+        return start_ms, end_ms, "explicit"
+    start_ms = segment_id * segment_ms
+    end_ms = min((segment_id + 1) * segment_ms, duration_ms or (segment_id + 1) * segment_ms)
+    return start_ms, end_ms, "fixed"
+
+
+def _visual_candidates(
+    data,
+    query: np.ndarray,
+    video_id: str,
+    duration_ms: int,
+    segment_ms: int,
+    profile: str = "balanced",
+    limit: int = 72,
+    segment_strategy: str = "fixed",
+) -> list[Candidate]:
+    frame_embeddings, frame_times_ms, offsets, segment_times_ms = _visual_index_arrays(data)
+    if not len(frame_embeddings):
         return []
-    raw_values = np.asarray(raw_scores, dtype=np.float32)
+    segment_ids, raw_values, top3_scores, mean_scores, best_times_ms = _visual_segment_scores(
+        frame_embeddings @ normalize(query), frame_times_ms, offsets
+    )
+    if not len(raw_values):
+        return []
     distribution = robust_distribution(raw_values)
     z_scores = distribution["z_scores"]
     percentiles = distribution["percentiles"]
@@ -223,42 +283,25 @@ def _visual_candidates(
         z_score = float(z_scores[local_index])
         percentile = float(percentiles[local_index])
         ranking_score = visual_confidence(raw_score)
-        if reliable:
-            if z_score >= 2.0 or percentile >= 0.975:
-                decision, above = "strong", True
-            elif percentile >= 0.80:
-                qualifies = not (
-                    (profile == "balanced" and not (z_score >= 1.0 or percentile >= 0.90))
-                    or profile == "precision"
-                )
-                decision, above = ("fuzzy", True) if qualifies else ("weak", False)
-            else:
-                decision, above = "weak", False
-            detail = (
-                f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
-                f" · percentile={percentile * 100:.1f}% · robust_z={z_score:.2f}"
-            )
-        else:
-            if local_index in fallback_indices:
-                decision, above = "fallback", True
-            else:
-                decision, above = "weak", False
-            detail = (
-                f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
-                f" · distribution fallback (n={len(raw_values)})"
-            )
+        decision, above, detail = _visual_decision(
+            profile,
+            reliable,
+            local_index,
+            fallback_indices,
+            raw_score,
+            ranking_score,
+            percentile,
+            z_score,
+            len(raw_values),
+        )
 
         top3 = float(top3_scores[local_index])
         mean = float(mean_scores[local_index])
         best_ms = int(best_times_ms[local_index])
         detail += f" · best_frame={best_ms / 1000:.2f}s · top1={raw_score:.3f} · top3={top3:.3f} · mean={mean:.3f}"
-        if segment_times_ms is not None:
-            start_ms, end_ms = [int(value) for value in segment_times_ms[segment_id]]
-            time_source = "explicit"
-        else:
-            start_ms = segment_id * segment_ms
-            end_ms = min((segment_id + 1) * segment_ms, duration_ms or (segment_id + 1) * segment_ms)
-            time_source = "fixed"
+        start_ms, end_ms, time_source = _visual_segment_bounds(
+            segment_id, segment_times_ms, segment_ms, duration_ms
+        )
         candidates.append(Candidate(
             video_id=video_id,
             start_time=_seconds(start_ms),
@@ -334,6 +377,58 @@ def _face_candidates(data, query: np.ndarray, video_id: str, limit: int, thresho
     return candidates
 
 
+def _semantic_chunk_scores(
+    chunk_count: int,
+    semantic_embeddings: np.ndarray | None,
+    embedding_chunk_indices: np.ndarray | None,
+    semantic_query: np.ndarray | None,
+    limit: int,
+) -> tuple[np.ndarray, np.ndarray, set[int]]:
+    scores = np.zeros(chunk_count, dtype=np.float32)
+    cosines_by_chunk = np.full(chunk_count, np.nan, dtype=np.float32)
+    if (
+        semantic_embeddings is None
+        or embedding_chunk_indices is None
+        or semantic_query is None
+        or not len(semantic_embeddings)
+        or not len(embedding_chunk_indices)
+    ):
+        return scores, cosines_by_chunk, set()
+    cosines = semantic_embeddings @ normalize(semantic_query)
+    percentiles = robust_distribution(cosines)["percentiles"]
+    for local_index, chunk_index in enumerate(embedding_chunk_indices):
+        chunk_index = int(chunk_index)
+        if not 0 <= chunk_index < chunk_count:
+            continue
+        cosine = float(cosines[local_index])
+        percentile = float(percentiles[local_index]) if len(percentiles) else 0.0
+        cosines_by_chunk[chunk_index] = cosine
+        scores[chunk_index] = 0.7 * asr_semantic_confidence(cosine) + 0.3 * percentile
+    order = np.argsort(scores)[::-1]
+    return scores, cosines_by_chunk, set(int(index) for index in order[:min(len(order), limit)])
+
+
+def _text_candidate_decision(lexical: float, semantic: float) -> tuple[str, bool]:
+    semantic_hit = semantic >= 0.55
+    lexical_hit = lexical >= 0.25
+    if semantic_hit and lexical_hit:
+        return "semantic_lexical_hit", True
+    if semantic_hit:
+        return "semantic_hit", True
+    if lexical_hit:
+        return "lexical_hit", True
+    return "weak", False
+
+
+def _text_candidate_evidence(detail: str, lexical: float, semantic: float, cosine: float | None) -> str:
+    metrics = [f"lexical={lexical:.3f}"]
+    if cosine is None:
+        metrics.append("semantic=unavailable")
+    else:
+        metrics.extend((f"semantic={semantic:.3f}", f"semantic_cosine={cosine:.3f}"))
+    return f"{detail} · {' · '.join(metrics)}"
+
+
 def _asr_candidates(
     chunks: list[dict],
     query_text: str,
@@ -348,32 +443,9 @@ def _asr_candidates(
         return []
 
     lexical_scores = np.asarray([lexical_score(query_text, chunk.get("text", "")) for chunk in chunks], dtype=np.float32)
-    semantic_scores = np.zeros(len(chunks), dtype=np.float32)
-    semantic_cosines = np.full(len(chunks), np.nan, dtype=np.float32)
-    semantic_available = (
-        semantic_embeddings is not None
-        and embedding_chunk_indices is not None
-        and semantic_query is not None
-        and len(semantic_embeddings) > 0
-        and len(embedding_chunk_indices) > 0
+    semantic_scores, semantic_cosines, semantic_top_indices = _semantic_chunk_scores(
+        len(chunks), semantic_embeddings, embedding_chunk_indices, semantic_query, limit
     )
-
-    semantic_top_indices: set[int] = set()
-    if semantic_available:
-        cosines = semantic_embeddings @ normalize(semantic_query)
-        distribution = robust_distribution(cosines)
-        percentiles = distribution["percentiles"]
-        for local_index, chunk_index in enumerate(embedding_chunk_indices):
-            if 0 <= int(chunk_index) < len(chunks):
-                cosine = float(cosines[local_index])
-                percentile = float(percentiles[local_index]) if len(percentiles) else 0.0
-                semantic_cosines[int(chunk_index)] = cosine
-                semantic_scores[int(chunk_index)] = (
-                    0.7 * asr_semantic_confidence(cosine)
-                    + 0.3 * percentile
-                )
-        order = np.argsort(semantic_scores)[::-1]
-        semantic_top_indices = set(int(index) for index in order[:min(len(order), limit)])
 
     combined_scores = np.maximum(lexical_scores, 0.65 * semantic_scores + 0.35 * lexical_scores)
     candidate_indices = [
@@ -388,17 +460,7 @@ def _asr_candidates(
         semantic = float(semantic_scores[index])
         semantic_cosine = None if np.isnan(semantic_cosines[index]) else float(semantic_cosines[index])
         score = float(combined_scores[index])
-        semantic_hit = semantic >= 0.55
-        lexical_hit = lexical >= 0.25
-        above = semantic_hit or lexical_hit
-        if semantic_hit and lexical_hit:
-            decision = "semantic_lexical_hit"
-        elif semantic_hit:
-            decision = "semantic_hit"
-        elif lexical_hit:
-            decision = "lexical_hit"
-        else:
-            decision = "weak"
+        decision, above = _text_candidate_decision(lexical, semantic)
 
         detail = str(chunk.get("text", "")).strip()
         display_features = {}
@@ -406,13 +468,7 @@ def _asr_candidates(
         if modality == "ocr":
             detail, display_features = _ocr_display_text(query_text, chunk)
 
-        metrics = [f"lexical={lexical:.3f}"]
-        if semantic_cosine is not None:
-            metrics.append(f"semantic={semantic:.3f}")
-            metrics.append(f"semantic_cosine={semantic_cosine:.3f}")
-        else:
-            metrics.append("semantic=unavailable")
-        evidence = f"{detail} · {' · '.join(metrics)}"
+        evidence = _text_candidate_evidence(detail, lexical, semantic, semantic_cosine)
         start_ms = int(chunk.get("start_ms", round(float(chunk.get("start_time", 0)) * 1000)))
         end_ms = int(chunk.get("end_ms", round(float(chunk.get("end_time", 0)) * 1000)))
         # OCR chunks carry the sampled frame timestamp; ASR is audio-only so we fall
@@ -876,6 +932,75 @@ def _reserve_asr_lexical_results(results: list[SearchResult], limit: int) -> lis
     return reranked + remaining_above + below
 
 
+def _ocr_semantic_arrays(data) -> tuple[np.ndarray | None, np.ndarray | None]:
+    embeddings = data["embeddings"].astype(np.float32) if "embeddings" in data.files else None
+    if embeddings is not None and (embeddings.ndim != 2 or not embeddings.shape[0] or not embeddings.shape[1]):
+        embeddings = None
+    indices = (
+        data["embedding_frame_indices"].astype(np.int32)
+        if "embedding_frame_indices" in data.files
+        else None
+    )
+    if embeddings is not None and indices is None:
+        raise ValueError("ocr v3 索引缺少 embedding_frame_indices，请重跑 OCR 索引")
+    if embeddings is not None and len(indices) != embeddings.shape[0]:
+        raise ValueError("ocr v3 semantic 数组长度不一致，请重跑 OCR 索引")
+    return embeddings, indices
+
+
+def _fuse_candidate_groups(
+    candidates: list[Candidate],
+    videos: list[dict],
+    merge_gap: float,
+    max_result_seconds: float,
+) -> list[SearchResult]:
+    names = {video["id"]: video["name"] for video in videos}
+    weights = {"face": 0.55, "visual": 0.30, "ocr": 0.20, "asr": 0.15}
+    results = []
+    for group in _groups(candidates, merge_gap, max_result_seconds):
+        best_by_modality = {}
+        for item in group:
+            best_by_modality[item.modality] = max(best_by_modality.get(item.modality, -1), item.score)
+        denominator = sum(weights.get(name, 1) for name in best_by_modality)
+        score = sum(weights.get(name, 1) * value for name, value in best_by_modality.items()) / denominator
+        ranked = sorted(group, key=lambda value: value.score, reverse=True)
+        best_ms = next((item.best_ms for item in ranked if item.best_ms is not None), None)
+        video_id = group[0].video_id
+        group_start = min(item.start_time for item in group)
+        if best_ms is None:
+            best_ms = max(0, round(group_start * 1000))
+        group_decisions = {item.decision for item in group}
+        decision = next(
+            (
+                name
+                for name in (
+                    "strong", "fuzzy", "fallback", "absolute_hit", "semantic_lexical_hit",
+                    "semantic_hit", "lexical_hit", "weak",
+                )
+                if name in group_decisions
+            ),
+            "hit",
+        )
+        start_time = min(item.start_time for item in group)
+        end_time = max(item.end_time for item in group)
+        results.append(SearchResult(
+            video_id=video_id,
+            video_name=names.get(video_id, video_id),
+            start_time=start_time,
+            end_time=end_time,
+            score=score,
+            modalities=sorted(best_by_modality),
+            thumbnail_url=f"/api/videos/{video_id}/frame?time={best_ms / 1000:.3f}",
+            media_url=f"/api/videos/{video_id}/media",
+            clip_url=f"/api/videos/{video_id}/clip?start={start_time:.3f}&end={end_time:.3f}",
+            decision=decision,
+            above_threshold=any(item.above_threshold for item in group),
+            evidence=[_serialize_evidence(item) for item in group],
+        ))
+    results.sort(key=lambda item: (item.above_threshold, item.score), reverse=True)
+    return results
+
+
 class SearchEngine:
     def __init__(self, settings: Settings, catalog: Catalog):
         self.settings = settings
@@ -927,6 +1052,129 @@ class SearchEngine:
             )
         return self._text_encoders[key].encode([text], batch_size=1)[0]
 
+    def _selected_videos(self, video_ids: list[str] | None) -> list[dict]:
+        videos = self.catalog.list_videos()
+        if not video_ids:
+            return videos
+        allowed = set(video_ids)
+        return [video for video in videos if video["id"] in allowed]
+
+    def _resolve_face_query(self, text: str | None, image_path: str | None) -> np.ndarray | None:
+        if image_path:
+            return self._face().encode_reference(image_path)
+        if not text:
+            return None
+        entity = self.catalog.find_entity_in_text(text)
+        if entity and entity.get("embedding_path") and Path(entity["embedding_path"]).exists():
+            return np.load(entity["embedding_path"])["embedding"]
+        return None
+
+    def _visual_for_video(
+        self,
+        video: dict,
+        text: str | None,
+        image_path: str | None,
+        alpha: float,
+        profile: str,
+        limit: int,
+        visual_queries: dict[str, np.ndarray],
+    ) -> list[Candidate]:
+        index_dir = self.settings.index_dir / video["id"]
+        manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "visual")
+        with np.load(index_file, allow_pickle=False) as data:
+            visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
+            if visual_model not in visual_queries:
+                visual_queries[visual_model] = self._clip(visual_model).encode_query(text, image_path, alpha)
+            return _visual_candidates(
+                data,
+                visual_queries[visual_model],
+                video["id"],
+                int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
+                int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
+                profile,
+                limit * 3,
+                str(channel_manifest.get("segment_strategy") or "fixed"),
+            )
+
+    def _face_for_video(self, video: dict, face_query: np.ndarray, limit: int) -> list[Candidate]:
+        index_dir = self.settings.index_dir / video["id"]
+        _manifest, _channel_manifest, index_file = _channel_manifest_for(video, index_dir, "face")
+        with np.load(index_file, allow_pickle=False) as data:
+            return _face_candidates(data, face_query, video["id"], limit * 3, 0.35)
+
+    def _semantic_query(self, text: str, channel_manifest: dict, embeddings: np.ndarray | None) -> np.ndarray | None:
+        if embeddings is None:
+            return None
+        model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
+        try:
+            return self._encode_asr_query(text, model_name)
+        except Exception:
+            return None
+
+    def _asr_for_video(self, video: dict, text: str, limit: int) -> list[Candidate]:
+        index_dir = self.settings.index_dir / video["id"]
+        _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "asr")
+        with np.load(index_file, allow_pickle=False) as data:
+            embeddings, indices = _semantic_arrays(data)
+            return _asr_candidates(
+                _asr_chunks_from_npz(data),
+                text,
+                video["id"],
+                limit * 3,
+                semantic_embeddings=embeddings,
+                embedding_chunk_indices=indices,
+                semantic_query=self._semantic_query(text, channel_manifest, embeddings),
+            )
+
+    def _ocr_for_video(self, video: dict, text: str, limit: int) -> list[Candidate]:
+        index_dir = self.settings.index_dir / video["id"]
+        _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
+        if int(channel_manifest.get("schema_version") or 0) != 3:
+            raise ValueError(f"视频 {video.get('name') or video['id']} 的 OCR 索引不是重构后的 v3，请重跑 OCR 索引")
+        with np.load(index_file, allow_pickle=False) as data:
+            embeddings, indices = _ocr_semantic_arrays(data)
+            semantic_query = None
+            if embeddings is not None:
+                model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
+                semantic_query = self._encode_asr_query(text, model_name)
+            return _asr_candidates(
+                _ocr_chunks_from_npz(data),
+                text,
+                video["id"],
+                limit * 3,
+                modality="ocr",
+                semantic_embeddings=embeddings,
+                embedding_chunk_indices=indices,
+                semantic_query=semantic_query,
+            )
+
+    def _candidates_for_video(
+        self,
+        video: dict,
+        *,
+        text: str | None,
+        image_path: str | None,
+        modalities: list[str],
+        alpha: float,
+        limit: int,
+        visual_profile: str,
+        visual_queries: dict[str, np.ndarray],
+        face_query: np.ndarray | None,
+    ) -> list[Candidate]:
+        candidates = []
+        indexed = set(video.get("indexed_modalities") or [])
+        if "visual" in modalities and bool(text or image_path) and "visual" in indexed:
+            candidates.extend(self._visual_for_video(
+                video, text, image_path, alpha, visual_profile, limit, visual_queries
+            ))
+        if face_query is not None and "face" in indexed:
+            candidates.extend(self._face_for_video(video, face_query, limit))
+        if "asr" in modalities and text and "asr" in indexed:
+            candidates.extend(self._asr_for_video(video, text, limit))
+        if "ocr" in modalities and text and "ocr" in indexed:
+            candidates.extend(self._ocr_for_video(video, text, limit))
+        return candidates
+
     def search(
         self,
         text: str | None,
@@ -941,150 +1189,23 @@ class SearchEngine:
     ) -> list[dict]:
         if visual_profile not in {"recall", "balanced", "precision"}:
             raise ValueError("visual_profile 必须是 recall、balanced 或 precision")
-        videos = self.catalog.list_videos()
-        if video_ids:
-            allowed = set(video_ids)
-            videos = [video for video in videos if video["id"] in allowed]
+        videos = self._selected_videos(video_ids)
         candidates: list[Candidate] = []
-
         visual_queries: dict[str, np.ndarray] = {}
-        wants_visual = "visual" in modalities and bool(text or image_path)
-
-        face_query = None
-        if "face" in modalities:
-            if image_path:
-                face_query = self._face().encode_reference(image_path)
-            elif text:
-                entity = self.catalog.find_entity_in_text(text)
-                if entity and entity.get("embedding_path") and Path(entity["embedding_path"]).exists():
-                    face_query = np.load(entity["embedding_path"])["embedding"]
-
+        face_query = self._resolve_face_query(text, image_path) if "face" in modalities else None
         for video in videos:
-            index_dir = self.settings.index_dir / video["id"]
-            indexed_modalities = set(video.get("indexed_modalities") or [])
-            if wants_visual and "visual" in indexed_modalities:
-                manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "visual")
-                with np.load(index_file, allow_pickle=False) as data:
-                    visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
-                    if visual_model not in visual_queries:
-                        visual_queries[visual_model] = self._clip(visual_model).encode_query(text, image_path, alpha)
-                    visual_query = visual_queries[visual_model]
-                    candidates.extend(_visual_candidates(
-                        data,
-                        visual_query,
-                        video["id"],
-                        int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
-                        int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
-                        visual_profile,
-                        limit * 3,
-                        str(channel_manifest.get("segment_strategy") or "fixed"),
-                    ))
-            if face_query is not None and "face" in indexed_modalities:
-                _manifest, _channel_manifest, index_file = _channel_manifest_for(video, index_dir, "face")
-                with np.load(index_file, allow_pickle=False) as data:
-                    candidates.extend(_face_candidates(data, face_query, video["id"], limit * 3, 0.35))
-            if "asr" in modalities and text and "asr" in indexed_modalities:
-                _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "asr")
-                with np.load(index_file, allow_pickle=False) as data:
-                    semantic_embeddings, embedding_chunk_indices = _semantic_arrays(data)
-                    semantic_query = None
-                    if semantic_embeddings is not None:
-                        model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
-                        try:
-                            semantic_query = self._encode_asr_query(text, model_name)
-                        except Exception:
-                            semantic_query = None
-                    candidates.extend(_asr_candidates(
-                        _asr_chunks_from_npz(data),
-                        text,
-                        video["id"],
-                        limit * 3,
-                        semantic_embeddings=semantic_embeddings,
-                        embedding_chunk_indices=embedding_chunk_indices,
-                        semantic_query=semantic_query,
-                    ))
-            if "ocr" in modalities and text and "ocr" in indexed_modalities:
-                _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
-                if int(channel_manifest.get("schema_version") or 0) != 3:
-                    raise ValueError(f"视频 {video.get('name') or video['id']} 的 OCR 索引不是重构后的 v3，请重跑 OCR 索引")
-                with np.load(index_file, allow_pickle=False) as data:
-                    semantic_embeddings = data["embeddings"].astype(np.float32) if "embeddings" in data.files else None
-                    if semantic_embeddings is not None and (
-                        semantic_embeddings.ndim != 2
-                        or semantic_embeddings.shape[0] == 0
-                        or semantic_embeddings.shape[1] == 0
-                    ):
-                        semantic_embeddings = None
-                    embedding_chunk_indices = (
-                        data["embedding_frame_indices"].astype(np.int32)
-                        if "embedding_frame_indices" in data.files else None
-                    )
-                    if semantic_embeddings is not None and embedding_chunk_indices is None:
-                        raise ValueError("ocr v3 索引缺少 embedding_frame_indices，请重跑 OCR 索引")
-                    if (
-                        semantic_embeddings is not None
-                        and len(embedding_chunk_indices) != semantic_embeddings.shape[0]
-                    ):
-                        raise ValueError("ocr v3 semantic 数组长度不一致，请重跑 OCR 索引")
-                    semantic_query = None
-
-                    if semantic_embeddings is not None:
-                        model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
-                        semantic_query = self._encode_asr_query(text, model_name)
-
-                    ocr_chunks = _ocr_chunks_from_npz(data)
-
-                    candidates.extend(_asr_candidates(
-                        ocr_chunks,
-                        text,
-                        video["id"],
-                        limit * 3,
-                        modality="ocr",
-                        semantic_embeddings=semantic_embeddings,
-                        embedding_chunk_indices=embedding_chunk_indices,
-                        semantic_query=semantic_query,
-                    ))
-
-        names = {video["id"]: video["name"] for video in videos}
-        # Each modality score is calibrated to a comparable [0,1] scale, so these
-        # weights express modality priority, not scale fixes.
-        weights = {"face": 0.55, "visual": 0.30, "ocr": 0.20, "asr": 0.15}
-        results = []
-        for group in _groups(candidates, merge_gap, max_result_seconds):
-            best_by_modality = {}
-            for item in group:
-                best_by_modality[item.modality] = max(best_by_modality.get(item.modality, -1), item.score)
-            denominator = sum(weights.get(name, 1) for name in best_by_modality)
-            score = sum(weights.get(name, 1) * value for name, value in best_by_modality.items()) / denominator
-            ranked = sorted(group, key=lambda value: value.score, reverse=True)
-            best_ms = next((item.best_ms for item in ranked if item.best_ms is not None), None)
-            video_id = group[0].video_id
-            group_start = min(item.start_time for item in group)
-            if best_ms is None:
-                best_ms = max(0, round(group_start * 1000))
-            group_decisions = {item.decision for item in group}
-            decision = next(
-                (name for name in ("strong", "fuzzy", "fallback", "absolute_hit", "semantic_lexical_hit", "semantic_hit", "lexical_hit", "weak") if name in group_decisions),
-                "hit",
-            )
-            group_above = any(item.above_threshold for item in group)
-            results.append(SearchResult(
-                video_id=video_id,
-                video_name=names.get(video_id, video_id),
-                start_time=min(item.start_time for item in group),
-                end_time=max(item.end_time for item in group),
-                score=score,
-                modalities=sorted(best_by_modality),
-                thumbnail_url=f"/api/videos/{video_id}/frame?time={best_ms / 1000:.3f}",
-                media_url=f"/api/videos/{video_id}/media",
-                clip_url=f"/api/videos/{video_id}/clip?start={min(item.start_time for item in group):.3f}&end={max(item.end_time for item in group):.3f}",
-                decision=decision,
-                above_threshold=group_above,
-                evidence=[_serialize_evidence(item) for item in group],
+            candidates.extend(self._candidates_for_video(
+                video,
+                text=text,
+                image_path=image_path,
+                modalities=modalities,
+                alpha=alpha,
+                limit=limit,
+                visual_profile=visual_profile,
+                visual_queries=visual_queries,
+                face_query=face_query,
             ))
-        # Above-threshold results first (each block sorted by score), so the UI can
-        # draw a single divider where matches start dropping below threshold.
-        results.sort(key=lambda item: (item.above_threshold, item.score), reverse=True)
+        results = _fuse_candidate_groups(candidates, videos, merge_gap, max_result_seconds)
         if set(modalities) == {"asr"} and text:
             results = _reserve_asr_lexical_results(results, limit)
         result_limit = 500 if visual_profile == "recall" else limit

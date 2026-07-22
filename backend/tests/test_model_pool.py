@@ -1,8 +1,8 @@
 import time
 
 from app.db import Catalog
-from app.indexer_daemon import next_queued_job
 from app.indexer_daemon import execute_job
+from app.indexer_daemon import indexer_singleton_lock
 from app.model_pool import ModelPool
 from app.settings import Settings
 
@@ -80,26 +80,14 @@ def test_shutdown_frees_all():
     assert pool.keys() == []
 
 
-class _FakeCatalog:
-    def __init__(self, jobs):
-        self._jobs = jobs
-
-    def list_jobs(self):
-        return self._jobs
-
-
-def test_next_queued_job_oldest_first():
-    jobs = [
-        {"id": "b", "status": "queued", "created_at": "2026-06-26 02:00:00"},
-        {"id": "a", "status": "queued", "created_at": "2026-06-26 01:00:00"},
-        {"id": "c", "status": "running", "created_at": "2026-06-26 00:00:00"},
-    ]
-    assert next_queued_job(_FakeCatalog(jobs))["id"] == "a"
-
-
-def test_next_queued_job_none_when_no_queued():
-    jobs = [{"id": "x", "status": "completed", "created_at": "2026-06-26 00:00:00"}]
-    assert next_queued_job(_FakeCatalog(jobs)) is None
+def test_indexer_singleton_lock_rejects_second_owner_and_releases(tmp_path):
+    path = tmp_path / "indexer-daemon.lock"
+    with indexer_singleton_lock(path) as first:
+        with indexer_singleton_lock(path) as second:
+            assert first is True
+            assert second is False
+    with indexer_singleton_lock(path) as acquired_after_release:
+        assert acquired_after_release is True
 
 
 def test_daemon_dispatches_stage_to_isolated_pool(tmp_path):

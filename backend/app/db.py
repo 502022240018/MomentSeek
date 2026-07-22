@@ -172,6 +172,15 @@ class Catalog:
             rows = connection.execute(query, args).fetchall()
         return [self._decode_job(row) for row in rows]
 
+    def next_queued_job(self) -> dict | None:
+        """Return the oldest queued job without loading the full job history."""
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM jobs WHERE status='queued'
+                   ORDER BY created_at ASC, id ASC LIMIT 1"""
+            ).fetchone()
+        return self._decode_job(row) if row else None
+
     def update_job(self, job_id: str, **values) -> None:
         allowed = {"status", "stage", "progress", "error", "worker_pid", "metrics"}
         values = {key: value for key, value in values.items() if key in allowed}

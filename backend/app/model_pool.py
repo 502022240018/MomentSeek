@@ -9,15 +9,12 @@ from typing import Callable
 class ModelPool:
     """Process-local cache of heavy models with idle-timeout eviction.
 
-    Indexing models (CLIP ~8.6s, InsightFace ~2s, Whisper ~4s on 910B) plus the
-    one-off NPU kernel compile are otherwise paid on every job because each stage
-    runs in a fresh `process_exit` subprocess. Keeping the models resident across
-    jobs removes that ~14.5s/job. A background reaper frees idle entries (and the
-    ~2.3GB HBM they hold) after `idle_timeout` seconds, so on a shared NPU card we
-    only occupy memory while actively indexing — "warm pool + idle release".
+    Daemon workers use one pool per process to reuse expensive model loads and
+    accelerator compilation across jobs. A positive ``idle_timeout`` evicts idle
+    entries; a non-positive value keeps them resident until worker shutdown.
 
-    Thread-safety: `get` may be called concurrently; building happens outside the
-    lock (load is slow) and a double-check avoids two threads caching the same key.
+    Thread-safety: ``get`` may be called concurrently; building happens outside
+    the lock and a double-check avoids caching duplicate instances.
     """
 
     def __init__(
@@ -28,11 +25,14 @@ class ModelPool:
     ):
         self._idle_timeout = idle_timeout
         self._on_free = on_free
-        self._entries: dict[str, list] = {}  # key -> [obj, last_used_monotonic]
+        self._entries: dict[str, list] = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._reaper = threading.Thread(
-            target=self._reap_loop, args=(reap_interval,), name="model-pool-reaper", daemon=True
+            target=self._reap_loop,
+            args=(reap_interval,),
+            name="model-pool-reaper",
+            daemon=True,
         )
         self._reaper.start()
 
@@ -42,19 +42,17 @@ class ModelPool:
             if entry is not None:
                 entry[1] = time.monotonic()
                 return entry[0]
-        obj = factory()  # load outside the lock; it is slow
+        obj = factory()
         with self._lock:
             entry = self._entries.get(key)
-            if entry is not None:  # another thread loaded it meanwhile
+            if entry is not None:
                 entry[1] = time.monotonic()
-                self._free(obj)  # drop our duplicate
+                self._free(obj)
                 return entry[0]
             self._entries[key] = [obj, time.monotonic()]
             return obj
 
     def evict_idle(self) -> list[str]:
-        # Product mode uses a card dedicated to indexing. A non-positive timeout
-        # therefore means "resident until daemon/container shutdown".
         if self._idle_timeout <= 0:
             return []
         cutoff = time.monotonic() - self._idle_timeout
@@ -65,7 +63,7 @@ class ModelPool:
                 if last_used <= cutoff:
                     del self._entries[key]
                     evicted.append((key, obj))
-        for key, obj in evicted:
+        for _, obj in evicted:
             self._free(obj)
         return [key for key, _ in evicted]
 

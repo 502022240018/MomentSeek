@@ -620,6 +620,150 @@ class ClipEncoder:
         return self._encoder.encode_query(text, image_path, alpha=alpha)
 
 
+def _resolve_visual_segmentation(
+    video_path: str,
+    *,
+    segment_seconds: float,
+    segment_strategy: str,
+    duration_seconds: float | int | None,
+    min_segment_seconds: float,
+    max_segment_seconds: float,
+    shot_detector: str,
+    shot_detector_threshold: float,
+    decode_height: int,
+    prefer_ffmpeg: bool,
+) -> tuple[int, int, np.ndarray | None, str, str, str]:
+    segment_ms = max(1, int(round(float(segment_seconds) * 1000)))
+    requested_strategy = (segment_strategy or "fixed").strip().lower()
+    if requested_strategy not in {"fixed", "shot"}:
+        requested_strategy = "fixed"
+    try:
+        requested_detector = normalize_shot_detector(shot_detector)
+    except ValueError:
+        requested_detector = "simple"
+    duration_ms = int(round(float(duration_seconds or 0) * 1000))
+    if requested_strategy != "shot" or duration_ms <= 0:
+        return segment_ms, duration_ms, None, "fixed", requested_detector, "inferred_from_segment_ms"
+    min_segment_ms = max(1, int(round(float(min_segment_seconds) * 1000)))
+    max_segment_ms = max(min_segment_ms, int(round(float(max_segment_seconds) * 1000)))
+    try:
+        if requested_detector == "simple":
+            shot_segments = detect_shot_segments(
+                video_path,
+                duration_seconds=float(duration_seconds or 0),
+                threshold=shot_detector_threshold,
+                min_segment_seconds=min_segment_seconds,
+                max_segment_seconds=max_segment_seconds,
+                decode_height=decode_height,
+                prefer_ffmpeg=prefer_ffmpeg,
+            )
+        else:
+            shot_segments = detect_pyscenedetect_segments(
+                video_path,
+                duration_seconds=float(duration_seconds or 0),
+                detector=requested_detector,
+                threshold=shot_detector_threshold,
+                min_segment_seconds=min_segment_seconds,
+                max_segment_seconds=max_segment_seconds,
+            )
+    except Exception:
+        shot_segments = []
+    normalized = _normalize_segments(shot_segments, duration_ms, min_segment_ms, max_segment_ms)
+    if not normalized:
+        return segment_ms, duration_ms, None, "fixed", requested_detector, "inferred_from_segment_ms"
+    return segment_ms, duration_ms, np.asarray(normalized, dtype=np.int32), "shot", requested_detector, "explicit"
+
+
+def _flush_visual_batch(
+    encoder: "ClipEncoder",
+    pending_frames: list[np.ndarray],
+    pending_meta: list[tuple[int, int]],
+    frame_embeddings: list[np.ndarray],
+    frame_times_ms: list[int],
+) -> None:
+    if not pending_frames:
+        return
+    vectors = encoder.encode_frames(pending_frames)
+    for (_bucket, timestamp_ms), vector in zip(pending_meta, vectors):
+        frame_embeddings.append(normalize(vector))
+        frame_times_ms.append(timestamp_ms)
+    pending_frames.clear()
+    pending_meta.clear()
+
+
+def _encode_visual_frames(
+    video_path: str,
+    encoder: "ClipEncoder",
+    *,
+    sample_fps: float,
+    batch_size: int,
+    decode_height: int,
+    prefer_ffmpeg: bool,
+    segment_ms: int,
+    explicit_segment_times: np.ndarray | None,
+) -> tuple[list[np.ndarray], list[int], list[int], int]:
+    frame_embeddings: list[np.ndarray] = []
+    frame_times_ms: list[int] = []
+    frame_segment_ids: list[int] = []
+    pending_frames: list[np.ndarray] = []
+    pending_meta: list[tuple[int, int]] = []
+    total_frames = 0
+    frames = read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg)
+    for timestamp, frame in frames:
+        timestamp_ms = int(round(float(timestamp) * 1000))
+        bucket = (
+            _segment_id_for_timestamp(timestamp_ms, explicit_segment_times)
+            if explicit_segment_times is not None
+            else timestamp_ms // segment_ms
+        )
+        pending_frames.append(frame)
+        pending_meta.append((bucket, timestamp_ms))
+        frame_segment_ids.append(int(bucket))
+        total_frames += 1
+        if len(pending_frames) >= batch_size:
+            _flush_visual_batch(encoder, pending_frames, pending_meta, frame_embeddings, frame_times_ms)
+    _flush_visual_batch(encoder, pending_frames, pending_meta, frame_embeddings, frame_times_ms)
+    return frame_embeddings, frame_times_ms, frame_segment_ids, total_frames
+
+
+def _visual_index_payload(
+    frame_embeddings: list[np.ndarray],
+    frame_times_ms: list[int],
+    frame_segment_ids: list[int],
+    *,
+    duration_ms: int,
+    segment_ms: int,
+    sample_fps: float,
+    explicit_segment_times: np.ndarray | None,
+) -> tuple[dict, int, int, int]:
+    frame_times = np.asarray(frame_times_ms, dtype=np.int32)
+    segment_ids = np.asarray(frame_segment_ids, dtype=np.int32)
+    embeddings = np.stack(frame_embeddings).astype(np.float32)
+    order = np.argsort(frame_times)
+    frame_times, segment_ids, embeddings = frame_times[order], segment_ids[order], embeddings[order]
+    if duration_ms <= 0:
+        duration_ms = int(frame_times.max()) + max(1, int(round(1000 / sample_fps)))
+    max_bucket = int(segment_ids.max()) if len(segment_ids) else 0
+    segments_total = (
+        int(len(explicit_segment_times))
+        if explicit_segment_times is not None
+        else len(_fixed_segments(duration_ms, segment_ms, max_bucket))
+    )
+    offsets = np.searchsorted(
+        segment_ids, np.arange(segments_total + 1, dtype=np.int32), side="left"
+    ).astype(np.int32)
+    segments_with_frames = int(len(np.unique(segment_ids)))
+    empty_segments = max(0, segments_total - segments_with_frames)
+    payload = {
+        "frame_embeddings": embeddings.astype(np.float16),
+        "frame_times_ms": frame_times.astype(np.int32),
+        "segment_frame_offsets": offsets,
+    }
+    if explicit_segment_times is not None:
+        payload["segment_times_ms"] = explicit_segment_times.astype(np.int32)
+    return payload, segments_total, segments_with_frames, empty_segments
+
+
 def build_visual_index(
     video_path: str,
     output_path: str,
@@ -654,112 +798,41 @@ def build_visual_index(
             model_cache_dir=model_cache_dir,
         )
     device = encoder.device
-    frame_embeddings: list[np.ndarray] = []
-    frame_times_ms: list[int] = []
-    pending_frames: list[np.ndarray] = []
-    pending_meta: list[tuple[int, int]] = []
-    total_frames = 0
-    segment_ms = max(1, int(round(float(segment_seconds) * 1000)))
-    requested_strategy = (segment_strategy or "fixed").strip().lower()
-    if requested_strategy not in {"fixed", "shot"}:
-        requested_strategy = "fixed"
-    try:
-        requested_detector = normalize_shot_detector(shot_detector)
-    except ValueError:
-        requested_detector = "simple"
-    duration_ms = int(round(float(duration_seconds or 0) * 1000))
-    explicit_segment_times: np.ndarray | None = None
-    active_strategy = "fixed"
-    active_detector = requested_detector
-    segment_time_source = "inferred_from_segment_ms"
-    if requested_strategy == "shot" and duration_ms > 0:
-        min_segment_ms = max(1, int(round(float(min_segment_seconds) * 1000)))
-        max_segment_ms = max(min_segment_ms, int(round(float(max_segment_seconds) * 1000)))
-        try:
-            if requested_detector == "simple":
-                shot_segments = detect_shot_segments(
-                    video_path,
-                    duration_seconds=float(duration_seconds or 0),
-                    threshold=shot_detector_threshold,
-                    min_segment_seconds=min_segment_seconds,
-                    max_segment_seconds=max_segment_seconds,
-                    decode_height=decode_height,
-                    prefer_ffmpeg=prefer_ffmpeg,
-                )
-            else:
-                shot_segments = detect_pyscenedetect_segments(
-                    video_path,
-                    duration_seconds=float(duration_seconds or 0),
-                    detector=requested_detector,
-                    threshold=shot_detector_threshold,
-                    min_segment_seconds=min_segment_seconds,
-                    max_segment_seconds=max_segment_seconds,
-                )
-        except Exception:
-            shot_segments = []
-        normalized = _normalize_segments(shot_segments, duration_ms, min_segment_ms, max_segment_ms)
-        if normalized:
-            explicit_segment_times = np.asarray(normalized, dtype=np.int32)
-            active_strategy = "shot"
-            active_detector = requested_detector
-            segment_time_source = "explicit"
-
-    def flush() -> None:
-        nonlocal pending_frames, pending_meta
-        if not pending_frames:
-            return
-        vectors = encoder.encode_frames(pending_frames)
-        for (_bucket, timestamp_ms), vector in zip(pending_meta, vectors):
-            frame_embeddings.append(normalize(vector))
-            frame_times_ms.append(timestamp_ms)
-        pending_frames, pending_meta = [], []
-
-    frame_segment_ids: list[int] = []
-    for timestamp, frame in read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg):
-        timestamp_ms = int(round(float(timestamp) * 1000))
-        if explicit_segment_times is not None:
-            bucket = _segment_id_for_timestamp(timestamp_ms, explicit_segment_times)
-        else:
-            bucket = timestamp_ms // segment_ms
-        pending_frames.append(frame)
-        pending_meta.append((bucket, timestamp_ms))
-        frame_segment_ids.append(int(bucket))
-        total_frames += 1
-        if len(pending_frames) >= batch_size:
-            flush()
-    flush()
+    segment_ms, duration_ms, explicit_segment_times, active_strategy, active_detector, segment_time_source = (
+        _resolve_visual_segmentation(
+            video_path,
+            segment_seconds=segment_seconds,
+            segment_strategy=segment_strategy,
+            duration_seconds=duration_seconds,
+            min_segment_seconds=min_segment_seconds,
+            max_segment_seconds=max_segment_seconds,
+            shot_detector=shot_detector,
+            shot_detector_threshold=shot_detector_threshold,
+            decode_height=decode_height,
+            prefer_ffmpeg=prefer_ffmpeg,
+        )
+    )
+    frame_embeddings, frame_times_ms, frame_segment_ids, total_frames = _encode_visual_frames(
+        video_path,
+        encoder,
+        sample_fps=sample_fps,
+        batch_size=batch_size,
+        decode_height=decode_height,
+        prefer_ffmpeg=prefer_ffmpeg,
+        segment_ms=segment_ms,
+        explicit_segment_times=explicit_segment_times,
+    )
     if not frame_embeddings:
         raise RuntimeError("未从视频抽取到画面")
-
-    frame_times_ms_array = np.asarray(frame_times_ms, dtype=np.int32)
-    frame_segment_ids_array = np.asarray(frame_segment_ids, dtype=np.int32)
-    embeddings = np.stack(frame_embeddings).astype(np.float32)
-    order = np.argsort(frame_times_ms_array)
-    frame_times_ms_array = frame_times_ms_array[order]
-    frame_segment_ids_array = frame_segment_ids_array[order]
-    embeddings = embeddings[order]
-    inferred_duration_ms = int(frame_times_ms_array.max()) + max(1, int(round(1000 / sample_fps)))
-    if duration_ms <= 0:
-        duration_ms = inferred_duration_ms
-    max_bucket = int(frame_segment_ids_array.max()) if len(frame_segment_ids_array) else 0
-    if explicit_segment_times is not None:
-        segments_total = int(len(explicit_segment_times))
-    else:
-        segments_total = len(_fixed_segments(duration_ms, segment_ms, max_bucket))
-    segment_frame_offsets = np.searchsorted(
-        frame_segment_ids_array,
-        np.arange(segments_total + 1, dtype=np.int32),
-        side="left",
-    ).astype(np.int32)
-    segments_with_frames = int(len(np.unique(frame_segment_ids_array)))
-    empty_segments = max(0, segments_total - segments_with_frames)
-    payload = {
-        "frame_embeddings": embeddings.astype(np.float16),
-        "frame_times_ms": frame_times_ms_array.astype(np.int32),
-        "segment_frame_offsets": segment_frame_offsets,
-    }
-    if explicit_segment_times is not None:
-        payload["segment_times_ms"] = explicit_segment_times.astype(np.int32)
+    payload, segments_total, segments_with_frames, empty_segments = _visual_index_payload(
+        frame_embeddings,
+        frame_times_ms,
+        frame_segment_ids,
+        duration_ms=duration_ms,
+        segment_ms=segment_ms,
+        sample_fps=sample_fps,
+        explicit_segment_times=explicit_segment_times,
+    )
     atomic_save_npz(output_path, **payload)
     return {
         "segments_total": segments_total,

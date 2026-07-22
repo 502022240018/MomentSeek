@@ -312,6 +312,36 @@ def _box_area_ratio(box: Any, frame_shape: tuple[int, int] | None) -> float | No
     return _box_area(box) / frame_area
 
 
+def _is_basic_ocr_noise(text: str, score: float, compact: str) -> bool:
+    return (
+        not text
+        or score <= 0
+        or _is_mostly_punctuation(text)
+        or not _has_alnum_or_cjk(text)
+        or (len(compact) <= 1 and score < 0.85)
+        or bool(_REPEAT_CHAR_RE.match(compact))
+        or (compact.isdigit() and len(compact) <= 2 and score < 0.8)
+    )
+
+
+def _is_invalid_ocr_geometry(
+    bounds: tuple[float, float, float, float],
+    box: Any,
+    frame_shape: tuple[int, int] | None,
+    score: float,
+) -> bool:
+    left, top, right, bottom = bounds
+    width = max(right - left, 0.0)
+    height = max(bottom - top, 0.0)
+    if width < 2 or height < 2:
+        return True
+    aspect = width / max(height, 1.0)
+    if aspect > 40 or aspect < 0.025:
+        return True
+    area_ratio = _box_area_ratio(box, frame_shape)
+    return area_ratio is not None and area_ratio < 0.00001 and score < 0.9
+
+
 def _is_low_quality_ocr_item(
     text: str,
     score: float,
@@ -326,57 +356,11 @@ def _is_low_quality_ocr_item(
     - 对中文单字不要一刀切，因为视频标题/按钮里可能确实有单字；
     - 几何过滤只过滤明显异常框，避免误伤小字幕。
     """
-    if not text:
-        return True
-
-    if score <= 0:
-        return True
-
-    # 纯符号、纯标点、装饰线
-    if _is_mostly_punctuation(text):
-        return True
-
-    # 没有任何字母、数字、CJK 字符，通常是 OCR 噪声
-    if not _has_alnum_or_cjk(text):
-        return True
-
     compact = text.replace(" ", "")
-
-    # 低置信度单字符，噪声概率高。
-    # 但高置信度单个中文/数字/字母仍保留。
-    if len(compact) <= 1 and score < 0.85:
+    if _is_basic_ocr_noise(text, score, compact):
         return True
-
-    # 重复字符，例如 "----"、"||||"、"oooo"
-    if _REPEAT_CHAR_RE.match(compact):
-        return True
-
-    # 很短的纯数字，且置信度不高，常见于页码/角标/误检。
-    # 高置信度保留，避免误删比分、年份、价格等。
-    if compact.isdigit() and len(compact) <= 2 and score < 0.8:
-        return True
-
     bounds = _box_bounds(box)
-    if bounds is not None:
-        left, top, right, bottom = bounds
-        width = max(right - left, 0.0)
-        height = max(bottom - top, 0.0)
-
-        # 宽高明显无效
-        if width < 2 or height < 2:
-            return True
-
-        # 极端长宽比，通常是分割线、边框、误检。
-        aspect = width / max(height, 1.0)
-        if aspect > 40 or aspect < 0.025:
-            return True
-
-        # 面积极小 + 低置信度，基本没有检索价值。
-        area_ratio = _box_area_ratio(box, frame_shape)
-        if area_ratio is not None and area_ratio < 0.00001 and score < 0.9:
-            return True
-
-    return False
+    return bounds is not None and _is_invalid_ocr_geometry(bounds, box, frame_shape, score)
 
 
 def _sort_ocr_items_reading_order(items: list[dict]) -> list[dict]:
@@ -522,6 +506,147 @@ def _embedding_chunk_indices_to_frame_times(
     )
 
 
+def _run_ocr_frame_loop(
+    video_path: str | Path,
+    backend: OCRBackend,
+    *,
+    sample_fps: float,
+    decode_height: int,
+    min_confidence: float,
+    prefer_ffmpeg: bool,
+) -> tuple[list[dict], dict]:
+    chunks: list[dict] = []
+    interval = 1.0 / sample_fps
+    stats = {
+        "ocr_elapsed": 0.0,
+        "decoded_frames": 0,
+        "hit_frames": 0,
+        "ocr_failed_frames": 0,
+        "ocr_filtered_items": 0,
+        "ocr_error_samples": [],
+    }
+    started = time.perf_counter()
+    frames = read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg)
+    for frame_index, (timestamp, frame) in enumerate(frames):
+        stats["decoded_frames"] += 1
+        frame_start = time.perf_counter()
+        try:
+            output = backend(frame)
+        except Exception as exc:
+            stats["ocr_elapsed"] += time.perf_counter() - frame_start
+            stats["ocr_failed_frames"] += 1
+            if len(stats["ocr_error_samples"]) < 5:
+                stats["ocr_error_samples"].append({
+                    "frame_index": int(frame_index),
+                    "timestamp": round(float(timestamp), 3),
+                    "error": str(exc),
+                })
+            continue
+        stats["ocr_elapsed"] += time.perf_counter() - frame_start
+        items, filtered_items = _ocr_items(output, min_confidence, frame_shape=frame.shape[:2])
+        stats["ocr_filtered_items"] += filtered_items
+        if not items:
+            continue
+        stats["hit_frames"] += 1
+        chunks.append({
+            "start_time": round(float(timestamp), 3),
+            "end_time": round(float(timestamp + interval), 3),
+            "frame_time": round(float(timestamp), 3),
+            "text": " ".join(item["text"] for item in items),
+            "items": items,
+            "score": round(max(item["score"] for item in items), 4),
+            "frame_shape": frame.shape[:2],
+        })
+    stats["frame_loop_elapsed"] = time.perf_counter() - started
+    return chunks, stats
+
+
+def _build_ocr_semantic_result(
+    chunks: list[dict],
+    *,
+    enabled: bool,
+    output_path: str | Path | None,
+    model_name: str,
+    model_dir: str | Path,
+    device: str,
+    batch_size: int,
+    local_files_only: bool,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    if not enabled:
+        if output_path is not None:
+            Path(output_path).unlink(missing_ok=True)
+        return (
+            np.empty((0, 0), dtype=np.float16),
+            np.empty((0,), dtype=np.int32),
+            {"semantic_chunks": 0, "semantic_status": "disabled"},
+        )
+    try:
+        raw_result = build_text_semantic_arrays(
+            chunks=chunks,
+            model_name=model_name,
+            model_dir=model_dir,
+            device=resolve_text_embedding_device(device),
+            batch_size=batch_size,
+            local_files_only=local_files_only,
+        )
+        embeddings = np.asarray(raw_result["embeddings"], dtype=np.float16)
+        indices = np.asarray(raw_result["embedding_chunk_indices"], dtype=np.int32)
+        result = {key: value for key, value in raw_result.items() if key not in {"embeddings", "embedding_chunk_indices"}}
+        result["semantic_chunks"] = int(embeddings.shape[0])
+        return embeddings, indices, result
+    except Exception as exc:
+        if output_path is not None:
+            Path(output_path).unlink(missing_ok=True)
+        return (
+            np.empty((0, 0), dtype=np.float16),
+            np.empty((0,), dtype=np.int32),
+            {
+                "semantic_chunks": 0,
+                "semantic_model": model_name,
+                "semantic_status": "unavailable",
+                "semantic_error": str(exc),
+            },
+        )
+
+
+def _ocr_index_result(
+    backend: OCRBackend,
+    chunks: list[dict],
+    stats: dict,
+    *,
+    ocr_version: str,
+    det_lang: str,
+    rec_lang: str,
+    model_type: str,
+    backend_init_elapsed: float,
+) -> dict:
+    frame_loop_elapsed = float(stats["frame_loop_elapsed"])
+    ocr_elapsed = float(stats["ocr_elapsed"])
+    return {
+        "engine": backend.engine,
+        "device": backend.device,
+        "providers": backend.providers,
+        "ocr_version": ocr_version,
+        "det_lang": det_lang,
+        "rec_lang": rec_lang,
+        "model_type": model_type,
+        "frames": stats["decoded_frames"],
+        "hit_frames": stats["hit_frames"],
+        "chunks": len(chunks),
+        "ocr_failed_frames": stats["ocr_failed_frames"],
+        "ocr_filtered_items": stats["ocr_filtered_items"],
+        "ocr_rec_resized_inputs": int(getattr(backend, "rec_resized_inputs", 0)),
+        "ocr_rec_max_input_width": int(getattr(backend, "rec_max_input_width", 0)),
+        "ocr_error_samples": stats["ocr_error_samples"],
+        "backend_init_elapsed_seconds": round(backend_init_elapsed, 3),
+        "frame_loop_elapsed_seconds": round(frame_loop_elapsed, 3),
+        "decode_postprocess_elapsed_seconds": round(max(0.0, frame_loop_elapsed - ocr_elapsed), 3),
+        "ocr_elapsed_seconds": round(ocr_elapsed, 3),
+        "schema_version": 3,
+        "decode_status": "complete" if stats["decoded_frames"] else "empty",
+    }
+
+
 
 def build_ocr_index(
     video_path: str | Path,
@@ -570,131 +695,35 @@ def build_ocr_index(
         )
     backend_init_elapsed = time.perf_counter() - backend_init_started
 
-    chunks: list[dict] = []
-    interval = 1.0 / sample_fps
-    ocr_elapsed = 0.0
-    decoded_frames = 0
-    hit_frames = 0
-    ocr_failed_frames = 0
-    ocr_filtered_items = 0
-    ocr_error_samples: list[dict] = []
-
-    frame_loop_started = time.perf_counter()
-    for frame_index, (timestamp, frame) in enumerate(
-        read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg)
-    ):
-        decoded_frames += 1
-        frame_start = time.perf_counter()
-        try:
-            output = backend(frame)
-        except Exception as exc:
-            ocr_elapsed += time.perf_counter() - frame_start
-            ocr_failed_frames += 1
-
-            # 只保留少量样例，避免 result 过大。
-            if len(ocr_error_samples) < 5:
-                ocr_error_samples.append({
-                    "frame_index": int(frame_index),
-                    "timestamp": round(float(timestamp), 3),
-                    "error": str(exc),
-                })
-            continue
-
-        ocr_elapsed += time.perf_counter() - frame_start
-
-        items, filtered_items = _ocr_items(
-            output,
-            min_confidence,
-            frame_shape=frame.shape[:2],
-        )
-        ocr_filtered_items += filtered_items
-
-        if not items:
-            continue
-        hit_frames += 1
-        text = " ".join(item["text"] for item in items)
-        chunks.append({
-            "start_time": round(float(timestamp), 3),
-            "end_time": round(float(timestamp + interval), 3),
-            "frame_time": round(float(timestamp), 3),
-            "text": text,
-            "items": items,
-            "score": round(max(item["score"] for item in items), 4),
-            "frame_shape": frame.shape[:2],
-        })
-    frame_loop_elapsed = time.perf_counter() - frame_loop_started
-
-    result = {
-        "engine": backend.engine,
-        "device": backend.device,
-        "providers": backend.providers,
-        "ocr_version": ocr_version,
-        "det_lang": det_lang,
-        "rec_lang": rec_lang,
-        "model_type": model_type,
-        "frames": decoded_frames,
-        "hit_frames": hit_frames,
-        "chunks": len(chunks),
-        "ocr_failed_frames": ocr_failed_frames,
-        "ocr_filtered_items": ocr_filtered_items,
-        "ocr_rec_resized_inputs": int(getattr(backend, "rec_resized_inputs", 0)),
-        "ocr_rec_max_input_width": int(getattr(backend, "rec_max_input_width", 0)),
-        "ocr_error_samples": ocr_error_samples,
-        "backend_init_elapsed_seconds": round(backend_init_elapsed, 3),
-        "frame_loop_elapsed_seconds": round(frame_loop_elapsed, 3),
-        "decode_postprocess_elapsed_seconds": round(max(0.0, frame_loop_elapsed - ocr_elapsed), 3),
-        "ocr_elapsed_seconds": round(ocr_elapsed, 3),
-        "schema_version": 3,
-        "decode_status": "complete" if decoded_frames else "empty",
-    }
-    semantic_result: dict
-    embeddings: np.ndarray
-    embedding_frame_indices: np.ndarray
+    chunks, frame_stats = _run_ocr_frame_loop(
+        video_path,
+        backend,
+        sample_fps=sample_fps,
+        decode_height=decode_height,
+        min_confidence=min_confidence,
+        prefer_ffmpeg=prefer_ffmpeg,
+    )
+    result = _ocr_index_result(
+        backend,
+        chunks,
+        frame_stats,
+        ocr_version=ocr_version,
+        det_lang=det_lang,
+        rec_lang=rec_lang,
+        model_type=model_type,
+        backend_init_elapsed=backend_init_elapsed,
+    )
     semantic_started = time.perf_counter()
-    if not semantic_enabled:
-        if semantic_output_path is not None:
-            Path(semantic_output_path).unlink(missing_ok=True)
-        embeddings = np.empty((0, 0), dtype=np.float16)
-        embedding_frame_indices = np.empty((0,), dtype=np.int32)
-        semantic_result = {
-            "semantic_chunks": 0,
-            "semantic_status": "disabled",
-        }
-    else:
-        try:
-            resolved_device = resolve_text_embedding_device(semantic_device)
-            raw_semantic_result = build_text_semantic_arrays(
-                chunks=chunks,
-                model_name=semantic_model,
-                model_dir=semantic_model_dir,
-                device=resolved_device,
-                batch_size=semantic_batch_size,
-                local_files_only=semantic_local_files_only,
-            )
-
-            embeddings = np.asarray(raw_semantic_result["embeddings"], dtype=np.float16)
-            embedding_frame_indices = np.asarray(
-                raw_semantic_result["embedding_chunk_indices"],
-                dtype=np.int32,
-            )
-
-            semantic_result = {
-                key: value for key, value in raw_semantic_result.items()
-                if key not in {"embeddings", "embedding_chunk_indices"}
-            }
-            semantic_result["semantic_chunks"] = int(embeddings.shape[0])
-
-        except Exception as exc:
-            if semantic_output_path is not None:
-                Path(semantic_output_path).unlink(missing_ok=True)
-            embeddings = np.empty((0, 0), dtype=np.float16)
-            embedding_frame_indices = np.empty((0,), dtype=np.int32)
-            semantic_result = {
-                "semantic_chunks": 0,
-                "semantic_model": semantic_model,
-                "semantic_status": "unavailable",
-                "semantic_error": str(exc),
-            }
+    embeddings, embedding_frame_indices, semantic_result = _build_ocr_semantic_result(
+        chunks,
+        enabled=semantic_enabled,
+        output_path=semantic_output_path,
+        model_name=semantic_model,
+        model_dir=semantic_model_dir,
+        device=semantic_device,
+        batch_size=semantic_batch_size,
+        local_files_only=semantic_local_files_only,
+    )
     semantic_elapsed = time.perf_counter() - semantic_started
     save_started = time.perf_counter()
     _save_ocr_npz(

@@ -65,3 +65,26 @@ def test_rename_and_delete_video_removes_jobs(tmp_path):
     assert catalog.get_job("job-video-2") is not None
     # deleting a missing video reports no row removed
     assert catalog.delete_video("video-1") is False
+
+
+def test_next_queued_job_queries_oldest_queued_record(tmp_path):
+    catalog = Catalog(tmp_path / "catalog.sqlite3")
+    catalog.create_video({
+        "id": "video-1", "name": "demo.mp4", "file_path": str(tmp_path / "demo.mp4"),
+        "duration": 5, "fps": 25, "width": 640, "height": 480, "status": "uploaded",
+    })
+    for job_id, status in (("newer", "queued"), ("oldest", "queued"), ("ignored", "running")):
+        catalog.create_job({
+            "id": job_id, "video_id": "video-1", "status": status,
+            "stage": status, "progress": 0, "modalities": ["asr"], "options": {},
+        })
+    with catalog.connect() as connection:
+        connection.execute("UPDATE jobs SET created_at='2026-01-02' WHERE id='newer'")
+        connection.execute("UPDATE jobs SET created_at='2026-01-01' WHERE id='oldest'")
+        connection.execute("UPDATE jobs SET created_at='2025-01-01' WHERE id='ignored'")
+
+    assert catalog.next_queued_job()["id"] == "oldest"
+
+    catalog.update_job("oldest", status="completed")
+    catalog.update_job("newer", status="completed")
+    assert catalog.next_queued_job() is None
