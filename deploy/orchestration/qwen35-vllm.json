@@ -51,6 +51,29 @@
         "positive_token_id": 9175,
         "negative_token_id": 2665
       }
+    },
+    "qwen35-temporal-efficient": {
+      "description": "Qwen3.5 temporal decomposition with 9-11 second windows, 8 frames, and Top-10 reranking.",
+      "planner": {
+        "provider": "qwen35-planner",
+        "prompt_path": "prompts/planner-v3-temporal-efficient.txt",
+        "prompt_version": "planner-v3-temporal-efficient",
+        "max_tokens": 320,
+        "temperature": 0
+      },
+      "reranker": {
+        "provider": "qwen35-reranker",
+        "prompt_path": "prompts/reranker-v1.txt",
+        "prompt_version": "reranker-v1",
+        "concurrency": 4,
+        "default_top_n": 10,
+        "default_frame_count": 8,
+        "max_visual_pixels": 262144,
+        "positive_label": "Yes",
+        "negative_label": "No",
+        "positive_token_id": 9175,
+        "negative_token_id": 2665
+      }
     }
   }
 }
