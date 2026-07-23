@@ -33,8 +33,8 @@
       "description": "One Qwen3.5-4B vLLM Ascend service supplies both planning and multimodal reranking.",
       "planner": {
         "provider": "qwen35-planner",
-        "prompt_path": "prompts/planner-v1.txt",
-        "prompt_version": "planner-v1",
+        "prompt_path": "prompts/planner-v2-temporal.txt",
+        "prompt_version": "planner-v2-temporal",
         "max_tokens": 320,
         "temperature": 0
       },

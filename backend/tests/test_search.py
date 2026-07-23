@@ -304,6 +304,39 @@ def test_visual_ranking_score_prefers_cross_video_raw_similarity_over_local_perc
     assert relevant_mid.score > unrelated_best.score
 
 
+def test_visual_subquery_fusion_prefers_constraint_coverage():
+    class VisualData:
+        def __init__(self):
+            self._values = {
+                "frame_embeddings": np.asarray(
+                    [[1.0, 0.0], [np.sqrt(0.5), np.sqrt(0.5)]],
+                    dtype=np.float32,
+                ),
+                "frame_times_ms": np.asarray([1000, 6000], dtype=np.int32),
+                "segment_frame_offsets": np.asarray([0, 1, 2], dtype=np.int32),
+            }
+            self.files = tuple(self._values)
+
+        def __getitem__(self, key):
+            return self._values[key]
+
+    candidates = _visual_candidates(
+        VisualData(),
+        np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        "video-1",
+        duration_ms=10000,
+        segment_ms=5000,
+        profile="balanced",
+        limit=2,
+    )
+
+    assert candidates[0].unit_id == 1
+    assert candidates[0].features["visual_subquery_count"] == 2
+    assert candidates[0].features["visual_subquery_scores"] == pytest.approx(
+        [np.sqrt(0.5), np.sqrt(0.5)]
+    )
+
+
 def test_asr_v3_lexical_search_uses_chunk_times_and_texts(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)

@@ -83,6 +83,7 @@ class RerankPlan(BaseModel):
     strategy: Literal["multimodal", "text"] = "multimodal"
     top_n: int = Field(default=20, ge=1, le=100)
     frame_count: int = Field(default=4, ge=0, le=16)
+    window_seconds: float = Field(default=0.0, ge=0, le=30)
     score_weight: float = Field(default=0.7, ge=0, le=1)
 
 
@@ -93,6 +94,7 @@ class RetrievalPlan(BaseModel):
     modalities: list[str]
     alpha: float = Field(default=0.5, ge=0, le=1)
     visual_profile: Literal["recall", "balanced", "precision"] = "balanced"
+    visual_subqueries: list[str] = Field(default_factory=list)
     candidate_limit: int = Field(default=24, ge=1, le=100)
     result_limit: int = Field(default=24, ge=1, le=100)
     merge_gap: float = Field(default=2.0, ge=0, le=15)
@@ -122,8 +124,20 @@ class RetrievalPlan(BaseModel):
         }
         self.result_limit = min(self.result_limit, self.candidate_limit)
         self.rerank.top_n = min(self.rerank.top_n, self.candidate_limit)
+        self.visual_subqueries = list(
+            dict.fromkeys(
+                value.strip()
+                for value in self.visual_subqueries
+                if isinstance(value, str) and value.strip()
+            )
+        )[:4]
+        if "visual" not in self.modalities:
+            self.visual_subqueries = []
         if self.rerank.strategy == "text":
             self.rerank.frame_count = 0
+            self.rerank.window_seconds = 0
+        elif self.rerank.window_seconds >= 9:
+            self.rerank.frame_count = max(8, self.rerank.frame_count)
         return self
 
 
@@ -467,6 +481,30 @@ class SearchOrchestrator:
             paths.append(path)
         return paths
 
+    def _expanded_candidate(
+        self, result: dict[str, Any], window_seconds: float
+    ) -> dict[str, Any]:
+        item = dict(result)
+        start = max(0.0, float(item["start_time"]))
+        end = max(start, float(item["end_time"]))
+        if window_seconds <= 0 or end - start >= window_seconds:
+            return item
+        video = self.catalog.get_video(item["video_id"])
+        duration = max(end, float((video or {}).get("duration") or end))
+        center = (start + end) / 2
+        expanded_start = max(0.0, center - window_seconds / 2)
+        expanded_end = min(duration, expanded_start + window_seconds)
+        expanded_start = max(0.0, expanded_end - window_seconds)
+        item["original_start_time"] = start
+        item["original_end_time"] = end
+        item["start_time"] = round(expanded_start, 3)
+        item["end_time"] = round(expanded_end, 3)
+        item["clip_url"] = (
+            f"/api/videos/{item['video_id']}/clip"
+            f"?start={expanded_start:.3f}&end={expanded_end:.3f}"
+        )
+        return item
+
     @staticmethod
     def _evidence_text(result: dict[str, Any]) -> str:
         details = []
@@ -597,7 +635,10 @@ class SearchOrchestrator:
         provider = self._provider(spec.provider)
         prompt = self._prompt(spec.prompt_path)
         top_n = min(plan.rerank.top_n, len(results))
-        selected = results[:top_n]
+        selected = [
+            self._expanded_candidate(result, plan.rerank.window_seconds)
+            for result in results[:top_n]
+        ]
         started = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(spec.concurrency, max(1, top_n))
@@ -635,6 +676,8 @@ class SearchOrchestrator:
                     "video_id": item["video_id"],
                     "start_time": item["start_time"],
                     "end_time": item["end_time"],
+                    "original_start_time": item.get("original_start_time"),
+                    "original_end_time": item.get("original_end_time"),
                     "original_rank": original_rank,
                     "retrieval_score": round(original_score, 6),
                     **scored,
@@ -653,6 +696,7 @@ class SearchOrchestrator:
             "top_n": top_n,
             "concurrency": spec.concurrency,
             "frame_count": plan.rerank.frame_count,
+            "window_seconds": plan.rerank.window_seconds,
             "score_weight": plan.rerank.score_weight,
             "candidates": trace_candidates,
         }
@@ -734,6 +778,7 @@ class SearchOrchestrator:
             plan.max_result_seconds,
             plan.visual_profile,
             plan.channel_limits,
+            plan.visual_subqueries,
         )
         trace["retrieval"] = {
             "status": "ok",
@@ -748,6 +793,7 @@ class SearchOrchestrator:
                 "max_result_seconds": plan.max_result_seconds,
                 "visual_profile": plan.visual_profile,
                 "channel_limits": plan.channel_limits,
+                "visual_subqueries": plan.visual_subqueries,
             },
         }
 

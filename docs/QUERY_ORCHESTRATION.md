@@ -100,6 +100,7 @@ query_intent
 modalities
 alpha
 visual_profile
+visual_subqueries
 candidate_limit
 result_limit
 merge_gap
@@ -109,6 +110,7 @@ rerank.enabled
 rerank.strategy
 rerank.top_n
 rerank.frame_count
+rerank.window_seconds
 rerank.score_weight
 rationale
 ```
@@ -119,15 +121,24 @@ rationale
 - result_limit 不超过 candidate_limit。
 - rerank.top_n 不超过 candidate_limit。
 - channel_limits 只能配置 visual / face / asr / ocr，单通道范围为 1--300。
+- visual_subqueries 最多保留 4 个去重后的视觉子查询；未选择 visual 时清空。
 - text rerank 的 frame_count 固定为 0。
+- 9--11 秒时序窗口至少使用 8 帧。
 
 因此模型输出不能绕过请求范围或调用不存在的索引。
+
+组合或时序视觉 query 会被 Planner 拆为 2--4 个英文视觉子查询。Visual 首阶段按每个
+子查询在片段内的最佳帧计算覆盖度，并综合平均覆盖与最弱约束分数，降低只匹配人物、
+场景或物体名词的静态片段排名。
 
 ## Reranker
 
 multimodal rerank 会在结果时间段内均匀采样帧，写入现有 `frame_cache`，并发调用
 OpenAI-compatible `/chat/completions`。当前 Qwen3.5 profile 使用 Yes/No token
 logprobs 形成连续相关性分数：
+
+时序 query 会在精排前把短候选以中心点扩展为 Planner 指定的 9--11 秒窗口。trace
+同时保留原始和扩展后的起止时间，便于判断窗口扩展是否改善动作顺序覆盖。
 
 ```text
 final_score =
@@ -144,8 +155,8 @@ original_rank
 score
 ```
 
-默认建议从 Top-20、4 frames、concurrency=4 开始；时间关系强的 query 再测试 8
-frames。模型或 prompt 变化后必须重新验证排序质量，不能只比较延迟。
+默认建议从 Top-20、4 frames、concurrency=4 开始；时间关系强的 query 使用 9--11
+秒窗口和至少 8 frames。模型或 prompt 变化后必须重新验证排序质量，不能只比较延迟。
 
 ## Execution trace 与 skill 数据
 

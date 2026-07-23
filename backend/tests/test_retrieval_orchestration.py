@@ -184,6 +184,55 @@ def test_retrieval_plan_clamps_dependent_limits_and_text_frames():
     assert plan.rerank.frame_count == 0
 
 
+def test_temporal_plan_normalizes_subqueries_and_uses_at_least_eight_frames():
+    plan = RetrievalPlan.model_validate(
+        {
+            "modalities": ["visual"],
+            "visual_subqueries": [
+                " players in stands ",
+                "players clink cartons",
+                "players in stands",
+            ],
+            "rerank": {
+                "enabled": True,
+                "strategy": "multimodal",
+                "top_n": 10,
+                "frame_count": 4,
+                "window_seconds": 10,
+            },
+        }
+    )
+
+    assert plan.visual_subqueries == ["players in stands", "players clink cartons"]
+    assert plan.rerank.window_seconds == 10
+    assert plan.rerank.frame_count == 8
+
+
+def test_temporal_candidate_expands_around_original_interval(tmp_path):
+    orchestrator, _engine = _orchestrator(tmp_path)
+
+    class VideoCatalog:
+        def get_video(self, video_id):
+            return {"id": video_id, "duration": 64.12}
+
+    orchestrator.catalog = VideoCatalog()
+    expanded = orchestrator._expanded_candidate(
+        {
+            "video_id": "video-1",
+            "start_time": 40.0,
+            "end_time": 45.0,
+            "clip_url": "/old",
+        },
+        10,
+    )
+
+    assert expanded["start_time"] == 37.5
+    assert expanded["end_time"] == 47.5
+    assert expanded["original_start_time"] == 40.0
+    assert expanded["original_end_time"] == 45.0
+    assert "start=37.500&end=47.500" in expanded["clip_url"]
+
+
 def test_extract_json_object_accepts_safe_python_literal_fallback():
     value = _extract_json_object("{'modalities': ['visual'], 'rerank': {'enabled': True}}")
 
@@ -236,6 +285,7 @@ def test_planner_selects_routes_and_reranker_reorders_with_trace(tmp_path):
         "modalities": ["visual", "asr", "face"],
         "alpha": 0.4,
         "visual_profile": "precision",
+        "visual_subqueries": ["person speaking indoors", "visible speaker"],
         "candidate_limit": 2,
         "channel_limits": {"visual": 99, "asr": 4, "ocr": 8},
         "result_limit": 2,
@@ -281,6 +331,7 @@ def test_planner_selects_routes_and_reranker_reorders_with_trace(tmp_path):
     assert search_call[2] == ["visual", "asr"]
     assert search_call[4:9] == (0.4, 2, 1.0, 12.0, "precision")
     assert search_call[9] == {"visual": 30, "asr": 4}
+    assert search_call[10] == ["person speaking indoors", "visible speaker"]
     assert outcome["results"][0]["start_time"] == 10
     assert outcome["results"][0]["original_rank"] == 2
     assert outcome["execution"]["planner"]["model"] == "planner-a"

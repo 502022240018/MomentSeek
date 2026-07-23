@@ -184,24 +184,45 @@ def _visual_candidates(
         if np.any(segment_times_ms[:, 1] < segment_times_ms[:, 0]):
             raise ValueError("visual v3 segment_times_ms 时间范围无效，请重跑 visual 索引")
 
-    query = normalize(query)
-    frame_scores = frame_embeddings @ query
+    query_values = np.asarray(query, dtype=np.float32)
+    if query_values.ndim == 1:
+        query_values = query_values.reshape(1, -1)
+    if query_values.ndim != 2 or query_values.shape[1] != frame_embeddings.shape[1]:
+        raise ValueError("visual query embedding shape does not match the index")
+    query_values = np.stack([normalize(value) for value in query_values])
+    frame_scores = frame_embeddings @ query_values.T
     segment_ids: list[int] = []
     raw_scores: list[float] = []
     top3_scores: list[float] = []
     mean_scores: list[float] = []
+    subquery_scores: list[list[float]] = []
     best_times_ms: list[int] = []
     for segment_id in range(len(offsets) - 1):
         start, end = int(offsets[segment_id]), int(offsets[segment_id + 1])
         if start == end:
             continue
         bucket_scores = frame_scores[start:end]
-        order = np.argsort(bucket_scores)[::-1]
-        top_values = bucket_scores[order]
+        per_query_top = np.max(bucket_scores, axis=0)
+        if query_values.shape[0] == 1:
+            aggregate_score = float(per_query_top[0])
+            frame_aggregate = bucket_scores[:, 0]
+        else:
+            # Each visual clause may peak on a different frame. Combining the
+            # mean with the weakest-clause score rewards constraint coverage
+            # and suppresses static candidates matching only nouns.
+            aggregate_score = float(
+                0.65 * np.mean(per_query_top) + 0.35 * np.min(per_query_top)
+            )
+            frame_aggregate = 0.65 * np.mean(bucket_scores, axis=1) + 0.35 * np.min(
+                bucket_scores, axis=1
+            )
+        order = np.argsort(frame_aggregate)[::-1]
+        top_values = frame_aggregate[order]
         segment_ids.append(segment_id)
-        raw_scores.append(float(top_values[0]))
+        raw_scores.append(aggregate_score)
         top3_scores.append(float(np.mean(top_values[:min(3, len(top_values))])))
-        mean_scores.append(float(np.mean(bucket_scores)))
+        mean_scores.append(float(np.mean(frame_aggregate)))
+        subquery_scores.append([float(value) for value in per_query_top])
         best_times_ms.append(int(frame_times_ms[start + int(order[0])]))
 
     if not raw_scores:
@@ -252,6 +273,10 @@ def _visual_candidates(
         mean = float(mean_scores[local_index])
         best_ms = int(best_times_ms[local_index])
         detail += f" · best_frame={best_ms / 1000:.2f}s · top1={raw_score:.3f} · top3={top3:.3f} · mean={mean:.3f}"
+        if query_values.shape[0] > 1:
+            detail += " · subqueries=" + ",".join(
+                f"{value:.3f}" for value in subquery_scores[local_index]
+            )
         if segment_times_ms is not None:
             start_ms, end_ms = [int(value) for value in segment_times_ms[segment_id]]
             time_source = "explicit"
@@ -286,6 +311,8 @@ def _visual_candidates(
                 "visual_top3": top3,
                 "visual_mean": mean,
                 "visual_rank_score": ranking_score,
+                "visual_subquery_scores": subquery_scores[local_index],
+                "visual_subquery_count": int(query_values.shape[0]),
                 "percentile": percentile,
                 "robust_z": z_score,
                 "segment_time_source": time_source,
@@ -939,6 +966,7 @@ class SearchEngine:
         max_result_seconds: float = 15,
         visual_profile: str = "balanced",
         channel_limits: dict[str, int] | None = None,
+        visual_subqueries: list[str] | None = None,
     ) -> list[dict]:
         if visual_profile not in {"recall", "balanced", "precision"}:
             raise ValueError("visual_profile 必须是 recall、balanced 或 precision")
@@ -972,7 +1000,19 @@ class SearchEngine:
                 with np.load(index_file, allow_pickle=False) as data:
                     visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
                     if visual_model not in visual_queries:
-                        visual_queries[visual_model] = self._clip(visual_model).encode_query(text, image_path, alpha)
+                        query_texts: list[str | None] = (
+                            list(dict.fromkeys(visual_subqueries or []))
+                            if text and visual_subqueries
+                            else [text]
+                        )
+                        visual_queries[visual_model] = np.stack(
+                            [
+                                self._clip(visual_model).encode_query(
+                                    query_text, image_path, alpha
+                                )
+                                for query_text in query_texts
+                            ]
+                        )
                     visual_query = visual_queries[visual_model]
                     candidates.extend(_visual_candidates(
                         data,
