@@ -121,6 +121,7 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
   const [playing, setPlaying] = useState<SearchResult>();
   const [orchestrationProfiles, setOrchestrationProfiles] = useState<OrchestrationProfile[]>([]);
   const [orchestrationProfile, setOrchestrationProfile] = useState("");
+  const [orchestrationStatus, setOrchestrationStatus] = useState("正在加载编排配置…");
   const [plannerMode, setPlannerMode] = useState<"auto" | "off" | "force">("auto");
   const [rerankerMode, setRerankerMode] = useState<"auto" | "off" | "force">("auto");
   const [execution, setExecution] = useState<Record<string, any>>();
@@ -128,10 +129,14 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
   useEffect(() => { if (!selected.length && ready.length) setSelected(ready.map(video => video.id)); }, [ready.length]);
   useEffect(() => {
     api.orchestrationProfiles().then(value => {
-      if (!value.enabled) return;
+      if (!value.enabled) {
+        setOrchestrationStatus("后端未启用编排");
+        return;
+      }
       setOrchestrationProfiles(value.profiles);
       setOrchestrationProfile(value.default_profile);
-    }).catch(() => undefined);
+      setOrchestrationStatus(value.profiles.length ? "已连接" : "没有可用 Profile");
+    }).catch(() => setOrchestrationStatus("编排配置加载失败，请刷新页面"));
   }, []);
   const toggleMode = (mode: string) => setModalities(value => value.includes(mode) ? value.filter(item => item !== mode) : [...value, mode]);
   const submit = async () => {
@@ -184,18 +189,18 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
             <span>{modalities.includes(value) ? "✓" : "+"}</span><b>{title}</b><small>{sub}</small>
           </button>)}
       </div>
-      {orchestrationProfiles.length > 0 && <div className="orchestration-controls">
-        <div><b>智能检索编排</b><small>记录通路、参数、Prompt 和精排结果</small></div>
-        <label>实验 Profile<select value={orchestrationProfile} onChange={event => setOrchestrationProfile(event.target.value)}>
-          {orchestrationProfiles.map(profile => <option value={profile.name} key={profile.name}>{profile.name}</option>)}
+      <div className="orchestration-controls">
+        <div><b>智能检索编排 <span className={orchestrationProfiles.length ? "connected" : ""}>{orchestrationStatus}</span></b><small>记录通路、参数、Prompt 和精排结果</small></div>
+        <label>实验 Profile<select disabled={!orchestrationProfiles.length} value={orchestrationProfile} onChange={event => setOrchestrationProfile(event.target.value)}>
+          {orchestrationProfiles.length ? orchestrationProfiles.map(profile => <option value={profile.name} key={profile.name}>{profile.name}</option>) : <option>等待后端配置</option>}
         </select></label>
-        <label>Planner<select value={plannerMode} onChange={event => setPlannerMode(event.target.value as "auto" | "off" | "force")}>
+        <label>Planner<select disabled={!orchestrationProfiles.length} value={plannerMode} onChange={event => setPlannerMode(event.target.value as "auto" | "off" | "force")}>
           <option value="auto">自动</option><option value="off">关闭</option><option value="force">强制</option>
         </select></label>
-        <label>Reranker<select value={rerankerMode} onChange={event => setRerankerMode(event.target.value as "auto" | "off" | "force")}>
+        <label>Reranker<select disabled={!orchestrationProfiles.length} value={rerankerMode} onChange={event => setRerankerMode(event.target.value as "auto" | "off" | "force")}>
           <option value="auto">按计划</option><option value="off">关闭</option><option value="force">强制</option>
         </select></label>
-      </div>}
+      </div>
       {query && image && modalities.includes("visual") && <div className="alpha-control"><span>文字权重 {Math.round(alpha * 100)}%</span><input type="range" min="0" max="1" step="0.05" value={alpha} onChange={event => setAlpha(Number(event.target.value))} /></div>}
       <button className="primary" disabled={loading} onClick={submit}>{loading ? <><span className="spinner" />正在检索</> : <>开始检索 <span>→</span></>}</button>
     </div>

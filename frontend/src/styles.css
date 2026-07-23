@@ -67,10 +67,13 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .orchestration-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; padding: 13px; border: 1px solid #dfd8e7; border-radius: 12px; background: #faf6fd; }
 .orchestration-controls > div { grid-column: 1 / -1; display: flex; flex-direction: column; }
 .orchestration-controls > div b { font-size: 11px; }
+.orchestration-controls > div b span { margin-left: 7px; color: #a35b32; font-size: 9px; font-weight: 600; }
+.orchestration-controls > div b span.connected { color: #26794f; }
 .orchestration-controls > div small { margin-top: 3px; color: #8d8493; font-size: 9px; }
 .orchestration-controls label { display: flex; margin: 0 !important; flex-direction: column; gap: 5px; color: #777078; font-size: 9px; font-weight: 650; }
 .orchestration-controls label:first-of-type { grid-column: 1 / -1; }
 .orchestration-controls select { width: 100%; padding: 8px; border: 1px solid #d8d1df; border-radius: 8px; background: white; font-size: 10px; }
+.orchestration-controls select:disabled { color: #9b949d; background: #f1edf2; }
 .primary { display: flex; width: 100%; margin-top: 24px; padding: 14px 17px; align-items: center; justify-content: space-between; border: 0; border-radius: 13px; color: white; background: #1d1d1c; font-weight: 650; cursor: pointer; }
 .primary:hover { background: #000; transform: translateY(-1px); }
 .primary:disabled { opacity: .55; cursor: wait; transform: none; }
