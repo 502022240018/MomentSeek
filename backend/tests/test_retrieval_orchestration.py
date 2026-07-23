@@ -10,6 +10,7 @@ from app.retrieval_orchestration import (
     OrchestrationRegistry,
     RetrievalPlan,
     SearchOrchestrator,
+    _extract_json_object,
 )
 from app.settings import Settings
 
@@ -183,6 +184,13 @@ def test_retrieval_plan_clamps_dependent_limits_and_text_frames():
     assert plan.rerank.frame_count == 0
 
 
+def test_extract_json_object_accepts_safe_python_literal_fallback():
+    value = _extract_json_object("{'modalities': ['visual'], 'rerank': {'enabled': True}}")
+
+    assert value["modalities"] == ["visual"]
+    assert value["rerank"]["enabled"] is True
+
+
 def test_binary_score_keeps_best_logprob_across_whitespace_token_variants():
     response = {
         "choices": [
@@ -276,6 +284,7 @@ def test_planner_selects_routes_and_reranker_reorders_with_trace(tmp_path):
     assert outcome["results"][0]["start_time"] == 10
     assert outcome["results"][0]["original_rank"] == 2
     assert outcome["execution"]["planner"]["model"] == "planner-a"
+    assert planner.requests[0]["response_format"]["type"] == "json_schema"
     assert outcome["execution"]["reranker"]["model"] == "reranker-b"
     assert outcome["execution"]["reranker"]["prompt_version"] == "r1"
     traces = (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import concurrent.futures
 import json
@@ -131,13 +132,27 @@ def _extract_json_object(value: str) -> dict[str, Any]:
     if text.startswith("```"):
         text = text.removeprefix("```json").removeprefix("```")
         text = text.rsplit("```", 1)[0].strip()
+    candidate = text
     try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError as json_error:
         start, end = text.find("{"), text.rfind("}")
         if start < 0 or end <= start:
             raise OrchestrationError("model response does not contain a JSON object")
-        parsed = json.loads(text[start : end + 1])
+        candidate = text[start : end + 1]
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            # Some OpenAI-compatible servers occasionally return a Python
+            # literal despite JSON mode. literal_eval accepts only literals,
+            # not executable expressions, and keeps fail-open robust.
+            try:
+                parsed = ast.literal_eval(candidate)
+            except (SyntaxError, ValueError) as exc:
+                preview = " ".join(candidate[:200].splitlines())
+                raise OrchestrationError(
+                    f"planner response is not valid JSON: {preview}"
+                ) from json_error
     if not isinstance(parsed, dict):
         raise OrchestrationError("model response must be a JSON object")
     return parsed
@@ -372,7 +387,14 @@ class SearchOrchestrator:
                 ],
                 "temperature": spec.temperature,
                 "max_tokens": spec.max_tokens,
-                "response_format": {"type": "json_object"},
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "retrieval_plan",
+                        "schema": RetrievalPlan.model_json_schema(),
+                        "strict": True,
+                    },
+                },
                 "chat_template_kwargs": {"enable_thinking": False},
             }
         )
