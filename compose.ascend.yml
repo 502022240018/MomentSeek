@@ -1,3 +1,13 @@
+# NPU overlay — stack on top of compose.yml (base) and compose.milvus.yml.
+#
+# Usage (Milvus must be running first):
+#   docker compose -f compose.yml -f compose.milvus.yml -f compose.ascend.yml up -d
+#
+# Prerequisites:
+#   - HOST_NPU_DEVICE_ID  must be set to an approved davinci device number (e.g. 0).
+#   - ASCEND_RUNTIME_IMAGE must point to a portable CANN/torch_npu ARM64 base image
+#     (defaults to local image ID 0a8e7788f0d1; override in .env for portability).
+#   - Ascend driver must be installed at /usr/local/Ascend/driver on the host.
 services:
   app:
     build:
@@ -6,12 +16,47 @@ services:
       args:
         ASCEND_RUNTIME_IMAGE: "${ASCEND_RUNTIME_IMAGE:-0a8e7788f0d1}"
     image: momentseek-mvp:ascend
+    container_name: momentseek-mvp-app-ascend
+    env_file:
+      - .env
     environment:
+      ENV_PROFILE: "${ENV_PROFILE:-prod.ascend}"
+      APP_DATA_DIR: /app/runtime
+      APP_MODEL_DIR: /app/models
+      APP_PUBLIC_URL: "${APP_PUBLIC_URL:-http://127.0.0.1:8000}"
       NPU_ENABLED: "true"
+      CUDA_ENABLED: "false"
+      MODEL_IDLE_POLICY: "${MODEL_IDLE_POLICY:-process_exit}"
+      VISUAL_MODEL: "${VISUAL_MODEL:-siglip2-so400m-384}"
+      VISUAL_HF_CACHE_DIR: "${VISUAL_HF_CACHE_DIR:-/app/runtime/hf_cache}"
+      # Semantic embedding stays on CPU; sentence-transformers on Ascend NPU
+      # is not validated — keep as "cpu" unless explicitly tested.
+      ASR_SEMANTIC_DEVICE: "${ASR_SEMANTIC_DEVICE:-cpu}"
+      # Face provider: InsightFace NPU path not yet validated; cpu is safe default.
+      FACE_PROVIDER: "${FACE_PROVIDER:-cpu}"
+      # OCR: "auto" selects Ascend ACL models when NPU_ENABLED=true.
+      OCR_DEVICE: "${OCR_DEVICE:-auto}"
+      # Ascend device routing
+      ASCEND_VISIBLE_DEVICES: "${HOST_NPU_DEVICE_ID:?HOST_NPU_DEVICE_ID must be set to an approved NPU device id}"
+      ASCEND_RT_VISIBLE_DEVICES: "${HOST_NPU_DEVICE_ID}"
+      # Milvus connection (resolved via Docker network DNS)
+      MILVUS_HOST: "${MILVUS_HOST:-milvus}"
+      MILVUS_PORT: "${MILVUS_PORT:-19530}"
+      MILVUS_WRITE_ENABLED: "${MILVUS_WRITE_ENABLED:-true}"
+      MILVUS_WRITE_FAIL_POLICY: "${MILVUS_WRITE_FAIL_POLICY:-raise}"
     devices:
-      - "/dev/davinci${HOST_NPU_DEVICE_ID:?set HOST_NPU_DEVICE_ID to an approved host NPU id}:/dev/davinci${HOST_NPU_DEVICE_ID:?set HOST_NPU_DEVICE_ID to an approved host NPU id}"
+      - "/dev/davinci${HOST_NPU_DEVICE_ID:?HOST_NPU_DEVICE_ID must be set}:/dev/davinci${HOST_NPU_DEVICE_ID}"
       - "/dev/davinci_manager:/dev/davinci_manager"
       - "/dev/devmm_svm:/dev/devmm_svm"
       - "/dev/hisi_hdc:/dev/hisi_hdc"
     volumes:
+      # Ascend driver is read-only; runtime/models volumes come from compose.yml.
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+    cpus: "${APP_CPUS:-12}"
+    mem_limit: "${APP_MEMORY_LIMIT:-16g}"
+    networks:
+      - momentseek
+
+networks:
+  momentseek:
+    name: momentseek-mvp-net

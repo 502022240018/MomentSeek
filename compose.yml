@@ -4,6 +4,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cpu
+      args:
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-}"
+        PIP_EXTRA_INDEX_URL: "${PIP_EXTRA_INDEX_URL:-}"
     image: momentseek-mvp:cpu
     container_name: momentseek-mvp-app
     restart: unless-stopped
@@ -18,8 +21,8 @@ services:
     volumes:
       - "${HOST_RUNTIME_DIR:-./runtime}:/app/runtime"
       - "${HOST_MODEL_DIR:-./models}:/app/models"
-    cpus: 24
-    mem_limit: 48g
+    cpus: "${APP_CPUS:-16}"
+    mem_limit: "${APP_MEMORY_LIMIT:-16g}"
     pids_limit: 4096
     shm_size: 4gb
     stop_grace_period: 30s

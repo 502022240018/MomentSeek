@@ -11,6 +11,8 @@ services:
     image: momentseek-mvp:cuda
     cpus: "${APP_CPUS:-12}"
     mem_limit: "${APP_MEMORY_LIMIT:-12g}"
+    env_file:
+      - .env
     environment:
       ENV_PROFILE: "${ENV_PROFILE:-dev.cuda}"
       APP_DATA_DIR: /app/runtime
@@ -25,8 +27,17 @@ services:
       FACE_PROVIDER: "${FACE_PROVIDER:-cpu}"
       OCR_DEVICE: "${OCR_DEVICE:-cpu}"
     volumes:
-      - "${HOST_RUNTIME_DIR:-./runtime-server}:/app/runtime"
+      - "${HOST_RUNTIME_DIR:-./runtime}:/app/runtime"
       - "${HOST_MODEL_DIR:-./models}:/app/models"
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    restart: unless-stopped
+    container_name: momentseek-mvp-app-cuda
+    pids_limit: 4096
+    shm_size: 4gb
+    stop_grace_period: 30s
+    networks:
+      - momentseek
     deploy:
       resources:
         reservations:
@@ -34,3 +45,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+networks:
+  momentseek:
+    name: momentseek-mvp-net

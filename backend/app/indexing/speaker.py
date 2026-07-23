@@ -150,6 +150,7 @@ def save_speaker_index(
     tracks, representatives = _track_caches(embeddings, track_indices)
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
+
     np.savez_compressed(
         target,
         utterance_embeddings=embeddings.astype(np.float16),
@@ -158,6 +159,7 @@ def save_speaker_index(
         track_embeddings=tracks.astype(np.float16),
         track_representative_indices=representatives,
     )
+
     return {"utterances": count, "tracks": len(tracks), "embedding_dim": embeddings.shape[1] if count else EMBEDDING_DIM}
 
 
@@ -212,22 +214,58 @@ def _extract_embeddings(pipeline, chunks: list[list[float]], waveform, batch_siz
 def build_speaker_index(
     *, video_path: str, asr_path: str, output_path: str, working_dir: str,
     model_repo: str, model_cache_dir: str, device: str = "cuda",
+    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
     started = time.perf_counter()
-    with np.load(asr_path, allow_pickle=False) as asr:
-        times = asr["chunk_times_ms"].astype(np.int32)
-        texts = [str(value) for value in asr["texts"]]
+    _asr_file = Path(asr_path)
+    if not _asr_file.exists() or _asr_file.stat().st_size == 0:
+        # asr.npz was removed after Milvus ingestion (Milvus-only mode).
+        # Read chunk times and texts from the ASR collection instead.
+        if milvus_ctx is None:
+            raise RuntimeError(
+                "asr.npz is absent but no milvus_ctx provided; "
+                "cannot read ASR data for speaker indexing"
+            )
+        from app.indexing.milvus_client import get_milvus_client
+        _client = get_milvus_client()
+        _rows = _client.collection_for("asr").query(
+            expr=f'video_id == "{milvus_ctx.video_id}"',
+            output_fields=["segment_idx", "start_ms", "end_ms", "text"],
+        )
+        # Deduplicate by segment_idx and rebuild arrays preserving original ordering.
+        _chunks_by_idx: dict[int, tuple[int, int, str]] = {}
+        for _r in _rows:
+            _idx = int(_r.get("segment_idx") or 0)
+            if _idx not in _chunks_by_idx:
+                _chunks_by_idx[_idx] = (int(_r["start_ms"]), int(_r["end_ms"]), str(_r.get("text") or ""))
+        if _chunks_by_idx:
+            _max_idx = max(_chunks_by_idx)
+            _times_list = [[0, 0]] * (_max_idx + 1)
+            _texts_list: list[str] = [""] * (_max_idx + 1)
+            for _idx, (_s, _e, _t) in _chunks_by_idx.items():
+                _times_list[_idx] = [_s, _e]
+                _texts_list[_idx] = _t
+            times = np.asarray(_times_list, dtype=np.int32)
+            texts = _texts_list
+        else:
+            times = np.empty((0, 2), dtype=np.int32)
+            texts = []
+    else:
+        with np.load(asr_path, allow_pickle=True) as asr:
+            times = asr["chunk_times_ms"].astype(np.int32)
+            texts = [str(value) for value in asr["texts"]]
     eligible = np.asarray([
         index for index, (bounds, text) in enumerate(zip(times, texts))
         if bounds[1] > bounds[0] and _meaningful(text)
     ], dtype=np.int32)
     if not len(eligible):
-        result = save_speaker_index(
-            output_path, utterance_times_ms=np.empty((0, 2), np.int32),
-            utterance_embeddings=np.empty((0, EMBEDDING_DIM), np.float32),
-            asr_chunk_indices=eligible, auto_track_indices=np.empty((0,), np.int32),
-        )
-        return {**result, "elapsed_seconds": round(time.perf_counter() - started, 3)}
+        # ASR 中无有效人声片段（纯背景音乐/无音频），跳过 speaker 索引
+        # 不写入任何文件（包括 NPZ），直接返回空结果
+        return {
+            "utterances": 0,
+            "tracks": 0,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+        }
 
     module = _load_3dspeaker(Path(model_repo))
     pipeline = module.Diarization3Dspeaker(device=device, model_cache_dir=model_cache_dir)
@@ -260,7 +298,7 @@ def build_speaker_index(
         utterance_embeddings=embeddings, asr_chunk_indices=chunk_indices,
         auto_track_indices=track_indices,
     )
-    return {
+    final = {
         **result,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
         "embedding_model": "iic/speech_campplus_sv_zh_en_16k-common_advanced",
@@ -269,6 +307,27 @@ def build_speaker_index(
         "clustering_backend": clustering_backend,
         "segmentation": "adaptive_speaker_turn_asr_boundary",
     }
+    if milvus_ctx is not None:
+        # P2: write directly from in-memory arrays — no NPZ round-trip.
+        # save_speaker_index already wrote the NPZ (needed for track caches);
+        # we reuse it as the recovery artifact, so recovery_save_fn is a no-op.
+        from app.indexing.milvus_indexer import write_modality_from_memory
+        norm_emb = _normalize(np.asarray(embeddings, dtype=np.float32))
+        refs_arr = np.column_stack((
+            np.asarray(chunk_indices, dtype=np.int32),
+            np.asarray(track_indices, dtype=np.int32),
+        ))
+        write_modality_from_memory(
+            milvus_ctx, "speaker",
+            {
+                "utterance_embeddings": norm_emb,
+                "utterance_times_ms":   np.asarray(utterance_times, dtype=np.int32),
+                "utterance_refs":       refs_arr,
+            },
+            recovery_save_fn=None,  # NPZ already written by save_speaker_index above
+        )
+        Path(output_path).unlink(missing_ok=True)
+    return final
 
 
 def encode_voice_query(

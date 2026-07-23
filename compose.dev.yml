@@ -1,8 +1,13 @@
 services:
   app:
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--reload"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--reload", "--log-level", "debug"]
     environment:
       WATCHFILES_FORCE_POLLING: "true"
     volumes:
       - ./backend/app:/app/backend/app
       - ./frontend/dist:/app/backend/app/static:ro
+      - pip-cache:/root/.cache/pip
+
+volumes:
+  pip-cache:
+  python-libs:

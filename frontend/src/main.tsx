@@ -47,7 +47,7 @@ function formatDuration(seconds?: number | null) {
 }
 
 function statusText(status: string) {
-  return ({ uploaded: "待索引", indexing: "索引中", ready: "可检索", failed: "失败", cancelled: "已取消", queued: "排队中", running: "运行中", completed: "已完成" } as Record<string, string>)[status] || status;
+  return ({ uploaded: "待索引", indexing: "索引中", ready: "可检索", failed: "失败", queued: "排队中", running: "运行中", completed: "已完成" } as Record<string, string>)[status] || status;
 }
 
 function App() {
@@ -85,8 +85,8 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="resource-pill"><span className="pulse" />索引模型常驻复用</div>
-          <small>单队列串行调度</small>
+          <div className="resource-pill"><span className="pulse" />模型按任务加载</div>
+          <small>空闲时不占用 NPU 显存</small>
         </div>
       </aside>
 
@@ -99,7 +99,7 @@ function App() {
         <section className="page-content">
           {page === "search" && <SearchPage videos={videos} setNotice={setNotice} />}
           {page === "assets" && <AssetsPage videos={videos} refresh={refresh} setNotice={setNotice} />}
-          {page === "indexes" && <IndexesPage jobs={jobs} videos={videos} refresh={refresh} setNotice={setNotice} />}
+          {page === "indexes" && <IndexesPage jobs={jobs} videos={videos} />}
           {page === "entities" && <EntitiesPage entities={entities} videos={videos} refresh={refresh} setNotice={setNotice} />}
           {page === "overview" && <Overview videos={videos} jobs={jobs} entities={entities} setPage={setPage} />}
         </section>
@@ -256,21 +256,11 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
   </div>;
 }
 
-function IndexesPage({ jobs, videos, refresh, setNotice }: { jobs: Job[]; videos: Video[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
+function IndexesPage({ jobs, videos }: { jobs: Job[]; videos: Video[] }) {
   const names = Object.fromEntries(videos.map(video => [video.id, video.name]));
-  const cancel = async (job: Job) => {
-    if (!window.confirm(`确定取消“${names[job.video_id] || job.video_id}”的索引任务吗？`)) return;
-    try {
-      await api.cancelJob(job.id);
-      setNotice("索引任务已取消");
-      await refresh();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "取消任务失败");
-    }
-  };
-  return <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">PIPELINE</span><h2>索引任务</h2></div><span>单队列串行执行 · 支持取消</span></div><div className="job-list">{jobs.map(job => {
+  return <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">PIPELINE</span><h2>索引任务</h2></div><span>阶段子进程退出后释放模型</span></div><div className="job-list">{jobs.map(job => {
     const stages = job.metrics?.stages || {};
-    return <div className="job-row" key={job.id}><div className={`job-state ${job.status}`}>{job.status === "completed" ? "✓" : job.status === "failed" ? "!" : job.status === "cancelled" ? "×" : "↻"}</div><div className="job-main"><b>{names[job.video_id] || job.video_id}</b><small>{job.modalities.join(" → ")} · 当前：{job.stage} · 总耗时 {formatDuration(job.metrics?.total_elapsed_seconds)}</small><div className="stage-times">{(["visual", "face", "asr", "speaker", "ocr"] as const).filter(stage => stages[stage] || (stage !== "speaker" && job.modalities.includes(stage))).map(stage => <span key={stage}>{stage}: {formatDuration(stages[stage]?.elapsed_seconds)}</span>)}</div><div className="progress"><span style={{ width: `${job.progress * 100}%` }} /></div></div><span className={`status ${job.status}`}>{statusText(job.status)}</span>{["queued", "running"].includes(job.status) && <button className="outline danger" onClick={() => cancel(job)}>取消</button>}{job.error && <p>{job.error}</p>}</div>;
+    return <div className="job-row" key={job.id}><div className={`job-state ${job.status}`}>{job.status === "completed" ? "✓" : job.status === "failed" ? "!" : "↻"}</div><div className="job-main"><b>{names[job.video_id] || job.video_id}</b><small>{job.modalities.join(" → ")} · 当前：{job.stage} · 总耗时 {formatDuration(job.metrics?.total_elapsed_seconds)}</small><div className="stage-times">{(["visual", "face", "asr", "speaker", "ocr"] as const).filter(stage => stages[stage] || (stage !== "speaker" && job.modalities.includes(stage))).map(stage => <span key={stage}>{stage}: {formatDuration(stages[stage]?.elapsed_seconds)}</span>)}</div><div className="progress"><span style={{ width: `${job.progress * 100}%` }} /></div></div><span className={`status ${job.status}`}>{statusText(job.status)}</span>{job.error && <p>{job.error}</p>}</div>;
   })}{!jobs.length && <div className="empty-list">还没有索引任务</div>}</div></div>;
 }
 

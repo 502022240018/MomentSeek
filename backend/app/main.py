@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import os
 import signal
 import shutil
@@ -32,6 +34,11 @@ from app.search import SearchEngine
 from app.speaker_service import video_speakers, voice_search, voice_search_vectors
 from app.settings import get_settings
 from app.worker import launch_job, subprocess_environment
+
+# Allow per-deployment log level tuning via APP_LOG_LEVEL env var (default INFO).
+# shadow_compare logs at INFO level; APP_LOG_LEVEL=DEBUG surfaces additional diagnostic output.
+_app_log_level = getattr(logging, os.getenv("APP_LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.getLogger("app").setLevel(_app_log_level)
 
 
 settings = get_settings()
@@ -110,6 +117,17 @@ def _restart_indexer_daemon() -> None:
 async def lifespan(_: FastAPI):
     global _indexer_daemon_process
     settings.ensure_dirs()
+    daemon = _spawn_indexer_daemon() if settings.indexer_mode == "daemon" else None
+    # Initialise Milvus client (collections are created on first access if absent).
+    if settings.milvus_write_enabled:
+        try:
+            from app.indexing.milvus_client import get_milvus_client
+            get_milvus_client()
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error(
+                "Milvus init failed: %s — indexing and search will not work", exc,
+            )
     _indexer_daemon_process = _spawn_indexer_daemon() if settings.indexer_mode == "daemon" else None
     try:
         yield
@@ -237,7 +255,19 @@ async def upload_video(
 def list_videos() -> list[dict]:
     videos = catalog.list_videos()
     for video in videos:
-        video["speaker_indexed"] = (settings.index_dir / video["id"] / "speaker.npz").exists()
+        # speaker_indexed is determined solely by Milvus (no NPZ files).
+        try:
+            from app.indexing.milvus_client import get_milvus_client
+            col = get_milvus_client().collection_for("speaker")
+            video["speaker_indexed"] = bool(
+                col.query(
+                    expr=f'video_id == "{video["id"]}"',
+                    output_fields=["utterance_idx"],
+                    limit=1,
+                )
+            )
+        except Exception:
+            video["speaker_indexed"] = False
     return videos
 
 
@@ -247,7 +277,18 @@ def get_video(video_id: str) -> dict:
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
     video["jobs"] = catalog.list_jobs(video_id)
-    video["speaker_indexed"] = (settings.index_dir / video_id / "speaker.npz").exists()
+    try:
+        from app.indexing.milvus_client import get_milvus_client
+        col = get_milvus_client().collection_for("speaker")
+        video["speaker_indexed"] = bool(
+            col.query(
+                expr=f'video_id == "{video_id}"',
+                output_fields=["utterance_idx"],
+                limit=1,
+            )
+        )
+    except Exception:
+        video["speaker_indexed"] = False
     return video
 
 
@@ -271,6 +312,16 @@ def delete_video(video_id: str) -> dict:
     for job in jobs:
         (settings.app_data_dir / f"job-{job['id']}.log").unlink(missing_ok=True)
     catalog.delete_video(video_id)
+    # Remove Milvus vectors so deleted videos never surface in search results.
+    if settings.milvus_write_enabled:
+        try:
+            from app.indexing.milvus_client import get_milvus_client
+            get_milvus_client().delete_video(video_id)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Milvus cleanup failed for deleted video=%s: %s", video_id, exc
+            )
     return {"status": "deleted", "id": video_id}
 
 
@@ -559,12 +610,17 @@ async def create_entity(name: str = Form(...), reference: UploadFile = File(...)
         raise HTTPException(status_code=400, detail=str(exc))
     embedding_path = reference_path.with_suffix(".npz")
     np.savez_compressed(embedding_path, embedding=vector.astype(np.float32))
+
+    # Phase 3: Store embedding in database as BLOB (dual-write)
+    face_embedding_blob = vector.astype(np.float32).tobytes()
+
     try:
         return catalog.create_entity({
             "id": entity_id,
             "name": name,
             "reference_path": str(reference_path),
             "embedding_path": str(embedding_path),
+            "face_embedding": face_embedding_blob,
         })
     except sqlite3.IntegrityError:
         reference_path.unlink(missing_ok=True)
@@ -618,6 +674,7 @@ def create_voice_only_entity(request: VoiceOnlyEntityRequest) -> dict:
         return catalog.create_entity({
             "id": uuid.uuid4().hex, "name": request.name,
             "reference_path": "", "embedding_path": None,
+            "face_embedding": None,
         })
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="该人物名称已存在") from exc
@@ -650,8 +707,8 @@ def add_entity_voice_sample(entity_id: str, request: VoiceSampleRequest) -> dict
         raise HTTPException(status_code=404, detail="人物不存在")
     path = settings.index_dir / request.video_id / "speaker.npz"
     try:
-        from app.indexing.speaker import load_speaker_index
-        data = load_speaker_index(path)
+        from app.speaker_service import _load_speaker_data
+        data = _load_speaker_data(path, request.video_id)
         vector = data["utterance_embeddings"][request.utterance_index].astype(np.float32)
     except (FileNotFoundError, IndexError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="声音片段不存在") from exc
@@ -659,11 +716,16 @@ def add_entity_voice_sample(entity_id: str, request: VoiceSampleRequest) -> dict
     embedding_path = settings.app_data_dir / "entities" / entity_id / "voice" / f"{sample_id}.npz"
     embedding_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(embedding_path, embedding=vector)
+
+    # Phase 3: Store voice embedding in database as BLOB (dual-write)
+    voice_embedding_blob = vector.tobytes()
+
     sample = catalog.create_voice_sample({
         "id": sample_id, "entity_id": entity_id, "source_type": "video_utterance",
         "source_video_id": request.video_id, "source_utterance_index": request.utterance_index,
         "audio_path": None, "embedding_path": str(embedding_path),
         "embedding_space": "3dspeaker-campplus-zh-en-192-v1",
+        "voice_embedding": voice_embedding_blob,
     })
     if request.bind_track_id is not None:
         catalog.bind_speaker_identity(request.video_id, request.bind_track_id, entity_id)

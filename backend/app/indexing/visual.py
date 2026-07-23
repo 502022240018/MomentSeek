@@ -642,6 +642,7 @@ def build_visual_index(
     max_segment_seconds: float = 8.0,
     shot_detector: str = "simple",
     shot_detector_threshold: float = 0.20,
+    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
@@ -760,8 +761,8 @@ def build_visual_index(
     }
     if explicit_segment_times is not None:
         payload["segment_times_ms"] = explicit_segment_times.astype(np.int32)
-    atomic_save_npz(output_path, **payload)
-    return {
+
+    result = {
         "segments_total": segments_total,
         "segments_with_frames": segments_with_frames,
         "empty_segments": empty_segments,
@@ -775,3 +776,20 @@ def build_visual_index(
         "segment_times": segment_time_source,
         "shot_detector": active_detector,
     }
+    if milvus_ctx is not None:
+        # P2: write directly from memory — no NPZ intermediate file on the hot path.
+        # NPZ is saved only as a recovery artifact if the Milvus write fails.
+        from app.indexing.milvus_indexer import write_modality_from_memory
+        write_modality_from_memory(
+            milvus_ctx, "visual",
+            {
+                "embeddings":             embeddings.astype(np.float32),
+                "frame_times_ms":         frame_times_ms_array,
+                "segment_frame_offsets":  segment_frame_offsets,
+                "segment_times_ms":       explicit_segment_times,
+            },
+            recovery_save_fn=lambda: atomic_save_npz(output_path, **payload),
+        )
+    else:
+        atomic_save_npz(output_path, **payload)
+    return result

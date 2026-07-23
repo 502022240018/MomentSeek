@@ -53,10 +53,6 @@ class ModelPool:
             return obj
 
     def evict_idle(self) -> list[str]:
-        # Product mode uses a card dedicated to indexing. A non-positive timeout
-        # therefore means "resident until daemon/container shutdown".
-        if self._idle_timeout <= 0:
-            return []
         cutoff = time.monotonic() - self._idle_timeout
         evicted = []
         with self._lock:
@@ -94,13 +90,6 @@ class ModelPool:
                 self._on_free(obj)
             except Exception:
                 pass
-        else:
-            close = getattr(obj, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
         del obj
         gc.collect()
         _empty_device_cache()

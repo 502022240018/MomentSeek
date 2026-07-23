@@ -6,24 +6,154 @@ from urllib.parse import urlencode
 import numpy as np
 
 from app.db import Catalog
-from app.indexing.speaker import load_speaker_index
 
 
 SPEAKER_PREVIEW_UTTERANCES = 5
 
 
-def _texts(asr_path: Path) -> list[str]:
-    with np.load(asr_path, allow_pickle=False) as data:
-        return [str(value) for value in data["texts"]]
+def _texts_from_milvus(video_id: str) -> list[str]:
+    """从 Milvus ASR collection 读取文本。
+
+    Returns:
+        按 segment_idx 排序的 ASR chunk 文本列表。
+        如果 Milvus 无数据或失败，返回空列表。
+    """
+    try:
+        from app.indexing.milvus_client import get_milvus_client
+
+        client = get_milvus_client()
+        col = client.collection_for("asr")
+
+        # Query all ASR records for this video
+        rows = col.query(
+            expr=f'video_id == "{video_id}"',
+            output_fields=["segment_idx", "text"],
+            limit=16384,  # Max reasonable ASR chunk count
+        )
+
+        if not rows:
+            return []
+
+        # Sort by segment_idx to match NPZ order
+        rows.sort(key=lambda r: int(r.get("segment_idx") or 0))
+
+        # Build sparse mapping: segment_idx -> text
+        # Some segment_idx may be missing (semantic indexing is sparse)
+        segment_texts: dict[int, str] = {}
+        for row in rows:
+            seg_idx = int(row.get("segment_idx") or 0)
+            text = str(row.get("text") or "")
+            segment_texts[seg_idx] = text
+
+        # Return dense list: fill missing indices with empty strings
+        if not segment_texts:
+            return []
+
+        max_idx = max(segment_texts.keys())
+        return [segment_texts.get(i, "") for i in range(max_idx + 1)]
+
+    except Exception:
+        # Any Milvus error (connection, query failure, etc.) returns empty list.
+        return []
+
+
+def _texts(video_id: str) -> list[str]:
+    """读取 ASR 文本，从 Milvus 读取（Milvus 是唯一存储后端）。"""
+    return _texts_from_milvus(video_id)
+
+
+def _speaker_data_from_milvus(video_id: str) -> "dict[str, np.ndarray] | None":
+    """从 Milvus speaker collection 重建与 load_speaker_index() 相同结构的字典。
+
+    Returns:
+        包含 utterance_embeddings / utterance_times_ms / utterance_refs /
+        track_embeddings / track_representative_indices 的字典，
+        或 None（Milvus 无数据或连接失败）。
+    """
+    try:
+        from app.indexing.milvus_client import get_milvus_client
+        from app.indexing.speaker import EMBEDDING_DIM
+
+        col = get_milvus_client().collection_for("speaker")
+        # Milvus caps (offset + limit) at 16 384.  Use QueryIterator when
+        # available (pymilvus ≥ 2.3) so videos with many utterances are
+        # handled correctly; fall back to the hard limit otherwise.
+        expr = f'video_id == "{video_id}"'
+        _fields = ["utterance_idx", "start_ms", "end_ms", "asr_chunk_idx", "track_id", "embedding"]
+        rows: list[dict] = []
+        if hasattr(col, "query_iterator"):
+            _iter = col.query_iterator(batch_size=2000, expr=expr, output_fields=_fields)
+            try:
+                while True:
+                    page = _iter.next()
+                    if not page:
+                        break
+                    rows.extend(page)
+            finally:
+                _iter.close()
+        else:
+            rows = col.query(expr=expr, output_fields=_fields, limit=16384)
+        if not rows:
+            return None
+
+        # Reconstruct utterance arrays sorted by utterance_idx.
+        rows.sort(key=lambda r: int(r.get("utterance_idx") or 0))
+        embeddings = np.array([r["embedding"] for r in rows], dtype=np.float32)
+        times = np.array(
+            [[int(r.get("start_ms") or 0), int(r.get("end_ms") or 0)] for r in rows],
+            dtype=np.int32,
+        )
+        refs = np.array(
+            [[int(r.get("asr_chunk_idx") or 0), int(r.get("track_id") or 0)] for r in rows],
+            dtype=np.int32,
+        )
+
+        # Normalise (Milvus stores raw float32; NPZ stores normalised float16).
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings /= np.maximum(norms, 1e-12)
+
+        # Recompute per-track centroids and representative utterance indices.
+        track_ids = refs[:, 1]
+        track_count = int(track_ids.max()) + 1 if len(embeddings) else 0
+        dim = embeddings.shape[1] if len(embeddings) else EMBEDDING_DIM
+        track_embeddings = np.zeros((track_count, dim), dtype=np.float32)
+        track_representatives = np.full((track_count,), -1, dtype=np.int32)
+        for t in range(track_count):
+            members = np.flatnonzero(track_ids == t)
+            if not len(members):
+                continue
+            center = embeddings[members].mean(axis=0)
+            center /= max(float(np.linalg.norm(center)), 1e-12)
+            track_embeddings[t] = center
+            track_representatives[t] = int(members[int(np.argmax(embeddings[members] @ center))])
+
+        return {
+            "utterance_embeddings":        embeddings.astype(np.float16),
+            "utterance_times_ms":          times,
+            "utterance_refs":              refs,
+            "track_embeddings":            track_embeddings.astype(np.float16),
+            "track_representative_indices": track_representatives,
+        }
+    except Exception:
+        return None
+
+
+def _load_speaker_data(speaker_path: Path, video_id: str) -> "dict[str, np.ndarray]":
+    """加载 speaker index，从 Milvus 读取（Milvus 是唯一存储后端）。
+
+    Raises FileNotFoundError if Milvus has no data for this video.
+    """
+    data = _speaker_data_from_milvus(video_id)
+    if data is not None:
+        return data
+    raise FileNotFoundError("该视频尚未构建 Speaker 索引")
 
 
 def video_speakers(index_dir: Path, catalog: Catalog, video_id: str) -> dict:
     speaker_path = index_dir / video_id / "speaker.npz"
-    asr_path = index_dir / video_id / "asr.npz"
-    if not speaker_path.exists() or not asr_path.exists():
-        raise FileNotFoundError("该视频尚未构建 Speaker 索引")
-    data = load_speaker_index(speaker_path)
-    texts = _texts(asr_path)
+    # _load_speaker_data reads from Milvus; raises FileNotFoundError when no data.
+    data = _load_speaker_data(speaker_path, video_id)
+    texts = _texts(video_id)
     overlays = catalog.speaker_overlays(video_id)
     refs = data["utterance_refs"].astype(np.int32)
     times = data["utterance_times_ms"].astype(np.int32)
@@ -113,7 +243,7 @@ def voice_search(
     video_ids: list[str] | None = None, limit: int = 50,
 ) -> list[dict]:
     query_path = index_dir / query_video_id / "speaker.npz"
-    query = load_speaker_index(query_path)
+    query = _load_speaker_data(query_path, query_video_id)
     if not 0 <= query_utterance_index < len(query["utterance_embeddings"]):
         raise IndexError("查询声音不存在")
     query_vector = query["utterance_embeddings"][query_utterance_index].astype(np.float32)
@@ -139,9 +269,10 @@ def voice_search_vectors(
         if selected is not None and video_id not in selected:
             continue
         path = index_dir / video_id / "speaker.npz"
-        if not path.exists():
+        try:
+            data = _load_speaker_data(path, video_id)
+        except FileNotFoundError:
             continue
-        data = load_speaker_index(path)
         vectors = data["utterance_embeddings"].astype(np.float32)
         if not len(vectors):
             continue
@@ -169,7 +300,42 @@ def voice_search_vectors(
     hits.sort(key=lambda item: item["score"], reverse=True)
     texts_by_video: dict[str, list[str]] = {}
     for hit in hits[:limit]:
-        texts = texts_by_video.setdefault(hit["video_id"], _texts(index_dir / hit["video_id"] / "asr.npz"))
+        vid = hit["video_id"]
+        texts = texts_by_video.setdefault(vid, _texts(vid))
         index = hit["asr_chunk_index"]
         hit["text"] = texts[index] if 0 <= index < len(texts) else ""
     return hits[:limit]
+
+
+def _load_voice_embeddings_for_entity(catalog: Catalog, entity_id: str) -> np.ndarray | None:
+    """从数据库 BLOB 加载实体的语音 embeddings。
+
+    Phase 3 起 voice_embedding 字段存储在数据库中，embedding_path 仅保留
+    对迁移前（Pre-Phase 3）遗留数据的兼容读取，新数据不再写入文件。
+
+    Returns:
+        形状为 [N, 192] 的 embeddings 数组，或 None（如果没有样本）
+    """
+    samples = catalog.list_voice_samples(entity_id)
+    if not samples:
+        return None
+
+    embeddings = []
+    for sample in samples:
+        if sample.get("voice_embedding"):
+            # 主路径：从数据库 BLOB 读取（Phase 3+）
+            vector = np.frombuffer(sample["voice_embedding"], dtype=np.float32)
+            embeddings.append(vector)
+        elif sample.get("embedding_path") and Path(sample["embedding_path"]).exists():
+            # 兼容路径：读取 Pre-Phase 3 遗留 embedding 文件（迁移完成后可删除此分支）
+            try:
+                vector = np.load(sample["embedding_path"])["embedding"]
+                embeddings.append(vector)
+            except Exception:
+                # 跳过损坏或格式不兼容的文件
+                continue
+
+    if not embeddings:
+        return None
+
+    return np.stack(embeddings, axis=0)
