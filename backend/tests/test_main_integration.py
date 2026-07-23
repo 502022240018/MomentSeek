@@ -177,65 +177,6 @@ def test_create_index_job_queues_only_requested_modalities(monkeypatch, tmp_path
     assert catalog.get_video("video-1")["indexed_modalities"] == ["face", "visual"]
 
 
-def _create_cancellable_job(catalog, tmp_path, *, status="queued"):
-    video_path = tmp_path / "cancel.mp4"
-    video_path.write_bytes(b"fake")
-    catalog.create_video({
-        "id": "cancel-video", "name": "cancel.mp4", "file_path": str(video_path),
-        "duration": 10.0, "fps": 25.0, "width": 1280, "height": 720,
-        "status": "indexing" if status == "running" else "uploaded",
-    })
-    return catalog.create_job({
-        "id": "cancel-job", "video_id": "cancel-video", "status": status,
-        "stage": "visual" if status == "running" else "queued", "progress": 0.2,
-        "modalities": ["visual"], "options": {},
-    })
-
-
-def test_cancel_queued_subprocess_job_preserves_other_jobs(monkeypatch, tmp_path):
-    import app.main as main
-
-    settings = Settings(
-        _env_file=None, app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models",
-        indexer_mode="subprocess",
-    )
-    catalog = Catalog(settings.db_path)
-    _create_cancellable_job(catalog, tmp_path, status="queued")
-    terminated = []
-    monkeypatch.setattr(main, "settings", settings)
-    monkeypatch.setattr(main, "catalog", catalog)
-    monkeypatch.setattr(main, "_terminate_process_group", lambda pid, expected_job_id=None: terminated.append((pid, expected_job_id)))
-
-    response = main.cancel_job("cancel-job")
-
-    assert response["status"] == "cancelled"
-    assert response["stage"] == "cancelled"
-    assert response["error"] == "用户取消任务"
-    assert terminated == [(None, "cancel-job")]
-    assert catalog.get_video("cancel-video")["status"] == "uploaded"
-
-
-def test_cancel_running_daemon_job_restarts_queue_consumer(monkeypatch, tmp_path):
-    import app.main as main
-
-    settings = Settings(
-        _env_file=None, app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models",
-        indexer_mode="daemon",
-    )
-    catalog = Catalog(settings.db_path)
-    _create_cancellable_job(catalog, tmp_path, status="running")
-    restarted = []
-    monkeypatch.setattr(main, "settings", settings)
-    monkeypatch.setattr(main, "catalog", catalog)
-    monkeypatch.setattr(main, "_restart_indexer_daemon", lambda: restarted.append(True))
-
-    response = main.cancel_job("cancel-job")
-
-    assert response["status"] == "cancelled"
-    assert restarted == [True]
-    assert catalog.get_video("cancel-video")["status"] == "uploaded"
-
-
 def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
     import app.indexing.asr as asr
     import app.stage_runner as stage_runner

@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS entities (
   name TEXT NOT NULL UNIQUE COLLATE NOCASE,
   reference_path TEXT NOT NULL,
   embedding_path TEXT,
+  face_embedding BLOB,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS video_speakers (
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS voice_samples (
   audio_path TEXT,
   embedding_path TEXT NOT NULL,
   embedding_space TEXT NOT NULL,
+  voice_embedding BLOB,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -89,9 +91,20 @@ class Catalog:
 
     @staticmethod
     def _ensure_columns(connection: sqlite3.Connection) -> None:
+        # Ensure jobs.metrics column
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()}
         if "metrics" not in columns:
             connection.execute("ALTER TABLE jobs ADD COLUMN metrics TEXT NOT NULL DEFAULT '{}'")
+
+        # Ensure entities.face_embedding column (Phase 3)
+        entity_columns = {row["name"] for row in connection.execute("PRAGMA table_info(entities)").fetchall()}
+        if "face_embedding" not in entity_columns:
+            connection.execute("ALTER TABLE entities ADD COLUMN face_embedding BLOB")
+
+        # Ensure voice_samples.voice_embedding column (Phase 3)
+        voice_columns = {row["name"] for row in connection.execute("PRAGMA table_info(voice_samples)").fetchall()}
+        if "voice_embedding" not in voice_columns:
+            connection.execute("ALTER TABLE voice_samples ADD COLUMN voice_embedding BLOB")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -204,14 +217,31 @@ class Catalog:
     def create_entity(self, record: dict) -> dict:
         with self.connect() as connection:
             connection.execute(
-                "INSERT INTO entities(id,name,reference_path,embedding_path) VALUES(:id,:name,:reference_path,:embedding_path)",
+                "INSERT INTO entities(id,name,reference_path,embedding_path,face_embedding) VALUES(:id,:name,:reference_path,:embedding_path,:face_embedding)",
                 record,
             )
         return self.get_entity(record["id"])
 
-    def update_entity_embedding(self, entity_id: str, embedding_path: str) -> None:
+    def update_entity_embedding(self, entity_id: str, embedding_path: str, face_embedding: bytes | None = None) -> None:
         with self.connect() as connection:
-            connection.execute("UPDATE entities SET embedding_path=? WHERE id=?", (embedding_path, entity_id))
+            if face_embedding is not None:
+                connection.execute(
+                    "UPDATE entities SET embedding_path=?, face_embedding=? WHERE id=?",
+                    (embedding_path, face_embedding, entity_id)
+                )
+            else:
+                connection.execute("UPDATE entities SET embedding_path=? WHERE id=?", (embedding_path, entity_id))
+
+    # Binary columns that must never be sent to API clients as raw bytes —
+    # they are stored as BLOBs for internal use only.  Strip them from any
+    # dict returned to callers so FastAPI / Pydantic do not attempt UTF-8
+    # serialisation of the raw float32 buffers.
+    _ENTITY_BLOB_FIELDS     = frozenset({"face_embedding"})
+    _VOICE_SAMPLE_BLOB_FIELDS = frozenset({"voice_embedding"})
+
+    @staticmethod
+    def _strip(row: dict, fields: frozenset) -> dict:
+        return {k: v for k, v in row.items() if k not in fields}
 
     def list_entities(self) -> list[dict]:
         with self.connect() as connection:
@@ -219,12 +249,12 @@ class Catalog:
                 """SELECT e.*, COUNT(v.id) AS voice_sample_count FROM entities e
                    LEFT JOIN voice_samples v ON v.entity_id=e.id GROUP BY e.id ORDER BY e.name"""
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._strip(dict(row), self._ENTITY_BLOB_FIELDS) for row in rows]
 
     def get_entity(self, entity_id: str) -> dict | None:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM entities WHERE id=?", (entity_id,)).fetchone()
-        return dict(row) if row else None
+        return self._strip(dict(row), self._ENTITY_BLOB_FIELDS) if row else None
 
     def rename_entity(self, entity_id: str, name: str) -> bool:
         with self.connect() as connection:
@@ -299,8 +329,8 @@ class Catalog:
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO voice_samples(
-                   id,entity_id,source_type,source_video_id,source_utterance_index,audio_path,embedding_path,embedding_space
-                   ) VALUES(:id,:entity_id,:source_type,:source_video_id,:source_utterance_index,:audio_path,:embedding_path,:embedding_space)""",
+                   id,entity_id,source_type,source_video_id,source_utterance_index,audio_path,embedding_path,embedding_space,voice_embedding
+                   ) VALUES(:id,:entity_id,:source_type,:source_video_id,:source_utterance_index,:audio_path,:embedding_path,:embedding_space,:voice_embedding)""",
                 record,
             )
         return self.get_voice_sample(record["id"])
@@ -308,14 +338,14 @@ class Catalog:
     def get_voice_sample(self, sample_id: str) -> dict | None:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM voice_samples WHERE id=?", (sample_id,)).fetchone()
-        return dict(row) if row else None
+        return self._strip(dict(row), self._VOICE_SAMPLE_BLOB_FIELDS) if row else None
 
     def list_voice_samples(self, entity_id: str) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM voice_samples WHERE entity_id=? ORDER BY created_at", (entity_id,)
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._strip(dict(row), self._VOICE_SAMPLE_BLOB_FIELDS) for row in rows]
 
     @staticmethod
     def _decode_video(row: sqlite3.Row) -> dict:

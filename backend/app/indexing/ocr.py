@@ -530,6 +530,7 @@ def build_ocr_index(
     engine: str = "rapidocr",
     acl_model_dir: str | Path | None = None,
     backend: OCRBackend | None = None,
+    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
     if sample_fps <= 0:
         raise ValueError("ocr_sample_fps 必须大于 0")
@@ -667,14 +668,45 @@ def build_ocr_index(
                 "semantic_status": "unavailable",
                 "semantic_error": str(exc),
             }
-    _save_ocr_npz(
-        output_path,
-        chunks,
-        embeddings,
-        embedding_frame_indices,
-    )
-
     result.update(semantic_result)
+    if milvus_ctx is not None:
+        # P2: extract arrays from in-memory chunks and write directly to Milvus.
+        # NPZ is saved only as a recovery artifact if the Milvus write fails.
+        from app.indexing.milvus_indexer import write_modality_from_memory
+
+        box_frame_indices_list: list[int] = []
+        box_texts_list: list[str] = []
+        box_scores_list: list[float] = []
+        frame_times_ms_list: list[int] = []
+        frame_windows_ms_list: list[list[int]] = []
+        for frame_index, chunk in enumerate(chunks):
+            ft = int(round(float(chunk.get("frame_time", chunk.get("start_time", 0))) * 1000))
+            frame_times_ms_list.append(ft)
+            frame_windows_ms_list.append([
+                int(round(float(chunk.get("start_time", 0)) * 1000)),
+                int(round(float(chunk.get("end_time", 0)) * 1000)),
+            ])
+            for item in chunk.get("items", []):
+                box_frame_indices_list.append(frame_index)
+                box_texts_list.append(str(item.get("text", "")).strip())
+                box_scores_list.append(float(item.get("score", 0.0)))
+
+        write_modality_from_memory(
+            milvus_ctx, "ocr",
+            {
+                "frame_times_ms":          np.asarray(frame_times_ms_list, dtype=np.int32),
+                "frame_windows_ms":        np.asarray(frame_windows_ms_list, dtype=np.int32).reshape((-1, 2)),
+                "embeddings":              np.asarray(embeddings, dtype=np.float32) if embeddings.size else None,
+                "embedding_frame_indices": np.asarray(embedding_frame_indices, dtype=np.int32) if embedding_frame_indices.size else None,
+                "box_frame_indices":       np.asarray(box_frame_indices_list, dtype=np.int32) if box_frame_indices_list else None,
+                "box_texts":               box_texts_list if box_texts_list else None,
+                "box_scores":              np.asarray(box_scores_list, dtype=np.float32) if box_scores_list else None,
+            },
+            recovery_save_fn=lambda: _save_ocr_npz(output_path, chunks, embeddings, embedding_frame_indices),
+        )
+    else:
+        _save_ocr_npz(output_path, chunks, embeddings, embedding_frame_indices)
+
     return result
 
 
@@ -714,6 +746,11 @@ def _save_ocr_npz(
             box_texts.append(str(item.get("text", "")).strip())
             box_scores.append(float(item.get("score", 0.0)))
             boxes.append(_normalized_box(item.get("box"), frame_shape))
+
+    # Phase 4: NPZ write gate has been moved to build_ocr_index() — after the
+    # Milvus write — so that write_modality_to_milvus() can read real data from
+    # the NPZ before it is truncated to an empty placeholder.  This function
+    # now always writes the full NPZ unconditionally.
     atomic_save_npz(
         output_path,
         frame_times_ms=np.asarray(frame_times_ms, dtype=np.int32),
@@ -725,3 +762,4 @@ def _save_ocr_npz(
         box_scores=np.asarray(box_scores, dtype=np.float32),
         boxes=np.stack(boxes).astype(np.float32) if boxes else np.empty((0, 4, 2), dtype=np.float32),
     )
+

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -12,8 +13,88 @@ def _hf_cached_snapshot_path(model_dir: str | Path, model_name: str) -> Path | N
     return hf_cached_snapshot_path(model_dir, model_name)
 
 
+
+# 加载本地下载模型时使用的---shenxiuqi
+def _looks_like_sentence_transformer_dir(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+
+    has_config = (path / "config.json").exists() or (path / "modules.json").exists()
+    has_weights = (
+        (path / "model.safetensors").exists()
+        or (path / "pytorch_model.bin").exists()
+        or any(path.glob("**/model.safetensors"))
+        or any(path.glob("**/pytorch_model.bin"))
+    )
+    has_tokenizer = (
+        (path / "tokenizer.json").exists()
+        or (path / "tokenizer_config.json").exists()
+        or (path / "vocab.txt").exists()
+        or any(path.glob("**/tokenizer.json"))
+    )
+
+    return has_config and has_weights and has_tokenizer
+
+def _local_model_path_candidates(model_dir: str | Path, model_name: str) -> list[Path]:
+    root = Path(model_dir)
+    raw = Path(model_name)
+
+    candidates: list[Path] = []
+
+    # 1. model_name 本身就是绝对路径或相对路径。
+    candidates.append(raw)
+
+    # 2. model_dir / model_name。
+    # 如果 model_name 是 "paraphrase-multilingual-MiniLM-L12-v2"，会找：
+    # models/text-embeddings/paraphrase-multilingual-MiniLM-L12-v2
+    candidates.append(root / model_name)
+
+    # 3. 兼容 "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"。
+    # 会额外找：
+    # models/text-embeddings/paraphrase-multilingual-MiniLM-L12-v2
+    candidates.append(root / model_name.split("/")[-1])
+
+    # 去重，同时保持顺序。
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if key not in seen:
+            deduped.append(candidate)
+            seen.add(key)
+
+    return deduped
+
+
+'''
 def _resolve_model_source(model_name: str, model_dir: str | Path, local_files_only: bool) -> tuple[str, bool]:
     return resolve_hf_model_source(model_dir, model_name, local_files_only=local_files_only)
+'''
+
+
+# 加载本地下载模型时使用的---shenxiuqi
+def _resolve_model_source(model_name: str, model_dir: str | Path, local_files_only: bool) -> tuple[str, bool]:
+    # 1. 优先支持普通本地模型目录。
+    # 例如：
+    # model_dir = D:/projects/git/backend/models/text-embeddings
+    # model_name = paraphrase-multilingual-MiniLM-L12-v2
+    # => D:/projects/git/backend/models/text-embeddings/paraphrase-multilingual-MiniLM-L12-v2
+    for candidate in _local_model_path_candidates(model_dir, model_name):
+        if _looks_like_sentence_transformer_dir(candidate):
+            return str(candidate), True
+
+    # 2. 再支持 Hugging Face cache 结构。
+    # 例如：
+    # models/text-embeddings/hub/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/snapshots/...
+    if local_files_only:
+        snapshot = _hf_cached_snapshot_path(model_dir, model_name)
+        if snapshot is not None:
+            return str(snapshot), True
+
+    # 3. 最后回退到原 model_name。
+    # 如果 local_files_only=True 且本地没有模型，这里会让 SentenceTransformer 明确报错。
+    return model_name, local_files_only
+
 
 
 def resolve_text_embedding_device(device: str, cuda_enabled: bool = False) -> str:

@@ -853,6 +853,7 @@ def build_asr_index(
     save_raw_transcript: bool = False,
     debug_output_dir: str | None = None,
     vad_strategy: str = "funasr_fsmn",
+    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
     effective_model = model_name
     semantic_result: dict | None = None
@@ -1057,16 +1058,6 @@ def build_asr_index(
         repair_stats={**chunk_builder_stats, **raw_parser_stats},
     )
 
-    _save_asr_npz(
-        output_path,
-        chunks,
-        np.asarray(semantic_result["embeddings"], dtype=np.float16)
-        if semantic_result is not None
-        else np.empty((0, 0), dtype=np.float16),
-        np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32)
-        if semantic_result is not None
-        else np.empty((0,), dtype=np.int32),
-    )
     result = {
         "chunks": len(chunks),
         "raw_chunks": len(raw_items),
@@ -1094,6 +1085,52 @@ def build_asr_index(
             for key, value in semantic_result.items()
             if key not in {"embeddings", "embedding_chunk_indices"}
         })
+    if milvus_ctx is not None:
+        # P2: write directly from the in-memory chunks — no NPZ on the hot path.
+        # NPZ is saved only as a recovery artifact if the Milvus write fails.
+        from app.indexing.milvus_indexer import write_modality_from_memory
+
+        def _chunk_time_ms(chunk: dict, ms_key: str, sec_key: str, leg_key: str) -> int:
+            if ms_key in chunk:
+                return int(chunk[ms_key])
+            return int(round(float(chunk.get(sec_key, chunk.get(leg_key, 0))) * 1000))
+
+        chunk_times_ms = np.asarray([
+            [
+                _chunk_time_ms(c, "start_ms", "start_time", "start"),
+                _chunk_time_ms(c, "end_ms",   "end_time",   "end"),
+            ]
+            for c in chunks
+        ], dtype=np.int32).reshape((-1, 2))
+        texts_list = [str(c.get("text", "")).strip() for c in chunks]
+        emb_arr   = np.asarray(semantic_result["embeddings"], dtype=np.float32) if semantic_result is not None else None
+        eci_arr   = np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32) if semantic_result is not None else None
+        write_modality_from_memory(
+            milvus_ctx, "asr",
+            {
+                "chunk_times_ms":          chunk_times_ms,
+                "texts":                   texts_list,
+                "embeddings":              emb_arr,
+                "embedding_chunk_indices": eci_arr,
+            },
+            recovery_save_fn=lambda: _save_asr_npz(
+                output_path,
+                chunks,
+                np.asarray(semantic_result["embeddings"], dtype=np.float16) if semantic_result is not None else np.empty((0, 0), dtype=np.float16),
+                np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32) if semantic_result is not None else np.empty((0,), dtype=np.int32),
+            ),
+        )
+    else:
+        _save_asr_npz(
+            output_path,
+            chunks,
+            np.asarray(semantic_result["embeddings"], dtype=np.float16)
+            if semantic_result is not None
+            else np.empty((0, 0), dtype=np.float16),
+            np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32)
+            if semantic_result is not None
+            else np.empty((0,), dtype=np.int32),
+        )
     return result
 
 
@@ -1122,6 +1159,7 @@ def _save_asr_npz(
     texts = np.asarray([str(chunk.get("text", "")).strip() for chunk in chunks], dtype="U")
     chunk_emotions = utf8_bytes_array([str(chunk.get("emotion", "")).strip() for chunk in chunks])
     chunk_audio_events = utf8_bytes_array([str(chunk.get("audio_event", "")).strip() for chunk in chunks])
+
     atomic_save_npz(
         output_path,
         chunk_times_ms=chunk_times_ms,
@@ -1131,3 +1169,4 @@ def _save_asr_npz(
         embeddings=np.asarray(embeddings, dtype=np.float16),
         embedding_chunk_indices=np.asarray(embedding_chunk_indices, dtype=np.int32),
     )
+

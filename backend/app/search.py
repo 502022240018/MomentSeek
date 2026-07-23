@@ -603,39 +603,17 @@ def _ocr_chunks_from_npz(data) -> list[dict]:
     return chunks
 
 
-def _remap_embedding_frame_times_to_chunk_indices(
-    chunks: list[dict],
-    embedding_frame_times_ms: np.ndarray | None,
-) -> np.ndarray | None:
-    """
-    OCR 新 schema 的 embedding_chunk_indices 保存的是 frame_ms。
-    但 _asr_candidates 内部需要 embedding_id -> chunk_id。
-    所以这里把 frame_ms 映射成当前重建 chunks 的 chunk_id。
-    """
-    if embedding_frame_times_ms is None:
-        return None
 
-    frame_to_chunk_id = {
-        int(chunk["frame_ms"]): int(chunk["chunk_id"])
-        for chunk in chunks
-        if "frame_ms" in chunk and "chunk_id" in chunk
-    }
+def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict]:
+    """Return (manifest, channel_manifest) for *channel* without checking file existence.
 
-    values = np.asarray(embedding_frame_times_ms, dtype=np.int32).reshape((-1,))
-    return np.asarray(
-        [frame_to_chunk_id.get(int(frame_ms), -1) for frame_ms in values],
-        dtype=np.int32,
+    Raises ValueError if the channel is absent from the index manifest, which
+    means the video was never indexed for that modality.
+    """
+    manifest, channel_manifest = require_channel_manifest(
+        index_dir, str(video.get("name") or video["id"]), channel
     )
-
-
-def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict, Path]:
-    manifest, channel_manifest = require_channel_manifest(index_dir, str(video.get("name") or video["id"]), channel)
-    default_files = {"visual": "visual.npz", "face": "face.npz", "asr": "asr.npz", "ocr": "ocr.npz"}
-    file_name = str(channel_manifest.get("file") or default_files[channel])
-    index_file = index_dir / file_name
-    if not index_file.exists():
-        raise ValueError(f"视频 {video.get('name') or video['id']} 缺少 {channel} v3 索引文件，请重跑该通道")
-    return manifest, channel_manifest, index_file
+    return manifest, channel_manifest
 
 
 def _round_optional(value: float | None, digits: int) -> float | None:
@@ -951,94 +929,80 @@ class SearchEngine:
                 face_query = self._face().encode_reference(image_path)
             elif text:
                 entity = self.catalog.find_entity_in_text(text)
-                if entity and entity.get("embedding_path") and Path(entity["embedding_path"]).exists():
-                    face_query = np.load(entity["embedding_path"])["embedding"]
+                if entity and entity.get("face_embedding"):
+                    face_query = np.frombuffer(entity["face_embedding"], dtype=np.float32)
+
+        from app.indexing.milvus_client import get_milvus_client
+        from app.indexing.milvus_search import (
+            MilvusServiceError,
+            milvus_asr_candidates,
+            milvus_face_candidates,
+            milvus_ocr_candidates,
+            milvus_visual_candidates,
+        )
 
         for video in videos:
-            index_dir = self.settings.index_dir / video["id"]
+            video_id = video["id"]
+            index_dir = self.settings.index_dir / video_id
             indexed_modalities = set(video.get("indexed_modalities") or [])
+
+            # ---- VISUAL -------------------------------------------------------
             if wants_visual and "visual" in indexed_modalities:
-                manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "visual")
-                with np.load(index_file, allow_pickle=False) as data:
-                    visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
-                    if visual_model not in visual_queries:
-                        visual_queries[visual_model] = self._clip(visual_model).encode_query(text, image_path, alpha)
-                    visual_query = visual_queries[visual_model]
-                    candidates.extend(_visual_candidates(
-                        data,
-                        visual_query,
-                        video["id"],
-                        int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
-                        int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
-                        visual_profile,
-                        limit * 3,
-                        str(channel_manifest.get("segment_strategy") or "fixed"),
-                    ))
+                manifest, channel_manifest = _channel_manifest_for(video, index_dir, "visual")
+                visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
+                if visual_model not in visual_queries:
+                    visual_queries[visual_model] = self._clip(visual_model).encode_query(text, image_path, alpha)
+                visual_query = visual_queries[visual_model]
+                duration_ms = int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000))
+                segment_ms  = int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000))
+                candidates.extend(milvus_visual_candidates(
+                    get_milvus_client(), video_id, visual_query,
+                    duration_ms, segment_ms, visual_profile, limit * 3,
+                ))
+
+            # ---- FACE ---------------------------------------------------------
             if face_query is not None and "face" in indexed_modalities:
-                _manifest, _channel_manifest, index_file = _channel_manifest_for(video, index_dir, "face")
-                with np.load(index_file, allow_pickle=False) as data:
-                    candidates.extend(_face_candidates(data, face_query, video["id"], limit * 3, 0.35))
+                candidates.extend(milvus_face_candidates(
+                    get_milvus_client(), video_id, face_query, limit * 3, 0.35,
+                ))
+
+            # ---- ASR ----------------------------------------------------------
             if "asr" in modalities and text and "asr" in indexed_modalities:
-                _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "asr")
-                with np.load(index_file, allow_pickle=False) as data:
-                    semantic_embeddings, embedding_chunk_indices = _semantic_arrays(data)
-                    semantic_query = None
-                    if semantic_embeddings is not None:
-                        model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
-                        try:
-                            semantic_query = self._encode_asr_query(text, model_name)
-                        except Exception:
-                            semantic_query = None
-                    candidates.extend(_asr_candidates(
-                        _asr_chunks_from_npz(data),
-                        text,
-                        video["id"],
-                        limit * 3,
-                        semantic_embeddings=semantic_embeddings,
-                        embedding_chunk_indices=embedding_chunk_indices,
-                        semantic_query=semantic_query,
-                    ))
-            if "ocr" in modalities and text and "ocr" in indexed_modalities:
-                _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
-                if int(channel_manifest.get("schema_version") or 0) != 3:
-                    raise ValueError(f"视频 {video.get('name') or video['id']} 的 OCR 索引不是重构后的 v3，请重跑 OCR 索引")
-                with np.load(index_file, allow_pickle=False) as data:
-                    semantic_embeddings = data["embeddings"].astype(np.float32) if "embeddings" in data.files else None
-                    if semantic_embeddings is not None and (
-                        semantic_embeddings.ndim != 2
-                        or semantic_embeddings.shape[0] == 0
-                        or semantic_embeddings.shape[1] == 0
-                    ):
-                        semantic_embeddings = None
-                    embedding_chunk_indices = (
-                        data["embedding_frame_indices"].astype(np.int32)
-                        if "embedding_frame_indices" in data.files else None
+                _manifest, channel_manifest = _channel_manifest_for(video, index_dir, "asr")
+                model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
+                sem_query: np.ndarray | None = None
+                try:
+                    sem_query = self._encode_asr_query(text, model_name)
+                except Exception as _enc_err:
+                    import logging as _log
+                    _log.getLogger(__name__).warning(
+                        "ASR semantic query encoding failed (model=%s): %s — lexical-only fallback",
+                        model_name, _enc_err,
                     )
-                    if semantic_embeddings is not None and embedding_chunk_indices is None:
-                        raise ValueError("ocr v3 索引缺少 embedding_frame_indices，请重跑 OCR 索引")
-                    if (
-                        semantic_embeddings is not None
-                        and len(embedding_chunk_indices) != semantic_embeddings.shape[0]
-                    ):
-                        raise ValueError("ocr v3 semantic 数组长度不一致，请重跑 OCR 索引")
-                    semantic_query = None
+                candidates.extend(milvus_asr_candidates(
+                    get_milvus_client(), video_id, text, sem_query, limit * 3,
+                ))
 
-                    if semantic_embeddings is not None:
-                        model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
-                        semantic_query = self._encode_asr_query(text, model_name)
-
-                    ocr_chunks = _ocr_chunks_from_npz(data)
-
-                    candidates.extend(_asr_candidates(
-                        ocr_chunks,
-                        text,
-                        video["id"],
-                        limit * 3,
-                        modality="ocr",
-                        semantic_embeddings=semantic_embeddings,
-                        embedding_chunk_indices=embedding_chunk_indices,
-                        semantic_query=semantic_query,
-                    ))
+            # ---- OCR ----------------------------------------------------------
+            if "ocr" in modalities and text and "ocr" in indexed_modalities:
+                _manifest, channel_manifest = _channel_manifest_for(video, index_dir, "ocr")
+                if int(channel_manifest.get("schema_version") or 0) != 3:
+                    raise ValueError(
+                        f"视频 {video.get('name') or video_id} 的 OCR 索引不是重构后的 v3，请重跑 OCR 索引"
+                    )
+                model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
+                ocr_sem_query: np.ndarray | None = None
+                try:
+                    ocr_sem_query = self._encode_asr_query(text, model_name)
+                except Exception as _enc_err:
+                    import logging as _log
+                    _log.getLogger(__name__).warning(
+                        "OCR semantic query encoding failed (model=%s): %s — lexical-only fallback",
+                        model_name, _enc_err,
+                    )
+                candidates.extend(milvus_ocr_candidates(
+                    get_milvus_client(), video_id, text, ocr_sem_query, limit * 3,
+                ))
 
         names = {video["id"]: video["name"] for video in videos}
         # Each modality score is calibrated to a comparable [0,1] scale, so these

@@ -100,6 +100,7 @@ def build_face_index(
     encoder: "FaceEncoder | None" = None,
     decode_height: int = 0,
     prefer_ffmpeg: bool = True,
+    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
@@ -170,18 +171,36 @@ def build_face_index(
         ])
 
     dimension = len(embeddings[0]) if embeddings else 512
-    atomic_save_npz(
-        output_path,
-        embeddings=np.stack(embeddings).astype(np.float32) if embeddings else np.empty((0, dimension), np.float32),
-        track_times_ms=np.asarray(track_times_ms, dtype=np.int32).reshape((-1, 3)),
-    )
-    return {
+
+    if milvus_ctx is not None:
+        # P2: write directly from the in-memory embeddings and track_times_ms.
+        from app.indexing.milvus_indexer import write_modality_from_memory
+        emb_arr   = np.stack(embeddings).astype(np.float32) if embeddings else np.empty((0, dimension), np.float32)
+        times_arr = np.asarray(track_times_ms, dtype=np.int32).reshape((-1, 3))
+        write_modality_from_memory(
+            milvus_ctx, "face",
+            {"embeddings": emb_arr, "track_times_ms": times_arr},
+            recovery_save_fn=lambda: atomic_save_npz(
+                output_path,
+                embeddings=emb_arr,
+                track_times_ms=times_arr,
+            ),
+        )
+    else:
+        atomic_save_npz(
+            output_path,
+            embeddings=np.stack(embeddings).astype(np.float32) if embeddings else np.empty((0, dimension), np.float32),
+            track_times_ms=np.asarray(track_times_ms, dtype=np.int32).reshape((-1, 3)),
+        )
+
+    result = {
         "tracks": len(embeddings),
         "detections": detections,
         "provider": encoder.provider,
         "schema_version": 3,
         "decode_status": "complete" if embeddings else "empty",
     }
+    return result
 
 
 def encode_face_reference(

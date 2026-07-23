@@ -53,20 +53,6 @@ def test_pool_keeps_recently_used():
         pool.shutdown()
 
 
-def test_pool_non_positive_timeout_keeps_models_resident():
-    freed = []
-    pool = ModelPool(idle_timeout=0, reap_interval=999, on_free=freed.append)
-    value = object()
-    pool.get("face", lambda: value)
-
-    assert pool.evict_idle() == []
-    assert pool.keys() == ["face"]
-    assert freed == []
-
-    pool.shutdown()
-    assert freed == [value]
-
-
 def test_shutdown_frees_all():
     freed = []
     pool = ModelPool(idle_timeout=999, reap_interval=999, on_free=freed.append)

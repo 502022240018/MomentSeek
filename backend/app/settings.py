@@ -106,6 +106,21 @@ class Settings(BaseSettings):
     ocr_npu_self_test: bool = True
     ocr_acl_model_dir: str = "rapidocr/ascend/910b4-cann9-profile"
 
+    # ---------------------------------------------------------------------------
+    # Milvus integration
+    # ---------------------------------------------------------------------------
+    milvus_host: str = "milvus"
+    milvus_port: int = 19530
+
+    # Milvus is the sole storage backend — write_enabled is always True in
+    # production.  Disable only for local development without a Milvus instance.
+    milvus_write_enabled: bool = True
+
+    # Write-failure policy: "raise" (default) | "warn"
+    # "raise" — indexing job fails immediately on Milvus write error (recommended).
+    # "warn"  — log only; the modality will be missing from Milvus (dev/testing).
+    milvus_write_fail_policy: str = "raise"
+
     @property
     def db_path(self) -> Path:
         return self.app_data_dir / "catalog.sqlite3"

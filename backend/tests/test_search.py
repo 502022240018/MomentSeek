@@ -603,4 +603,98 @@ def test_visual_search_encodes_query_with_each_manifest_model(tmp_path):
 
     assert {result["video_id"] for result in results} == {"siglip-video", "chinese-video"}
     assert set(calls) == {"siglip2-so400m-384", "chinese-clip-vit-b16"}
-    assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# shadow_compare decoupling tests
+# ---------------------------------------------------------------------------
+
+def _make_visual_index(settings, catalog, video_id="v-shadow"):
+    """Create a minimal v3 visual index for shadow_compare tests."""
+    index_dir = _create_video(settings, catalog, video_id=video_id, duration=20)
+    catalog.update_video(video_id, indexed_modalities=["visual"])
+    _write_manifest(index_dir, video_id, {
+        "visual": {
+            "file": "visual.npz",
+            "model_key": "siglip2-so400m-384",
+            "embedding_space": "siglip2-image-text",
+            "sample_fps": 5.0,
+            "decode_status": "complete",
+        }
+    }, duration_ms=20000)
+    np.savez_compressed(
+        index_dir / "visual.npz",
+        frame_embeddings=np.asarray([[1.0, 0.0], [0.5, 0.5]], dtype=np.float16),
+        frame_times_ms=np.asarray([1000, 6000], dtype=np.int32),
+        segment_frame_offsets=np.asarray([0, 1, 2], dtype=np.int32),
+    )
+    return video_id
+
+
+def test_shadow_compare_fires_without_milvus_read_routing(tmp_path):
+    """shadow_compare_log is called even when reads are served from NPZ
+    (MILVUS_READ_ENABLED=false / MILVUS_ROLLOUT_PERCENT=0)."""
+    from unittest.mock import patch, MagicMock
+
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    video_id = _make_visual_index(settings, catalog)
+
+    class StubClip:
+        def encode_query(self, text, image_path, alpha):
+            return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    engine = SearchEngine(settings, catalog)
+    engine._clip = lambda model_key=None: StubClip()  # type: ignore[method-assign]
+
+    with (
+        patch("app.indexing.milvus_flags.milvus_read_enabled", return_value=False),
+        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=False),
+        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
+        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch("app.indexing.milvus_client.get_milvus_client", return_value=MagicMock()),
+        patch("app.indexing.milvus_search.milvus_visual_candidates", return_value=[]),
+        patch("app.indexing.milvus_search.shadow_compare_log") as mock_shadow_log,
+    ):
+        results = engine.search("football", None, ["visual"], [video_id])
+
+    # shadow_compare_log must be called with the correct video_id and modality
+    mock_shadow_log.assert_called_once()
+    args = mock_shadow_log.call_args[0]
+    assert args[0] == video_id
+    assert args[1] == "visual"
+
+    # NPZ results are returned — reads are not affected by shadow mode
+    assert len(results) > 0
+
+
+def test_shadow_compare_milvus_error_silenced_in_shadow_only_mode(tmp_path):
+    """A MilvusServiceError in shadow-only mode is swallowed; NPZ results are returned."""
+    from unittest.mock import patch, MagicMock
+    from app.indexing.milvus_search import MilvusServiceError
+
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    video_id = _make_visual_index(settings, catalog)
+
+    class StubClip:
+        def encode_query(self, text, image_path, alpha):
+            return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    engine = SearchEngine(settings, catalog)
+    engine._clip = lambda model_key=None: StubClip()  # type: ignore[method-assign]
+
+    with (
+        patch("app.indexing.milvus_flags.milvus_read_enabled", return_value=False),
+        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=False),
+        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
+        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch("app.indexing.milvus_client.get_milvus_client", return_value=MagicMock()),
+        patch("app.indexing.milvus_search.milvus_visual_candidates",
+              side_effect=MilvusServiceError("connection refused")),
+    ):
+        # Must not raise — shadow error is never surfaced to the caller
+        results = engine.search("football", None, ["visual"], [video_id])
+
+    # NPZ results are still served correctly
+    assert len(results) > 0

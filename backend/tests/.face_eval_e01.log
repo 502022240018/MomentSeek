@@ -1,0 +1,100 @@
+D:\projects\git\.venv\Lib\site-packages\insightface\utils\face_align.py:23: FutureWarning: `estimate` is deprecated since version 0.26 and will be removed in version 2.2. Please use `SimilarityTransform.from_estimate` class constructor instead.
+  tform.estimate(lmk, dst)
+D:\projects\git\backend\tests\face_recall_eval.py:294: UserWarning: Glyph 29255 (\N{CJK UNIFIED IDEOGRAPH-7247}) missing from font(s) DejaVu Sans.
+  fig.tight_layout()
+D:\projects\git\backend\tests\face_recall_eval.py:294: UserWarning: Glyph 27573 (\N{CJK UNIFIED IDEOGRAPH-6BB5}) missing from font(s) DejaVu Sans.
+  fig.tight_layout()
+D:\projects\git\backend\tests\face_recall_eval.py:294: UserWarning: Glyph 26102 (\N{CJK UNIFIED IDEOGRAPH-65F6}) missing from font(s) DejaVu Sans.
+  fig.tight_layout()
+D:\projects\git\backend\tests\face_recall_eval.py:294: UserWarning: Glyph 38271 (\N{CJK UNIFIED IDEOGRAPH-957F}) missing from font(s) DejaVu Sans.
+  fig.tight_layout()
+D:\projects\git\backend\tests\face_recall_eval.py:294: UserWarning: Glyph 21306 (\N{CJK UNIFIED IDEOGRAPH-533A}) missing from font(s) DejaVu Sans.
+  fig.tight_layout()
+D:\projects\git\backend\tests\face_recall_eval.py:294: UserWarning: Glyph 38388 (\N{CJK UNIFIED IDEOGRAPH-95F4}) missing from font(s) DejaVu Sans.
+  fig.tight_layout()
+D:\projects\git\backend\tests\face_recall_eval.py:294: UserWarning: Glyph 21629 (\N{CJK UNIFIED IDEOGRAPH-547D}) missing from font(s) DejaVu Sans.
+  fig.tight_layout()
+D:\projects\git\backend\tests\face_recall_eval.py:294: UserWarning: Glyph 20013 (\N{CJK UNIFIED IDEOGRAPH-4E2D}) missing from font(s) DejaVu Sans.
+  fig.tight_layout()
+D:\projects\git\backend\tests\face_recall_eval.py:294: UserWarning: Glyph 29575 (\N{CJK UNIFIED IDEOGRAPH-7387}) missing from font(s) DejaVu Sans.
+  fig.tight_layout()
+D:\projects\git\backend\tests\face_recall_eval.py:296: UserWarning: Glyph 21629 (\N{CJK UNIFIED IDEOGRAPH-547D}) missing from font(s) DejaVu Sans.
+  fig.savefig(output_path, dpi=130)
+D:\projects\git\backend\tests\face_recall_eval.py:296: UserWarning: Glyph 20013 (\N{CJK UNIFIED IDEOGRAPH-4E2D}) missing from font(s) DejaVu Sans.
+  fig.savefig(output_path, dpi=130)
+D:\projects\git\backend\tests\face_recall_eval.py:296: UserWarning: Glyph 29575 (\N{CJK UNIFIED IDEOGRAPH-7387}) missing from font(s) DejaVu Sans.
+  fig.savefig(output_path, dpi=130)
+D:\projects\git\backend\tests\face_recall_eval.py:296: UserWarning: Glyph 29255 (\N{CJK UNIFIED IDEOGRAPH-7247}) missing from font(s) DejaVu Sans.
+  fig.savefig(output_path, dpi=130)
+D:\projects\git\backend\tests\face_recall_eval.py:296: UserWarning: Glyph 27573 (\N{CJK UNIFIED IDEOGRAPH-6BB5}) missing from font(s) DejaVu Sans.
+  fig.savefig(output_path, dpi=130)
+D:\projects\git\backend\tests\face_recall_eval.py:296: UserWarning: Glyph 26102 (\N{CJK UNIFIED IDEOGRAPH-65F6}) missing from font(s) DejaVu Sans.
+  fig.savefig(output_path, dpi=130)
+D:\projects\git\backend\tests\face_recall_eval.py:296: UserWarning: Glyph 38271 (\N{CJK UNIFIED IDEOGRAPH-957F}) missing from font(s) DejaVu Sans.
+  fig.savefig(output_path, dpi=130)
+D:\projects\git\backend\tests\face_recall_eval.py:296: UserWarning: Glyph 21306 (\N{CJK UNIFIED IDEOGRAPH-533A}) missing from font(s) DejaVu Sans.
+  fig.savefig(output_path, dpi=130)
+D:\projects\git\backend\tests\face_recall_eval.py:296: UserWarning: Glyph 38388 (\N{CJK UNIFIED IDEOGRAPH-95F4}) missing from font(s) DejaVu Sans.
+  fig.savefig(output_path, dpi=130)
+====================================================================
+人脸模态评测 | person=sherlock | episodes=e01
+fps=2 threshold=0.35 hit_ratio=0.5 merge_gap=2
+====================================================================
+
+[1] 编码参考图: D:\Data\VPCD\query_pic\sherlock.png
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\1k3d68.onnx landmark_3d_68 ['None', 3, 192, 192] 0.0 1.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\2d106det.onnx landmark_2d_106 ['None', 3, 192, 192] 0.0 1.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\det_10g.onnx detection [1, 3, '?', '?'] 127.5 128.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\genderage.onnx genderage ['None', 3, 96, 96] 0.0 1.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\w600k_r50.onnx recognition ['None', 3, 112, 112] 127.5 127.5
+set det-size: (640, 640)
+
+[2] 索引与检索
+  [e01] 建立人脸索引 (fps=2)，视频较大请耐心等待…
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\1k3d68.onnx landmark_3d_68 ['None', 3, 192, 192] 0.0 1.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\2d106det.onnx landmark_2d_106 ['None', 3, 192, 192] 0.0 1.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\det_10g.onnx detection [1, 3, '?', '?'] 127.5 128.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\genderage.onnx genderage ['None', 3, 96, 96] 0.0 1.0
+Applied providers: ['CPUExecutionProvider'], with options: {'CPUExecutionProvider': {}}
+find model: D:\projects\git\backend\models\insightface\models\buffalo_l\w600k_r50.onnx recognition ['None', 3, 112, 112] 127.5 127.5
+set det-size: (640, 640)
+  [e01] 索引完成: tracks=1814 detections=11285
+  [e01] 命中 track=343 合并后预测段=272 覆盖=2097.0s
+
+[3] 加载 GT: D:\Data\VPCD\sherlock_simple_gt\sherlock_face_segments_flat.csv
+  [e01] GT 片段数=475 总时长=1869.2s
+
+[4] 指标
+--------------------------------------------------------------------
+  GT 片段总数              : 475
+  段级查全率(主) [覆盖>=0.5]: 66.3%  (315/475)
+  段级查全率 [任意重叠]    : 84.6%  (402/475)
+  时间覆盖召回             : 76.6%  (1431.0/1869.2s)
+  时间精确率               : 68.2%  (1431.0/2097.0s)
+  时间 F1                  : 72.2%
+  命中 track 余弦: min=0.356 mean=0.673 max=0.972
+--------------------------------------------------------------------
+
+[5] duration-命中率直方图
+
+duration-命中率直方图（文本）:
+  时长区间           片段数    命中      命中率   条形
+  0-1s            65    27    41.5%   ████████████
+  1-2s           121    47    38.8%   ████████████
+  2-3s            94    57    60.6%   ██████████████████
+  3-5s            88    84    95.5%   █████████████████████████████
+  5-10s           78    73    93.6%   ████████████████████████████
+  10-20s          21    20    95.2%   █████████████████████████████
+  20-∞s            8     7    87.5%   ██████████████████████████
+  直方图已保存: D:\projects\git\backend\tests\.face_eval_cache\duration_hitrate_e01_fps2_th0.35.png
+
+完成。
