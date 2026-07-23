@@ -89,12 +89,36 @@ export type SearchResult = {
   decision?: string;
   above_threshold: boolean;
   evidence: Evidence[];
+  retrieval_score?: number;
+  rerank_score?: number | null;
+  original_rank?: number;
+};
+
+export type OrchestrationComponent = {
+  provider: string;
+  type: string;
+  model: string;
+  prompt_version: string;
+};
+
+export type OrchestrationProfile = {
+  name: string;
+  description: string;
+  planner?: OrchestrationComponent | null;
+  reranker?: OrchestrationComponent | null;
+};
+
+export type OrchestrationProfiles = {
+  enabled: boolean;
+  default_profile: string;
+  profiles: OrchestrationProfile[];
 };
 
 export type SearchResponse = {
   count: number;
   above_count?: number;
   elapsed_seconds?: number;
+  execution?: Record<string, any>;
   results: SearchResult[];
 };
 
@@ -124,6 +148,7 @@ export const api = {
   cancelJob: (jobId: string) =>
     json<Job>(`/api/jobs/${jobId}/cancel`, { method: "POST" }),
   entities: () => json<Entity[]>("/api/entities"),
+  orchestrationProfiles: () => json<OrchestrationProfiles>("/api/orchestration/profiles"),
   renameEntity: (entityId: string, name: string) =>
     json<Entity>(`/api/entities/${entityId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }),
   deleteEntity: (entityId: string) =>
@@ -194,6 +219,9 @@ export const api = {
     videoIds: string[];
     alpha: number;
     limit?: number;
+    orchestrationProfile?: string;
+    plannerMode?: "auto" | "off" | "force";
+    rerankerMode?: "auto" | "off" | "force";
   }) => {
     const form = new FormData();
     if (params.queryText) form.append("query_text", params.queryText);
@@ -202,6 +230,9 @@ export const api = {
     form.append("video_ids", JSON.stringify(params.videoIds));
     form.append("alpha", String(params.alpha));
     form.append("limit", String(params.limit ?? 50));
+    if (params.orchestrationProfile) form.append("orchestration_profile", params.orchestrationProfile);
+    form.append("planner_mode", params.plannerMode ?? "auto");
+    form.append("reranker_mode", params.rerankerMode ?? "auto");
     return json<SearchResponse>("/api/search", { method: "POST", body: form });
   },
 };

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, Entity, Job, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
+import { api, Entity, Job, OrchestrationProfile, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
 import {
   defaultIndexConfiguration,
   IndexConfiguration,
@@ -119,8 +119,20 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
   const [results, setResults] = useState<SearchResult[]>([]);
   const [searchElapsed, setSearchElapsed] = useState<number | undefined>();
   const [playing, setPlaying] = useState<SearchResult>();
+  const [orchestrationProfiles, setOrchestrationProfiles] = useState<OrchestrationProfile[]>([]);
+  const [orchestrationProfile, setOrchestrationProfile] = useState("");
+  const [plannerMode, setPlannerMode] = useState<"auto" | "off" | "force">("auto");
+  const [rerankerMode, setRerankerMode] = useState<"auto" | "off" | "force">("auto");
+  const [execution, setExecution] = useState<Record<string, any>>();
 
   useEffect(() => { if (!selected.length && ready.length) setSelected(ready.map(video => video.id)); }, [ready.length]);
+  useEffect(() => {
+    api.orchestrationProfiles().then(value => {
+      if (!value.enabled) return;
+      setOrchestrationProfiles(value.profiles);
+      setOrchestrationProfile(value.default_profile);
+    }).catch(() => undefined);
+  }, []);
   const toggleMode = (mode: string) => setModalities(value => value.includes(mode) ? value.filter(item => item !== mode) : [...value, mode]);
   const submit = async () => {
     if (!query.trim() && !image) return setNotice("请输入文字或上传参考图");
@@ -128,9 +140,13 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
     if (!modalities.length) return setNotice("请至少启用一个检索通道");
     setLoading(true);
     try {
-      const response = await api.search({ queryText: query.trim(), queryImage: image, modalities, videoIds: selected, alpha });
+      const response = await api.search({
+        queryText: query.trim(), queryImage: image, modalities, videoIds: selected, alpha,
+        orchestrationProfile: orchestrationProfile || undefined, plannerMode, rerankerMode,
+      });
       setResults(response.results);
       setSearchElapsed(response.elapsed_seconds);
+      setExecution(response.execution);
       if (!response.results.length) setNotice("没有超过当前阈值的片段，可以换个描述或通道再试");
     } catch (error) { setNotice(error instanceof Error ? error.message : "检索失败"); }
     finally { setLoading(false); }
@@ -168,12 +184,24 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
             <span>{modalities.includes(value) ? "✓" : "+"}</span><b>{title}</b><small>{sub}</small>
           </button>)}
       </div>
+      {orchestrationProfiles.length > 0 && <div className="orchestration-controls">
+        <div><b>智能检索编排</b><small>记录通路、参数、Prompt 和精排结果</small></div>
+        <label>实验 Profile<select value={orchestrationProfile} onChange={event => setOrchestrationProfile(event.target.value)}>
+          {orchestrationProfiles.map(profile => <option value={profile.name} key={profile.name}>{profile.name}</option>)}
+        </select></label>
+        <label>Planner<select value={plannerMode} onChange={event => setPlannerMode(event.target.value as "auto" | "off" | "force")}>
+          <option value="auto">自动</option><option value="off">关闭</option><option value="force">强制</option>
+        </select></label>
+        <label>Reranker<select value={rerankerMode} onChange={event => setRerankerMode(event.target.value as "auto" | "off" | "force")}>
+          <option value="auto">按计划</option><option value="off">关闭</option><option value="force">强制</option>
+        </select></label>
+      </div>}
       {query && image && modalities.includes("visual") && <div className="alpha-control"><span>文字权重 {Math.round(alpha * 100)}%</span><input type="range" min="0" max="1" step="0.05" value={alpha} onChange={event => setAlpha(Number(event.target.value))} /></div>}
       <button className="primary" disabled={loading} onClick={submit}>{loading ? <><span className="spinner" />正在检索</> : <>开始检索 <span>→</span></>}</button>
     </div>
 
     <div className="results-panel">
-      <div className="results-head"><div><span className="panel-label">MOMENTS</span><h2>{results.length ? `${results.length} 个相关片段` : "在视频中找到那个瞬间"}</h2>{searchElapsed !== undefined && <small className="time-note">检索耗时 {formatDuration(searchElapsed)}{belowCount > 0 ? ` · ${aboveCount} 命中 / ${belowCount} 低于阈值` : ""}</small>}</div>{results.length > 0 && <button className="text-button" onClick={() => setResults([])}>清空结果</button>}</div>
+      <div className="results-head"><div><span className="panel-label">MOMENTS</span><h2>{results.length ? `${results.length} 个相关片段` : "在视频中找到那个瞬间"}</h2>{searchElapsed !== undefined && <small className="time-note">检索耗时 {formatDuration(searchElapsed)}{belowCount > 0 ? ` · ${aboveCount} 命中 / ${belowCount} 低于阈值` : ""}</small>}{execution && <details className="execution-trace"><summary>查看本次 Planner / Reranker 执行记录</summary><pre>{JSON.stringify(execution, null, 2)}</pre></details>}</div>{results.length > 0 && <button className="text-button" onClick={() => { setResults([]); setExecution(undefined); }}>清空结果</button>}</div>
       {!results.length ? <div className="examples">
         <Example title="参考图中的人物" tags={["FACE", "VISUAL"]} text="上传一张清晰正脸，找出人物所有出现片段" setQuery={setQuery} />
         <Example title="舞台上讲话" tags={["VISUAL"]} text="a person speaking on a stage" setQuery={setQuery} />
@@ -194,7 +222,7 @@ function ResultCard({ result, onPlay }: { result: SearchResult; onPlay: () => vo
   const below = result.above_threshold === false;
   return <article className={`result-card${below ? " below" : ""}`} onClick={onPlay}>
     <div className="result-thumb">{result.thumbnail_url ? <img src={result.thumbnail_url} /> : <div className="thumb-placeholder">M</div>}<button>▶</button><span>{formatTime(result.start_time)} — {formatTime(result.end_time)}</span></div>
-    <div className="result-body"><div className="result-title"><h3>{result.video_name}</h3><b>{Math.round(result.score * 100)}%</b></div><div className="chips">{result.modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}{below && <span className="chip below-tag">低于阈值</span>}</div><p>{result.evidence.find(item => item.detail)?.detail || "视觉向量相似度命中"}</p></div>
+    <div className="result-body"><div className="result-title"><h3>{result.video_name}</h3><b>{Math.round(result.score * 100)}%</b></div><div className="chips">{result.modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}{result.rerank_score !== undefined && result.rerank_score !== null && <span className="chip reranked">VLM {Math.round(result.rerank_score * 100)}%</span>}{below && <span className="chip below-tag">低于阈值</span>}</div><p>{result.evidence.find(item => item.detail)?.detail || "视觉向量相似度命中"}</p></div>
   </article>;
 }
 

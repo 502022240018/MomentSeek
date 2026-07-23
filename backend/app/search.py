@@ -938,6 +938,7 @@ class SearchEngine:
         merge_gap: float = 2,
         max_result_seconds: float = 15,
         visual_profile: str = "balanced",
+        channel_limits: dict[str, int] | None = None,
     ) -> list[dict]:
         if visual_profile not in {"recall", "balanced", "precision"}:
             raise ValueError("visual_profile 必须是 recall、balanced 或 precision")
@@ -946,6 +947,10 @@ class SearchEngine:
             allowed = set(video_ids)
             videos = [video for video in videos if video["id"] in allowed]
         candidates: list[Candidate] = []
+        requested_channel_limits = channel_limits or {}
+
+        def channel_limit(name: str) -> int:
+            return max(1, int(requested_channel_limits.get(name, limit * 3)))
 
         visual_queries: dict[str, np.ndarray] = {}
         wants_visual = "visual" in modalities and bool(text or image_path)
@@ -976,13 +981,13 @@ class SearchEngine:
                         int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
                         int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
                         visual_profile,
-                        limit * 3,
+                        channel_limit("visual"),
                         str(channel_manifest.get("segment_strategy") or "fixed"),
                     ))
             if face_query is not None and "face" in indexed_modalities:
                 _manifest, _channel_manifest, index_file = _channel_manifest_for(video, index_dir, "face")
                 with np.load(index_file, allow_pickle=False) as data:
-                    candidates.extend(_face_candidates(data, face_query, video["id"], limit * 3, 0.35))
+                    candidates.extend(_face_candidates(data, face_query, video["id"], channel_limit("face"), 0.35))
             if "asr" in modalities and text and "asr" in indexed_modalities:
                 _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "asr")
                 with np.load(index_file, allow_pickle=False) as data:
@@ -998,7 +1003,7 @@ class SearchEngine:
                         _asr_chunks_from_npz(data),
                         text,
                         video["id"],
-                        limit * 3,
+                        channel_limit("asr"),
                         semantic_embeddings=semantic_embeddings,
                         embedding_chunk_indices=embedding_chunk_indices,
                         semantic_query=semantic_query,
@@ -1038,7 +1043,7 @@ class SearchEngine:
                         ocr_chunks,
                         text,
                         video["id"],
-                        limit * 3,
+                        channel_limit("ocr"),
                         modality="ocr",
                         semantic_embeddings=semantic_embeddings,
                         embedding_chunk_indices=embedding_chunk_indices,
