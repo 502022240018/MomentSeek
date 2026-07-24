@@ -29,9 +29,13 @@ services:
       # OCR falls back to CPU (onnxruntime) when NPU_ENABLED=false.
       OCR_DEVICE: "${OCR_DEVICE:-cpu}"
       ASR_SEMANTIC_DEVICE: "${ASR_SEMANTIC_DEVICE:-cpu}"
+      SPEAKER_DEVICE: "${SPEAKER_DEVICE:-cpu}"
+      SPEAKER_MODEL_REPO: "${SPEAKER_MODEL_REPO:-/app/models/3D-Speaker}"
+      SPEAKER_MODEL_CACHE_DIR: "${SPEAKER_MODEL_CACHE_DIR:-/app/models/3dspeaker-cache}"
       # Milvus connection (resolved via Docker network DNS)
       MILVUS_HOST: "${MILVUS_HOST:-milvus}"
       MILVUS_PORT: "${MILVUS_PORT:-19530}"
+      MILVUS_QUERY_TIMEOUT_SECONDS: "${MILVUS_QUERY_TIMEOUT_SECONDS:-3}"
       MILVUS_ENABLED: "${MILVUS_ENABLED:-true}"
       MILVUS_READ_ENABLED: "${MILVUS_READ_ENABLED:-true}"
       MILVUS_WRITE_ENABLED: "${MILVUS_WRITE_ENABLED:-true}"

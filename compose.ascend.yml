@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.ascend
       args:
-        ASCEND_RUNTIME_IMAGE: "${ASCEND_RUNTIME_IMAGE:-0a8e7788f0d1}"
+        ASCEND_RUNTIME_IMAGE: "${ASCEND_RUNTIME_IMAGE:-swr.cn-south-1.myhuaweicloud.com/ascendhub/mindie:3.0.0b2-800I-A2-py311-openeuler24.03-lts}"
     image: momentseek-mvp:ascend
     environment:
       NPU_ENABLED: "true"
@@ -16,6 +16,9 @@ services:
       BLIS_NUM_THREADS: "${BLIS_NUM_THREADS:-8}"
       TOKENIZERS_PARALLELISM: "${TOKENIZERS_PARALLELISM:-false}"
       NPU_WORKER_MODE: "${NPU_WORKER_MODE:-isolated}"
+      SPEAKER_DEVICE: "${SPEAKER_DEVICE:-npu}"
+      SPEAKER_MODEL_REPO: "${SPEAKER_MODEL_REPO:-/app/models/3D-Speaker}"
+      SPEAKER_MODEL_CACHE_DIR: "${SPEAKER_MODEL_CACHE_DIR:-/app/models/3dspeaker-cache}"
     devices:
       - "/dev/davinci${HOST_NPU_DEVICE_ID:?set HOST_NPU_DEVICE_ID to an approved host NPU id}:/dev/davinci${HOST_NPU_DEVICE_ID:?set HOST_NPU_DEVICE_ID to an approved host NPU id}"
       - "/dev/davinci_manager:/dev/davinci_manager"

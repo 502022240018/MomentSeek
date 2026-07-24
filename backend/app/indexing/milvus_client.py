@@ -7,6 +7,7 @@ build functions — pass it via MilvusWriteContext instead.
 from __future__ import annotations
 
 import logging
+import socket
 from typing import Optional
 
 from pymilvus import Collection, CollectionSchema, connections, utility
@@ -75,6 +76,23 @@ _COLLECTION_FOR_MODALITY: dict[str, str] = {
 }
 
 
+def ensure_milvus_reachable() -> None:
+    """Fail fast before PyMilvus enters its longer gRPC reconnect loop."""
+    settings = get_settings()
+    timeout = min(0.5, settings.milvus_query_timeout_seconds)
+    try:
+        with socket.create_connection(
+            (settings.milvus_host, settings.milvus_port),
+            timeout=timeout,
+        ):
+            return
+    except OSError as exc:
+        raise ConnectionError(
+            f"Milvus is unreachable at "
+            f"{settings.milvus_host}:{settings.milvus_port}: {exc}"
+        ) from exc
+
+
 class MilvusClient:
     """Application-scoped Milvus client.
 
@@ -97,7 +115,12 @@ class MilvusClient:
         host = s.milvus_host
         port = str(s.milvus_port)
         logger.info("Connecting to Milvus at %s:%s", host, port)
-        connections.connect(alias="default", host=host, port=port)
+        connections.connect(
+            alias="default",
+            host=host,
+            port=port,
+            timeout=s.milvus_query_timeout_seconds,
+        )
         self._ready = True
         self._init_collections()
         logger.info("MilvusClient ready — %d collections", len(_COLLECTION_CONFIGS))

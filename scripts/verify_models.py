@@ -111,6 +111,12 @@ def hf_snapshot_exists(target: Path, model_id: str) -> bool:
 
 
 def verify_non_hf_target(kind: str, target: Path, model_id: str) -> bool:
+    if kind == "source":
+        return (
+            is_non_empty_file(target / "speakerlab" / "bin" / "infer_diarization.py")
+            and is_non_empty_file(target / ".momentseek-revision")
+            and (target / ".momentseek-revision").read_text(encoding="utf-8").strip() == model_id
+        )
     if kind == "directory":
         return has_non_empty_file_with_suffix(
             target, {".onnx", ".om", ".pt", ".bin", ".safetensors"}
@@ -144,7 +150,7 @@ def verify_entry(entry: dict[str, Any], allow_download: bool) -> dict[str, Any]:
         if not verified and allow_download:
             local_path = download_hf_model(target, model_id)
             verified = hf_snapshot_has_assets(local_path)
-    elif kind in {"directory", "insightface", "whisper", "rapidocr"}:
+    elif kind in {"directory", "insightface", "whisper", "rapidocr", "source"}:
         verified = verify_non_hf_target(kind, target, model_id)
     else:
         raise ValueError(f"unsupported model kind for {name}: {kind}")

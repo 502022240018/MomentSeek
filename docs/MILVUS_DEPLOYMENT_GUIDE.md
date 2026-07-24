@@ -46,9 +46,10 @@ docker logs momentseek-milvus --tail 50
 
 ## 第二步：重新构建应用镜像（包含 pymilvus）
 
-因为我们添加了 `pymilvus==2.4.15` 依赖，需要重建应用镜像。客户端与
-`milvusdb/milvus:v2.4.15` 服务端保持同一版本线；同时固定
-`setuptools<81`，兼容该客户端仍使用的 `pkg_resources`。
+正式试用版使用 `pymilvus==2.6.16` 和
+`milvusdb/milvus:v2.6.20`。2.4 数据目录不得直接挂载到 2.6；本项目从
+空 collection 建库并通过保留的 NPZ 全量 backfill。详细版本选择见
+`docs/DEPENDENCY_BASELINE.md`。
 
 ### 2.1 停止现有应用容器
 
@@ -335,8 +336,8 @@ docker compose version
 # 宿主机 NPU 设备编号（必填）
 HOST_NPU_DEVICE_ID=0
 
-# CANN/torch_npu ARM64 基础镜像（本地 ID 或 registry tag）
-ASCEND_RUNTIME_IMAGE=0a8e7788f0d1
+# CANN/torch_npu ARM64 基础镜像（使用可追溯 registry tag，不使用本机 image ID）
+ASCEND_RUNTIME_IMAGE=swr.cn-south-1.myhuaweicloud.com/ascendhub/mindie:3.0.0b2-800I-A2-py311-openeuler24.03-lts
 
 # 应用访问地址
 APP_PUBLIC_URL=http://<服务器IP>:8000

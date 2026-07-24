@@ -166,11 +166,10 @@ def test_ascend_profiles_cap_cpu_inference_thread_pools():
     for variable in variables:
         assert f"{variable}=8" in dockerfile
         assert f"{variable}: \"${{{variable}:-8}}\"" in compose
-        assert f"{variable}=8" in deploy_script
         assert f'-e {variable}="$CPU_THREAD_LIMIT"' in deploy_script
     assert "TOKENIZERS_PARALLELISM=false" in dockerfile
     assert 'TOKENIZERS_PARALLELISM: "${TOKENIZERS_PARALLELISM:-false}"' in compose
-    assert deploy_script.count("TOKENIZERS_PARALLELISM=false") >= 2
+    assert deploy_script.count("TOKENIZERS_PARALLELISM=false") >= 1
     assert 'CPU_THREAD_LIMIT="${CPU_THREAD_LIMIT:-8}"' in deploy_script
 
 

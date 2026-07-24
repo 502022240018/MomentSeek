@@ -38,7 +38,7 @@ services:
       - momentseek
 
   milvus:
-    image: milvusdb/milvus:v2.4.15
+    image: milvusdb/milvus:v2.6.20
     container_name: ${COMPOSE_PROJECT_NAME:-momentseek-mvp}-milvus
     depends_on:
       - etcd

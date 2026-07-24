@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     # Hugging Face. Pre-cache/mount the model, or set this false for local dev.
     asr_semantic_local_files_only: bool = True
 
-    speaker_device: str = "cuda"
+    speaker_device: str = "auto"
     speaker_model_repo: str = "3D-Speaker"
     speaker_model_cache_dir: str = "3dspeaker-cache"
 
@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     milvus_enabled: bool = True
     milvus_host: str = "milvus"
     milvus_port: int = 19530
+    # Bound fail-open retrieval latency. A request stops retrying Milvus after
+    # its first failed operation and serves remaining videos from NPZ.
+    milvus_query_timeout_seconds: float = 3.0
     milvus_read_enabled: bool = True
     milvus_write_enabled: bool = True
     milvus_fallback_enabled: bool = True
@@ -160,6 +163,13 @@ class Settings(BaseSettings):
     def validate_milvus_rollout_percent(cls, value: int) -> int:
         if not 0 <= value <= 100:
             raise ValueError("milvus_rollout_percent 必须在 0 到 100 之间")
+        return value
+
+    @field_validator("milvus_query_timeout_seconds")
+    @classmethod
+    def validate_milvus_query_timeout_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("milvus_query_timeout_seconds 必须大于 0")
         return value
 
     @property

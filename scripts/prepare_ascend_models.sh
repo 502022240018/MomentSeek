@@ -8,6 +8,7 @@ HOST_MANIFEST="${HOST_MANIFEST:-$PROJECT_ROOT/deploy/models/ascend-prod.models.j
 MANIFEST="/tmp/ascend-prod.models.json"
 LOG_DIR="${LOG_DIR:-/home/momentseek-29154/platform/logs}"
 SKIP_SIGLIP="${SKIP_SIGLIP:-0}"
+SPEAKER_SOURCE_REVISION="${SPEAKER_SOURCE_REVISION:-065629c313ea}"
 
 log() { printf '\n[%s] %s\n' "$(date '+%F %T')" "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -29,7 +30,7 @@ mkdir -p "$MODEL_ROOT" "$LOG_DIR"
 [[ -f "$HOST_MANIFEST" ]] || die "model manifest not found: $HOST_MANIFEST"
 docker cp "$HOST_MANIFEST" "$CONTAINER_NAME:$MANIFEST" >/dev/null
 
-log "1/7 Check model endpoints"
+log "1/8 Check model endpoints"
 for url in \
   https://huggingface.co/ \
   https://modelscope.cn/ \
@@ -40,7 +41,7 @@ for url in \
     "$url" || true
 done
 
-log "2/7 Download SenseVoiceSmall and MiniLM from ModelScope"
+log "2/8 Download SenseVoiceSmall and MiniLM from ModelScope"
 retry docker exec "$CONTAINER_NAME" python3 -c '
 import shutil
 from pathlib import Path
@@ -64,7 +65,7 @@ shutil.copytree(source, target, symlinks=False)
 print(f"MODELSCOPE_DOWNLOAD_DONE={repo} path={target}", flush=True)
 '
 
-log "3/7 Download InsightFace buffalo_l from ModelScope"
+log "3/8 Download InsightFace buffalo_l from ModelScope"
 FACE_DIR="$MODEL_ROOT/insightface/models/buffalo_l"
 mkdir -p "$FACE_DIR"
 if ! find "$FACE_DIR" -type f -name '*.onnx' -size +0c | grep -q .; then
@@ -87,7 +88,7 @@ else
   printf 'SKIP: buffalo_l already exists\n'
 fi
 
-log "4/7 Download RapidOCR PP-OCRv6 assets"
+log "4/8 Download RapidOCR PP-OCRv6 assets"
 OCR_DIR="$MODEL_ROOT/rapidocr"
 mkdir -p "$OCR_DIR"
 download_ocr() {
@@ -101,7 +102,7 @@ download_ocr "PP-OCRv6/det/PP-OCRv6_det_small.onnx" "PP-OCRv6_det_small.onnx"
 download_ocr "PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx" "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
 download_ocr "PP-OCRv6/rec/PP-OCRv6_rec_small.onnx" "PP-OCRv6_rec_small.onnx"
 
-log "5/7 Download SigLIP2 (official endpoint, then mirror)"
+log "5/8 Download SigLIP2 (official endpoint, then mirror)"
 download_siglip() {
   local endpoint="$1"
   printf 'SIGLIP_ENDPOINT=%s\n' "$endpoint"
@@ -121,7 +122,36 @@ elif ! retry download_siglip "https://huggingface.co"; then
   retry download_siglip "https://hf-mirror.com"
 fi
 
-log "6/7 Verify required model files"
+log "6/8 Prepare pinned 3D-Speaker source and speaker models"
+SPEAKER_REPO="$MODEL_ROOT/3D-Speaker"
+if [[ ! -s "$SPEAKER_REPO/.momentseek-revision" ]] \
+  || [[ "$(cat "$SPEAKER_REPO/.momentseek-revision")" != "$SPEAKER_SOURCE_REVISION" ]]; then
+  SPEAKER_STAGE="$(mktemp -d "$MODEL_ROOT/.3dspeaker-source.XXXXXX")"
+  retry curl -fL --retry 3 --retry-delay 5 --connect-timeout 15 \
+    -o "$SPEAKER_STAGE/source.tar.gz" \
+    "https://github.com/modelscope/3D-Speaker/archive/${SPEAKER_SOURCE_REVISION}.tar.gz"
+  tar -xzf "$SPEAKER_STAGE/source.tar.gz" -C "$SPEAKER_STAGE"
+  SPEAKER_EXTRACTED="$(find "$SPEAKER_STAGE" -mindepth 1 -maxdepth 1 -type d -name '3D-Speaker-*' | head -1)"
+  [[ -n "$SPEAKER_EXTRACTED" ]] || die "3D-Speaker archive layout is invalid"
+  printf '%s\n' "$SPEAKER_SOURCE_REVISION" >"$SPEAKER_EXTRACTED/.momentseek-revision"
+  rm -rf "$SPEAKER_REPO"
+  mv "$SPEAKER_EXTRACTED" "$SPEAKER_REPO"
+  rm -rf "$SPEAKER_STAGE"
+fi
+
+retry docker exec "$CONTAINER_NAME" python3 -c '
+from modelscope import snapshot_download
+
+for repo, revision in (
+    ("iic/speech_campplus_sv_zh_en_16k-common_advanced", "v1.0.0"),
+    ("iic/speech_fsmn_vad_zh-cn-16k-common-pytorch", "v2.0.4"),
+):
+    print(f"SPEAKER_MODEL_DOWNLOAD_START={repo}@{revision}", flush=True)
+    path = snapshot_download(repo, revision=revision, cache_dir="/app/models/3dspeaker-cache")
+    print(f"SPEAKER_MODEL_DOWNLOAD_DONE={repo}@{revision} path={path}", flush=True)
+'
+
+log "7/8 Verify required model files"
 if ! docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
   --manifest "$MANIFEST" --lock /app/models/models.lock.json; then
   if [[ "$SKIP_SIGLIP" == 1 ]]; then
@@ -132,7 +162,7 @@ if ! docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
 fi
 du -sh "$MODEL_ROOT"
 
-log "7/7 Summary"
+log "8/8 Summary"
 if [[ "$SKIP_SIGLIP" == 1 ]]; then
   printf 'MODEL_PREP_RESULT=PARTIAL_SIGLIP_PENDING\n'
 else

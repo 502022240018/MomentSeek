@@ -56,6 +56,7 @@ def test_milvus_visual_infers_segment_ms_from_bounds():
     if results:
         assert results[0].start_time == 0.0
         assert results[0].end_time == 5.0
+    assert mock_collection.query_iterator.call_args.kwargs["timeout"] > 0
 
 
 def test_milvus_visual_infers_duration_from_max_timestamp():

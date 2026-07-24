@@ -1252,7 +1252,10 @@ class SearchEngine:
         channel_limits: dict[str, int],
         visual_subqueries: list[str] | None,
     ) -> list[Candidate]:
-        from app.indexing.milvus_client import get_milvus_client
+        from app.indexing.milvus_client import (
+            ensure_milvus_reachable,
+            get_milvus_client,
+        )
         from app.indexing.milvus_search import (
             milvus_asr_candidates,
             milvus_face_candidates,
@@ -1260,6 +1263,7 @@ class SearchEngine:
             milvus_visual_candidates,
         )
 
+        ensure_milvus_reachable()
         client = get_milvus_client()
         video_id = video["id"]
         index_dir = self.settings.index_dir / video_id
@@ -1376,6 +1380,7 @@ class SearchEngine:
         }
         visual_queries: dict[str, np.ndarray] = {}
         face_query = self._resolve_face_query(text, image_path) if "face" in modalities else None
+        milvus_failed = False
         from app.indexing.milvus_flags import (
             milvus_fallback_enabled,
             milvus_shadow_compare_enabled,
@@ -1387,7 +1392,7 @@ class SearchEngine:
             use_milvus = should_use_milvus_for_video(video["id"])
             shadow = milvus_shadow_compare_enabled()
             npz_candidates: list[Candidate] | None = None
-            if not use_milvus or shadow:
+            if not use_milvus or shadow or milvus_failed:
                 npz_candidates = self._candidates_for_video(
                     video,
                     text=text,
@@ -1402,7 +1407,7 @@ class SearchEngine:
                     visual_subqueries=visual_subqueries,
                 )
             milvus_candidates: list[Candidate] | None = None
-            if use_milvus or shadow:
+            if (use_milvus or shadow) and not milvus_failed:
                 try:
                     milvus_candidates = self._milvus_candidates_for_video(
                         video,
@@ -1419,6 +1424,7 @@ class SearchEngine:
                 except Exception as exc:
                     if use_milvus and not milvus_fallback_enabled():
                         raise
+                    milvus_failed = True
                     logger.warning(
                         "Milvus search failed for video=%s; using NPZ fallback: %s",
                         video["id"],

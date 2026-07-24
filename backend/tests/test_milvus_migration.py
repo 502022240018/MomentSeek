@@ -30,6 +30,17 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def test_milvus_reachability_preflight_fails_before_grpc_retry():
+    from app.indexing.milvus_client import ensure_milvus_reachable
+
+    with patch(
+        "app.indexing.milvus_client.socket.create_connection",
+        side_effect=OSError("connection refused"),
+    ):
+        with pytest.raises(ConnectionError, match="Milvus is unreachable"):
+            ensure_milvus_reachable()
+
 def _make_npz(tmp_path: Path, modality: str) -> Path:
     """Create a minimal valid NPZ for the given modality."""
     path = tmp_path / f"{modality}.npz"

@@ -97,90 +97,8 @@ git -C "$SOURCE_DIR" log -1 --oneline
 printf '.server-build/\n' >>"$SOURCE_DIR/.git/info/exclude"
 sort -u "$SOURCE_DIR/.git/info/exclude" -o "$SOURCE_DIR/.git/info/exclude"
 
-log "2/8 Generate openEuler/MindIE build overlay"
-cat >"$BUILD_DIR/requirements-server.txt" <<'REQ'
-numpy==1.26.4
-onnx==1.17.0
-onnxruntime-cann==1.24.4
-scikit-image==0.25.2
-tifffile==2025.6.11
-scenedetect==0.7
-transformers>=4.51.0,<5
-python-multipart==0.0.22
-pydantic-settings==2.12.0
-sentence-transformers==3.3.1
-rapidocr==3.9.0
-opencc-python-reimplemented==0.1.7
-pypinyin==0.54.0
-funasr==1.3.9
-scikit-learn==1.5.0
-umap-learn==0.5.7
-ftfy==6.3.1
-REQ
-
-cat >"$BUILD_DIR/constraints-server.txt" <<'CONSTRAINTS'
-numpy==1.26.4
-torch==2.9.0
-torchvision==0.16.0
-torchaudio==2.9.0
-transformers==4.51.0
-scikit-learn==1.5.0
-umap-learn==0.5.7
-CONSTRAINTS
-
-cat >"$BUILD_DIR/Dockerfile" <<'DOCKERFILE'
-ARG ASCEND_RUNTIME_IMAGE
-FROM ${ASCEND_RUNTIME_IMAGE} AS frontend-build
-USER root
-RUN dnf install -y nodejs npm \
-    && dnf clean all \
-    && node --version \
-    && npm --version
-WORKDIR /src/frontend
-COPY frontend/package*.json ./
-RUN npm config set registry https://registry.npmmirror.com \
-    && npm ci --include=optional --ignore-scripts --registry=https://registry.npmmirror.com \
-    && npm cache clean --force
-COPY frontend/ ./
-RUN npm run build
-
-FROM ${ASCEND_RUNTIME_IMAGE}
-USER root
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
-    OPENBLAS_NUM_THREADS=8 \
-    OPENBLAS_DEFAULT_NUM_THREADS=8 \
-    OMP_NUM_THREADS=8 \
-    MKL_NUM_THREADS=8 \
-    NUMEXPR_NUM_THREADS=8 \
-    BLIS_NUM_THREADS=8 \
-    TOKENIZERS_PARALLELISM=false \
-    APP_DATA_DIR=/app/runtime \
-    APP_MODEL_DIR=/app/models \
-    APP_PORT=18500
-RUN command -v ffmpeg && python3 -c "import cv2, PIL; print('base media dependencies: PASS')"
-WORKDIR /app/backend
-COPY .server-build/wheels/insightface-1.0.1-py3-none-any.whl /tmp/insightface-1.0.1-py3-none-any.whl
-COPY .server-build/requirements-server.txt /tmp/requirements-server.txt
-COPY .server-build/constraints-server.txt /tmp/constraints-server.txt
-RUN python3 -m pip install --no-index --no-deps /tmp/insightface-1.0.1-py3-none-any.whl \
-    && python3 -m pip install -c /tmp/constraints-server.txt -r /tmp/requirements-server.txt \
-    && python3 -m pip install --no-deps torchaudio==2.9.0 open_clip_torch==3.3.0 timm==1.0.28 silero-vad==5.1.2 \
-    && python3 -c "from importlib.metadata import version; assert version('torch') == '2.9.0'; assert version('torch-npu') == '2.9.0.post1'; assert version('torchaudio') == '2.9.0'; print('vendor torch stack preserved')" \
-    && rm -f /tmp/insightface-1.0.1-py3-none-any.whl /tmp/requirements-server.txt /tmp/constraints-server.txt
-COPY backend/ ./
-COPY deploy/models/ascend-prod.models.json /app/deploy/models/ascend-prod.models.json
-COPY scripts/verify_models.py /app/scripts/verify_models.py
-COPY --from=frontend-build /src/frontend/dist /tmp/frontend-dist
-RUN rm -rf ./app/static \
-    && mv /tmp/frontend-dist ./app/static
-RUN mkdir -p /app/runtime /app/models \
-    && python3 -c "from importlib.metadata import version; import fastapi, uvicorn, cv2, PIL, transformers, funasr, onnxruntime, rapidocr, insightface; assert version('open-clip-torch') == '3.3.0'; assert version('silero-vad') == '5.1.2'; assert version('onnxruntime-cann') == '1.24.4'; assert 'CANNExecutionProvider' in onnxruntime.get_available_providers(); from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); print('device-neutral imports, CANN EP and Silero ONNX session: PASS')"
-EXPOSE 18500
-HEALTHCHECK --interval=20s --timeout=5s --retries=6 CMD python3 -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('APP_PORT', '18500') + '/api/health', timeout=3)"
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT:-18500} --workers 1"]
-DOCKERFILE
+log "2/8 Stage the checked-in production build definition"
+cp "$SOURCE_DIR/Dockerfile.ascend" "$BUILD_DIR/Dockerfile"
 
 log "3/8 Check required external endpoints"
 for url in \
@@ -291,6 +209,9 @@ docker run -d \
   -e ASR_VAD_STRATEGY=silero_12s \
   -e ASR_MODEL_LOCAL_FILES_ONLY=true \
   -e ASR_SEMANTIC_LOCAL_FILES_ONLY=true \
+  -e SPEAKER_DEVICE=npu \
+  -e SPEAKER_MODEL_REPO=/app/models/3D-Speaker \
+  -e SPEAKER_MODEL_CACHE_DIR=/app/models/3dspeaker-cache \
   -e OCR_ENGINE=rapidocr_acl \
   -e OCR_DEVICE=npu \
   -e OCR_ACL_MODEL_DIR=rapidocr/ascend/910b4-cann9-profile \

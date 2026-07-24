@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import subprocess
 import sys
 import time
@@ -93,14 +93,17 @@ def _adaptive_turn_units(
 
 
 def _density_fallback_labels(embeddings: np.ndarray) -> np.ndarray:
-    """Use the repository's density backend when spectral eigengap collapses to one speaker."""
-    from speakerlab.process.cluster import CommonClustering
+    """Use sklearn's native density backend when the eigengap collapses."""
+    from sklearn.cluster import HDBSCAN
+    from sklearn.decomposition import PCA
 
-    cluster = CommonClustering(
-        cluster_type="umap_hdbscan", n_neighbors=20, n_components=60,
-        min_samples=20, min_cluster_size=10, mer_cos=0.8,
+    values = _normalize(embeddings)
+    components = min(32, len(values) - 1, values.shape[1])
+    reduced = PCA(n_components=components, whiten=True, random_state=0).fit_transform(values)
+    labels = np.asarray(
+        HDBSCAN(min_samples=20, min_cluster_size=10).fit_predict(reduced),
+        dtype=np.int32,
     )
-    labels = np.asarray(cluster(embeddings), dtype=np.int32)
     valid = np.unique(labels[labels >= 0])
     if not len(valid):
         return np.zeros((len(embeddings),), dtype=np.int32)
@@ -182,13 +185,10 @@ def _load_3dspeaker(repo: Path):
     script = repo / "speakerlab" / "bin" / "infer_diarization.py"
     if not script.exists():
         raise RuntimeError(f"3D-Speaker not found: {repo}")
-    sys.path.insert(0, str(repo))
-    spec = importlib.util.spec_from_file_location("momentseek_3dspeaker", script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot import {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    repo_text = str(repo.resolve())
+    if repo_text not in sys.path:
+        sys.path.insert(0, repo_text)
+    return importlib.import_module("app.indexing.speaker_3dspeaker_runtime")
 
 
 def _extract_wav(video_path: str, wav_path: Path) -> None:
@@ -284,7 +284,7 @@ def build_speaker_index(
         fallback = _density_fallback_labels(embeddings)
         if len(np.unique(fallback)) > 1:
             track_indices = fallback
-            clustering_backend = "umap_hdbscan_fallback"
+            clustering_backend = "sklearn_hdbscan_fallback"
     utterance_times, chunk_indices, track_indices = _adaptive_turn_units(
         chunks, track_indices, times, eligible,
     )

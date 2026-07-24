@@ -1,0 +1,11 @@
+# MomentSeek's production 3D-Speaker/CAM++ path.
+#
+# Do not replace this with the upstream research requirements.txt: upstream
+# targets Python 3.8, NumPy <1.24 and scikit-learn 1.0.2. MomentSeek uses only
+# VAD, CAM++ embeddings and clustering, and deliberately excludes the optional
+# pyannote overlap pipeline and training dependencies.
+soundfile==0.13.1
+PyYAML==6.0.2
+simplejson==3.20.1
+sortedcontainers==2.4.0
+modelscope==1.38.1

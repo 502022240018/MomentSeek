@@ -12,6 +12,7 @@ FROM ${ASCEND_RUNTIME_IMAGE}
 USER root
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
     OPENBLAS_NUM_THREADS=8 \
     OPENBLAS_DEFAULT_NUM_THREADS=8 \
     OMP_NUM_THREADS=8 \
@@ -35,15 +36,22 @@ RUN if command -v ffmpeg >/dev/null 2>&1; then \
 WORKDIR /app/backend
 COPY vendor-wheels/ /tmp/vendor-wheels/
 COPY backend/requirements-ascend.txt ./
+COPY backend/requirements-ascend-preserve.txt ./
 COPY backend/requirements-milvus-client.txt ./
-RUN pip install --no-index --no-deps --find-links=/tmp/vendor-wheels \
+COPY backend/requirements-speaker.txt ./
+COPY backend/constraints-ascend.txt ./
+RUN (cd /tmp/vendor-wheels && sha256sum -c SHA256SUMS) \
+    && pip install --no-index --no-deps --find-links=/tmp/vendor-wheels \
         -r requirements-milvus-client.txt \
     && pip install --no-index --no-deps /tmp/vendor-wheels/insightface-1.0.1-py3-none-any.whl \
-    && pip install --no-index --no-deps --find-links=/tmp/vendor-wheels \
-        -r requirements-ascend.txt \
+    && pip install -c constraints-ascend.txt -r requirements-ascend.txt \
+    && pip install --no-deps -r requirements-ascend-preserve.txt \
+    && python3 -c "from importlib.metadata import version; import cv2; assert version('torch') == '2.9.0'; assert version('torch-npu') == '2.9.0.post1'; assert version('torchaudio') == '2.9.0'; assert cv2.__version__ == '4.11.0'" \
     && rm -rf /tmp/vendor-wheels
 COPY backend/ ./
 COPY deploy/orchestration/ ./deploy/orchestration/
+COPY deploy/models/ascend-prod.models.json ./deploy/models/ascend-prod.models.json
+COPY scripts/verify_models.py /app/scripts/verify_models.py
 COPY --from=frontend-build /src/frontend/dist ./app/static
 RUN mkdir -p /app/runtime /app/models
 EXPOSE 8000
