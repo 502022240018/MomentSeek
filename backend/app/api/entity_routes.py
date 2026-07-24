@@ -135,14 +135,16 @@ def list_entity_voice_samples(entity_id: str) -> list[dict]:
 @router.post("/api/entities/{entity_id}/voice-samples", status_code=201)
 def add_entity_voice_sample(entity_id: str, request: VoiceSampleRequest) -> dict:
     from app import main as runtime
-    from app.indexing.speaker import load_speaker_index
+    from app.speaker_service import speaker_utterance_embedding
 
     if not runtime.catalog.get_entity(entity_id):
         raise HTTPException(status_code=404, detail="人物不存在")
-    path = runtime.settings.index_dir / request.video_id / "speaker.npz"
     try:
-        data = load_speaker_index(path)
-        vector = data["utterance_embeddings"][request.utterance_index].astype(np.float32)
+        vector = speaker_utterance_embedding(
+            runtime.settings.index_dir,
+            request.video_id,
+            request.utterance_index,
+        )
     except (FileNotFoundError, IndexError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="声音片段不存在") from exc
     sample_id = uuid.uuid4().hex

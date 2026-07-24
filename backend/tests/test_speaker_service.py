@@ -4,7 +4,11 @@ from unittest.mock import patch
 import numpy as np
 from app.db import Catalog
 from app.indexing.speaker import load_speaker_index, save_speaker_index
-from app.speaker_service import video_speakers, voice_search
+from app.speaker_service import (
+    speaker_utterance_embedding,
+    video_speakers,
+    voice_search,
+)
 
 
 def _make_speaker_data(vectors: np.ndarray) -> dict:
@@ -73,3 +77,17 @@ def test_voice_search_matches_individual_utterances(tmp_path):
     assert hits[0]["score"] > .99
     assert {hit["video_id"] for hit in hits[:2]} == {"a", "b"}
     assert all("text" in hit and "clip_url" in hit for hit in hits)
+
+
+def test_speaker_utterance_embedding_uses_primary_loader(tmp_path):
+    data = _make_speaker_data(
+        np.asarray([[1, 0], [0, 1]], dtype=np.float32)
+    )
+    with patch("app.speaker_service._load_speaker_data", return_value=data) as load:
+        vector = speaker_utterance_embedding(tmp_path, "video-1", 1)
+
+    load.assert_called_once_with(
+        tmp_path / "video-1" / "speaker.npz",
+        "video-1",
+    )
+    np.testing.assert_allclose(vector, np.asarray([0, 1], dtype=np.float32))

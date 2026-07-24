@@ -7,6 +7,7 @@ import numpy as np
 
 from app.db import Catalog
 from app.indexing.speaker import load_speaker_index
+from app.settings import get_settings
 
 
 SPEAKER_PREVIEW_UTTERANCES = 5
@@ -34,14 +35,19 @@ def _texts(asr_path: Path, video_id: str | None = None) -> list[str]:
 
 
 def _milvus_rows(video_id: str, modality: str, fields: list[str]) -> list[dict]:
+    from app.indexing.milvus_client import ensure_milvus_reachable
+
+    ensure_milvus_reachable()
     collection = get_milvus_client().collection_for(modality)
     expression = f'video_id == "{video_id}"'
     rows: list[dict] = []
+    timeout = get_settings().milvus_query_timeout_seconds
     if hasattr(collection, "query_iterator"):
         iterator = collection.query_iterator(
             batch_size=2000,
             expr=expression,
             output_fields=fields,
+            timeout=timeout,
         )
         try:
             while True:
@@ -56,6 +62,7 @@ def _milvus_rows(video_id: str, modality: str, fields: list[str]) -> list[dict]:
             expr=expression,
             output_fields=fields,
             limit=16_384,
+            timeout=timeout,
         )
     return rows
 
@@ -74,10 +81,14 @@ def _texts_for_video(index_dir: Path, video_id: str) -> list[str]:
 
 def _texts_from_milvus(video_id: str) -> list[str]:
     try:
+        from app.indexing.milvus_client import ensure_milvus_reachable
+
+        ensure_milvus_reachable()
         rows = get_milvus_client().collection_for("asr").query(
             expr=f'video_id == "{video_id}"',
             output_fields=["segment_idx", "text"],
             limit=16_384,
+            timeout=get_settings().milvus_query_timeout_seconds,
         )
     except Exception:
         return []
@@ -148,6 +159,19 @@ def _load_speaker_data(path: Path, video_id: str) -> dict[str, np.ndarray]:
         except Exception:
             pass
     return load_speaker_index(path)
+
+
+def speaker_utterance_embedding(
+    index_dir: Path,
+    video_id: str,
+    utterance_index: int,
+) -> np.ndarray:
+    """Read one utterance from Milvus primary with NPZ fallback."""
+    data = _load_speaker_data(index_dir / video_id / "speaker.npz", video_id)
+    try:
+        return data["utterance_embeddings"][utterance_index].astype(np.float32)
+    except IndexError as exc:
+        raise IndexError("声音片段不存在") from exc
 
 
 def _speaker_utterances(data: dict, texts: list[str], overlays: dict, video_id: str) -> list[dict]:
@@ -377,9 +401,13 @@ def _voice_search_vectors_milvus(
     limit: int,
     exclude: tuple[str, int] | None,
 ) -> list[dict]:
-    from app.indexing.milvus_client import get_milvus_client
+    from app.indexing.milvus_client import (
+        ensure_milvus_reachable,
+        get_milvus_client,
+    )
     from app.indexing.milvus_search import milvus_speaker_candidates
 
+    ensure_milvus_reachable()
     client = get_milvus_client()
     selected = set(video_ids) if video_ids else None
     hits: list[dict] = []
