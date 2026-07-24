@@ -24,6 +24,7 @@ from app import __version__
 from app.db import Catalog
 from app.deployment import build_deployment_info
 from app.media import export_preview_clip, extract_video_frame, probe_video
+from app.retrieval_orchestration import OrchestrationError, SearchOrchestrator
 from app.schemas import (
     EntityUpdateRequest, HealthResponse, IndexRequest, SpeakerUpdateRequest, UtteranceUpdateRequest,
     VideoRenameRequest, VoiceOnlyEntityRequest, VoiceSampleRequest, VoiceSearchRequest,
@@ -37,6 +38,7 @@ from app.worker import launch_job, subprocess_environment
 settings = get_settings()
 catalog = Catalog(settings.db_path)
 search_engine = SearchEngine(settings, catalog)
+search_orchestrator = SearchOrchestrator(settings, catalog, search_engine)
 _indexer_daemon_process: subprocess.Popen | None = None
 _indexer_daemon_lock = threading.RLock()
 
@@ -198,7 +200,19 @@ def health() -> dict:
         "model_idle_policy": settings.model_idle_policy,
         "indexer_mode": settings.indexer_mode,
         "npu_worker_mode": settings.npu_worker_mode,
+        "orchestration_enabled": settings.orchestration_enabled,
+        "orchestration_profile": (
+            settings.orchestration_profile if settings.orchestration_enabled else None
+        ),
     }
+
+
+@app.get("/api/orchestration/profiles")
+def orchestration_profiles() -> dict:
+    try:
+        return search_orchestrator.profiles()
+    except OrchestrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/videos", status_code=201)
@@ -688,28 +702,41 @@ async def search(
     video_ids: str | None = Form(default=None),
     alpha: float = Form(default=0.5),
     limit: int = Form(default=24),
+    orchestration_profile: str | None = Form(default=None),
+    planner_mode: str = Form(default="auto"),
+    reranker_mode: str = Form(default="auto"),
 ) -> dict:
     selected_modalities = [item.strip() for item in modalities.split(",") if item.strip()]
     if not query_text and not query_image:
         raise HTTPException(status_code=422, detail="请提供查询文字或参考图")
     if any(item not in {"visual", "face", "asr", "ocr"} for item in selected_modalities):
         raise HTTPException(status_code=422, detail="检索通道不合法")
+    if planner_mode not in {"auto", "off", "force"}:
+        raise HTTPException(status_code=422, detail="planner_mode 必须是 auto、off 或 force")
+    if reranker_mode not in {"auto", "off", "force"}:
+        raise HTTPException(status_code=422, detail="reranker_mode 必须是 auto、off 或 force")
     image_path = None
     if query_image and query_image.filename:
         image_path = settings.query_dir / f"{uuid.uuid4().hex}{_safe_suffix(query_image.filename, '.jpg')}"
         await run_in_threadpool(_save_upload, query_image, image_path)
     try:
         started = time.perf_counter()
-        results = await run_in_threadpool(
-            search_engine.search,
+        outcome = await run_in_threadpool(
+            search_orchestrator.search,
             query_text.strip() if query_text else None,
             str(image_path) if image_path else None,
             selected_modalities,
             json.loads(video_ids) if video_ids else None,
             max(0, min(1, alpha)),
             max(1, min(100, limit)),
+            profile_name=orchestration_profile,
+            planner_mode=planner_mode,
+            reranker_mode=reranker_mode,
         )
+        results = outcome["results"]
         elapsed_seconds = round(time.perf_counter() - started, 3)
+    except OrchestrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
@@ -721,6 +748,7 @@ async def search(
         "count": len(results),
         "above_count": sum(1 for item in results if item.get("above_threshold")),
         "elapsed_seconds": elapsed_seconds,
+        "execution": outcome["execution"],
         "results": results,
     }
 

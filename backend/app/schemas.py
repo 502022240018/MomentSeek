@@ -221,3 +221,5 @@ class HealthResponse(BaseModel):
     model_idle_policy: str
     indexer_mode: str
     npu_worker_mode: str
+    orchestration_enabled: bool = False
+    orchestration_profile: str | None = None

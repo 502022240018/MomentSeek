@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "providers": {
+    "qwen35-planner": {
+      "type": "openai_compatible",
+      "base_url": "http://127.0.0.1:18081/v1",
+      "base_url_env": "QWEN35_VLLM_BASE_URL",
+      "model": "qwen3.5-4b",
+      "model_env": "QWEN35_PLANNER_MODEL",
+      "timeout_seconds": 180,
+      "extra_body": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    },
+    "qwen35-reranker": {
+      "type": "openai_compatible",
+      "base_url": "http://127.0.0.1:18081/v1",
+      "base_url_env": "QWEN35_VLLM_BASE_URL",
+      "model": "qwen3.5-4b",
+      "model_env": "QWEN35_RERANKER_MODEL",
+      "timeout_seconds": 300,
+      "extra_body": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    }
+  },
+  "profiles": {
+    "qwen35-unified": {
+      "description": "One Qwen3.5-4B vLLM Ascend service supplies both planning and multimodal reranking.",
+      "planner": {
+        "provider": "qwen35-planner",
+        "prompt_path": "prompts/planner-v2-temporal.txt",
+        "prompt_version": "planner-v2-temporal",
+        "max_tokens": 320,
+        "temperature": 0
+      },
+      "reranker": {
+        "provider": "qwen35-reranker",
+        "prompt_path": "prompts/reranker-v1.txt",
+        "prompt_version": "reranker-v1",
+        "concurrency": 4,
+        "default_top_n": 20,
+        "default_frame_count": 4,
+        "max_visual_pixels": 262144,
+        "positive_label": "Yes",
+        "negative_label": "No",
+        "positive_token_id": 9175,
+        "negative_token_id": 2665
+      }
+    },
+    "qwen35-temporal-efficient": {
+      "description": "Qwen3.5 temporal decomposition with 9-11 second windows, 8 frames, and Top-10 reranking.",
+      "planner": {
+        "provider": "qwen35-planner",
+        "prompt_path": "prompts/planner-v3-temporal-efficient.txt",
+        "prompt_version": "planner-v3-temporal-efficient",
+        "max_tokens": 320,
+        "temperature": 0
+      },
+      "reranker": {
+        "provider": "qwen35-reranker",
+        "prompt_path": "prompts/reranker-v1.txt",
+        "prompt_version": "reranker-v1",
+        "concurrency": 4,
+        "default_top_n": 10,
+        "default_frame_count": 8,
+        "max_visual_pixels": 262144,
+        "positive_label": "Yes",
+        "negative_label": "No",
+        "positive_token_id": 9175,
+        "negative_token_id": 2665
+      }
+    }
+  }
+}

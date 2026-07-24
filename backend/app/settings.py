@@ -118,6 +118,16 @@ class Settings(BaseSettings):
     ocr_npu_self_test: bool = True
     ocr_acl_model_dir: str = "rapidocr/ascend/910b4-cann9-profile"
 
+    # Optional query orchestration layer.  The JSON profile registry keeps
+    # planner and reranker providers independent, so they may point at one
+    # shared VLM today and separate specialist models in later experiments.
+    orchestration_enabled: bool = False
+    orchestration_config_path: Path = Path("deploy/orchestration/qwen35-vllm.json")
+    orchestration_profile: str = "qwen35-unified"
+    orchestration_fail_open: bool = True
+    orchestration_trace_enabled: bool = True
+    orchestration_trace_path: Path = Path("runtime/orchestration-traces.jsonl")
+
     @property
     def db_path(self) -> Path:
         return self.app_data_dir / "catalog.sqlite3"
@@ -158,6 +168,7 @@ class Settings(BaseSettings):
             self.query_dir,
             self.resolve_path(self.app_model_dir / self.speaker_model_cache_dir),
             self.resolve_path(self.visual_hf_cache_dir),
+            self.resolve_path(self.orchestration_trace_path).parent,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
