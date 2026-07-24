@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from app.indexing.asr_pipeline_types import RawTranscriptItem
@@ -181,6 +182,72 @@ def raw_items_from_chunks(chunks: Iterable[dict[str, Any]], *, source: str) -> l
     return items
 
 
+@dataclass
+class _TimestampCharState:
+    current: list[str] = field(default_factory=list)
+    start_ms: int | None = None
+    end_ms: int | None = None
+
+    def add_space(self) -> None:
+        if self.current and self.current[-1] != " ":
+            self.current.append(" ")
+
+    def add_char(self, char: str, pairs: list[tuple[int, int]], pair_index: int) -> int:
+        if not _timed_char(char):
+            if self.current:
+                self.current.append(char)
+            return pair_index
+        if pair_index >= len(pairs):
+            if self.current:
+                self.current.append(char)
+            return pair_index
+        start_ms, end_ms = pairs[pair_index]
+        if self.start_ms is None:
+            self.start_ms = start_ms
+        self.end_ms = max(start_ms, end_ms)
+        self.current.append(char)
+        return pair_index + 1
+
+    def flush(
+        self,
+        items: list[RawTranscriptItem],
+        *,
+        source: str,
+        emotion: str,
+        audio_event: str,
+        reason: str,
+    ) -> None:
+        chunk_text = "".join(self.current).strip()
+        if chunk_text and self.start_ms is not None and self.end_ms is not None:
+            diagnostics: dict[str, Any] = {"timestamp_split": reason}
+            if self.end_ms - self.start_ms > 12000:
+                diagnostics["long_without_safe_boundary"] = True
+            item = _raw_item_from_parts(
+                item_id=len(items),
+                start_ms=self.start_ms,
+                end_ms=self.end_ms,
+                text=chunk_text,
+                source=source,
+                is_sensevoice=True,
+                emotion=emotion,
+                audio_event=audio_event,
+                diagnostics=diagnostics,
+            )
+            if item is not None:
+                items.append(item)
+        self.current.clear()
+        self.start_ms = None
+        self.end_ms = None
+
+
+def _timestamp_boundary_reason(char: str, duration_ms: int) -> str | None:
+    if char in _STRONG_PUNCT and duration_ms >= 1500:
+        return "strong_punctuation"
+    if char in _SOFT_PUNCT and duration_ms >= 8000:
+        return "soft_punctuation_after_8s"
+    return None
+
+
 def split_sensevoice_timestamp_text(
     text: str,
     pairs: list[tuple[int, int]],
@@ -193,63 +260,63 @@ def split_sensevoice_timestamp_text(
         return []
 
     items: list[RawTranscriptItem] = []
-    current: list[str] = []
-    current_start: int | None = None
-    current_end: int | None = None
+    state = _TimestampCharState()
     pair_index = 0
-
-    def flush(reason: str) -> None:
-        nonlocal current, current_start, current_end
-        chunk_text = "".join(current).strip()
-        if chunk_text and current_start is not None and current_end is not None:
-            diagnostics: dict[str, Any] = {"timestamp_split": reason}
-            if current_end - current_start > 12000:
-                diagnostics["long_without_safe_boundary"] = True
-            item = _raw_item_from_parts(
-                item_id=len(items),
-                start_ms=current_start,
-                end_ms=current_end,
-                text=chunk_text,
-                source=source,
-                is_sensevoice=True,
-                emotion=emotion,
-                audio_event=audio_event,
-                diagnostics=diagnostics,
-            )
-            if item is not None:
-                items.append(item)
-        current = []
-        current_start = None
-        current_end = None
 
     for char in tagless:
         if not char.strip():
-            if current and current[-1] != " ":
-                current.append(" ")
+            state.add_space()
             continue
-        if _timed_char(char):
-            if pair_index >= len(pairs):
-                if current:
-                    current.append(char)
-                continue
-            start_ms, end_ms = pairs[pair_index]
-            pair_index += 1
-            if current_start is None:
-                current_start = start_ms
-            current_end = max(start_ms, end_ms)
-            current.append(char)
-        elif current:
-            current.append(char)
-        if current_start is None or current_end is None:
+        pair_index = state.add_char(char, pairs, pair_index)
+        if state.start_ms is None or state.end_ms is None:
             continue
-        duration_ms = current_end - current_start
-        if char in _STRONG_PUNCT and duration_ms >= 1500:
-            flush("strong_punctuation")
-        elif char in _SOFT_PUNCT and duration_ms >= 8000:
-            flush("soft_punctuation_after_8s")
+        reason = _timestamp_boundary_reason(char, state.end_ms - state.start_ms)
+        if reason:
+            state.flush(items, source=source, emotion=emotion, audio_event=audio_event, reason=reason)
 
-    flush("end")
+    state.flush(items, source=source, emotion=emotion, audio_event=audio_event, reason="end")
     return items
+
+
+def _append_word_timestamp_item(
+    items: list[RawTranscriptItem],
+    *,
+    tagless: str,
+    spans: list[tuple[int, int]],
+    pairs: list[tuple[int, int]],
+    start_index: int,
+    end_index: int,
+    source: str,
+    emotion: str,
+    audio_event: str,
+    reason: str,
+) -> int:
+    left = spans[start_index][0]
+    right = spans[end_index + 1][0] if end_index + 1 < len(spans) else len(tagless)
+    chunk_text = tagless[left:right].strip()
+    if chunk_text:
+        item = _raw_item_from_parts(
+            item_id=len(items),
+            start_ms=int(pairs[start_index][0]),
+            end_ms=int(pairs[end_index][1]),
+            text=chunk_text,
+            source=source,
+            is_sensevoice=True,
+            emotion=emotion,
+            audio_event=audio_event,
+            diagnostics={"timestamp_split": reason, "text_source": "raw_text_slice"},
+        )
+        if item is not None:
+            items.append(item)
+    return end_index + 1
+
+
+def _word_timestamp_boundary_reason(source_token: str, duration_ms: int) -> str | None:
+    if source_token.endswith(tuple(_STRONG_PUNCT)) and duration_ms >= 1500:
+        return "strong_punctuation"
+    if source_token.endswith(tuple(_SOFT_PUNCT)) and duration_ms >= 8000:
+        return "soft_punctuation_after_8s"
+    return None
 
 
 def split_sensevoice_word_timestamp_text(
@@ -269,53 +336,38 @@ def split_sensevoice_word_timestamp_text(
     items: list[RawTranscriptItem] = []
     start_index = 0
 
-    def flush(end_index: int, reason: str) -> None:
-        nonlocal start_index
-        left = spans[start_index][0]
-        right = spans[end_index + 1][0] if end_index + 1 < len(spans) else len(tagless)
-        chunk_text = tagless[left:right].strip()
-        if chunk_text:
-            item = _raw_item_from_parts(
-                item_id=len(items),
-                start_ms=int(pairs[start_index][0]),
-                end_ms=int(pairs[end_index][1]),
-                text=chunk_text,
-                source=source,
-                is_sensevoice=True,
-                emotion=emotion,
-                audio_event=audio_event,
-                diagnostics={"timestamp_split": reason, "text_source": "raw_text_slice"},
-            )
-            if item is not None:
-                items.append(item)
-        start_index = end_index + 1
-
     for index, (raw_word, (start_ms, end_ms)) in enumerate(zip(words, pairs)):
         word = str(raw_word or "").strip()
         if not word:
             continue
         if index > start_index and int(start_ms) - int(pairs[index - 1][1]) > 1500:
-            flush(index - 1, "word_gap")
+            start_index = _append_word_timestamp_item(
+                items, tagless=tagless, spans=spans, pairs=pairs, start_index=start_index,
+                end_index=index - 1, source=source, emotion=emotion, audio_event=audio_event,
+                reason="word_gap",
+            )
         duration_ms = int(end_ms) - int(pairs[start_index][0])
         boundary_right = spans[index + 1][0] if index + 1 < len(spans) else len(tagless)
         source_token = tagless[spans[index][0]:boundary_right].rstrip()
-        if source_token.endswith(tuple(_STRONG_PUNCT)) and duration_ms >= 1500:
-            flush(index, "strong_punctuation")
-        elif source_token.endswith(tuple(_SOFT_PUNCT)) and duration_ms >= 8000:
-            flush(index, "soft_punctuation_after_8s")
+        reason = _word_timestamp_boundary_reason(source_token, duration_ms)
+        if reason:
+            start_index = _append_word_timestamp_item(
+                items, tagless=tagless, spans=spans, pairs=pairs, start_index=start_index,
+                end_index=index, source=source, emotion=emotion, audio_event=audio_event,
+                reason=reason,
+            )
 
     if start_index < len(words):
-        flush(len(words) - 1, "end")
+        _append_word_timestamp_item(
+            items, tagless=tagless, spans=spans, pairs=pairs, start_index=start_index,
+            end_index=len(words) - 1, source=source, emotion=emotion, audio_event=audio_event,
+            reason="end",
+        )
     return items
 
 
-def split_raw_item_on_safe_punctuation(item: RawTranscriptItem, *, max_ms: int = 12000) -> list[RawTranscriptItem]:
-    duration_ms = int(item.end_ms) - int(item.start_ms)
-    text = str(item.text)
-    if duration_ms <= max_ms:
-        return [item]
-
-    breakpoints: list[int] = []
+def _safe_split_breakpoints(text: str, duration_ms: int) -> list[int]:
+    breakpoints = []
     last_break = 0
     for index, char in enumerate(text):
         since_last = duration_ms * (index + 1 - last_break) / max(1, len(text))
@@ -325,27 +377,29 @@ def split_raw_item_on_safe_punctuation(item: RawTranscriptItem, *, max_ms: int =
         elif char in _SOFT_PUNCT and since_last >= 8000:
             breakpoints.append(index + 1)
             last_break = index + 1
+    return breakpoints
 
-    if not breakpoints:
-        return [
-            RawTranscriptItem(
-                item_id=int(item.item_id),
-                start_ms=int(item.start_ms),
-                end_ms=int(item.end_ms),
-                text=text,
-                source=str(item.source),
-                unit_id=item.unit_id,
-                emotion=str(item.emotion or ""),
-                audio_event=str(item.audio_event or ""),
-                diagnostics={
-                    **dict(item.diagnostics or {}),
-                    "long_without_safe_boundary": True,
-                    "safe_split": "kept_whole",
-                },
-            )
-        ]
 
-    pieces: list[tuple[int, int]] = []
+def _long_unsplit_item(item: RawTranscriptItem, text: str) -> RawTranscriptItem:
+    return RawTranscriptItem(
+        item_id=int(item.item_id),
+        start_ms=int(item.start_ms),
+        end_ms=int(item.end_ms),
+        text=text,
+        source=str(item.source),
+        unit_id=item.unit_id,
+        emotion=str(item.emotion or ""),
+        audio_event=str(item.audio_event or ""),
+        diagnostics={
+            **dict(item.diagnostics or {}),
+            "long_without_safe_boundary": True,
+            "safe_split": "kept_whole",
+        },
+    )
+
+
+def _safe_text_pieces(text: str, breakpoints: list[int]) -> list[tuple[int, int]]:
+    pieces = []
     previous = 0
     for breakpoint in breakpoints:
         if breakpoint > previous:
@@ -353,27 +407,50 @@ def split_raw_item_on_safe_punctuation(item: RawTranscriptItem, *, max_ms: int =
         previous = breakpoint
     if previous < len(text):
         pieces.append((previous, len(text)))
+    return pieces
+
+
+def _safe_split_item_piece(
+    item: RawTranscriptItem,
+    text: str,
+    duration_ms: int,
+    piece_index: int,
+    left: int,
+    right: int,
+) -> RawTranscriptItem | None:
+    piece_text = text[left:right].strip()
+    if not piece_text:
+        return None
+    start_ms = int(item.start_ms + round(duration_ms * left / max(1, len(text))))
+    end_ms = int(item.start_ms + round(duration_ms * right / max(1, len(text))))
+    return RawTranscriptItem(
+        item_id=piece_index,
+        start_ms=start_ms,
+        end_ms=max(start_ms, end_ms),
+        text=piece_text,
+        source=f"{item.source}_safe_split",
+        unit_id=item.unit_id,
+        emotion=str(item.emotion or ""),
+        audio_event=str(item.audio_event or ""),
+        diagnostics={**dict(item.diagnostics or {}), "safe_split": "punctuation_linear_time"},
+    )
+
+
+def split_raw_item_on_safe_punctuation(item: RawTranscriptItem, *, max_ms: int = 12000) -> list[RawTranscriptItem]:
+    duration_ms = int(item.end_ms) - int(item.start_ms)
+    text = str(item.text)
+    if duration_ms <= max_ms:
+        return [item]
+
+    breakpoints = _safe_split_breakpoints(text, duration_ms)
+    if not breakpoints:
+        return [_long_unsplit_item(item, text)]
 
     output: list[RawTranscriptItem] = []
-    for piece_index, (left, right) in enumerate(pieces):
-        piece_text = text[left:right].strip()
-        if not piece_text:
-            continue
-        start_ms = int(item.start_ms + round(duration_ms * left / max(1, len(text))))
-        end_ms = int(item.start_ms + round(duration_ms * right / max(1, len(text))))
-        output.append(
-            RawTranscriptItem(
-                item_id=piece_index,
-                start_ms=start_ms,
-                end_ms=max(start_ms, end_ms),
-                text=piece_text,
-                source=f"{item.source}_safe_split",
-                unit_id=item.unit_id,
-                emotion=str(item.emotion or ""),
-                audio_event=str(item.audio_event or ""),
-                diagnostics={**dict(item.diagnostics or {}), "safe_split": "punctuation_linear_time"},
-            )
-        )
+    for piece_index, (left, right) in enumerate(_safe_text_pieces(text, breakpoints)):
+        piece = _safe_split_item_piece(item, text, duration_ms, piece_index, left, right)
+        if piece is not None:
+            output.append(piece)
     return output or [item]
 
 
@@ -382,6 +459,162 @@ def apply_safe_raw_split(raw_items: Iterable[RawTranscriptItem], *, max_ms: int 
     for item in raw_items:
         split_items.extend(split_raw_item_on_safe_punctuation(item, max_ms=max_ms))
     return _reindex_raw_items(split_items)
+
+
+@dataclass
+class _FunasrParseStats:
+    timestamp_mismatch_items: int = 0
+    timestamp_jump_warnings: int = 0
+    timestamp_split_items: int = 0
+    timestamp_fallback_items: int = 0
+    long_without_safe_boundary: int = 0
+
+    def merge(self, other: "_FunasrParseStats") -> None:
+        for name in self.__dataclass_fields__:
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+
+    def to_dict(self, raw_items: int) -> dict[str, int]:
+        return {"raw_items": raw_items, **{name: getattr(self, name) for name in self.__dataclass_fields__}}
+
+
+def _funasr_sentence_items(raw: dict[str, Any], is_sensevoice: bool) -> list[RawTranscriptItem] | None:
+    sentence_info = raw.get("sentence_info") or []
+    if not isinstance(sentence_info, list) or not sentence_info:
+        return None
+    items = []
+    for sentence in sentence_info:
+        if not isinstance(sentence, dict):
+            continue
+        start_ms = int(sentence.get("start", sentence.get("start_ms", 0)) or 0)
+        end_ms = int(sentence.get("end", sentence.get("end_ms", start_ms)) or start_ms)
+        item = _raw_item_from_parts(
+            item_id=len(items),
+            start_ms=start_ms,
+            end_ms=end_ms,
+            text=str(sentence.get("text", sentence.get("sentence", ""))),
+            source="funasr_sentence",
+            is_sensevoice=is_sensevoice,
+        )
+        if item is not None:
+            items.append(item)
+    return items
+
+
+def _funasr_timestamp_items(
+    text: str,
+    timestamps: list[tuple[int, int]],
+    *,
+    is_sensevoice: bool,
+    split_timestamp_text: bool,
+    diagnostics: dict[str, Any],
+) -> tuple[list[RawTranscriptItem], _FunasrParseStats]:
+    stats = _FunasrParseStats()
+    starts = [pair[0] for pair in timestamps]
+    jumps = sum(1 for left, right in zip(starts, starts[1:]) if right - left > 5000)
+    stats.timestamp_jump_warnings = jumps
+    if jumps:
+        diagnostics["timestamp_jumps"] = jumps
+    if is_sensevoice and split_timestamp_text:
+        split_items = split_sensevoice_timestamp_text(text, timestamps, source="funasr_timestamp_split")
+        if split_items:
+            stats.timestamp_split_items = len(split_items)
+            stats.long_without_safe_boundary = sum(
+                1 for item in split_items if item.diagnostics.get("long_without_safe_boundary")
+            )
+            return split_items, stats
+        stats.timestamp_fallback_items = 1
+    item = _raw_item_from_parts(
+        item_id=0,
+        start_ms=timestamps[0][0],
+        end_ms=timestamps[-1][1],
+        text=text,
+        source="funasr_timestamp",
+        is_sensevoice=is_sensevoice,
+        diagnostics=diagnostics,
+    )
+    return ([item] if item is not None else []), stats
+
+
+def _funasr_fallback_item(
+    raw: dict[str, Any],
+    text: str,
+    *,
+    is_sensevoice: bool,
+    fallback_start_ms: int | None,
+    fallback_end_ms: int | None,
+    diagnostics: dict[str, Any],
+) -> tuple[list[RawTranscriptItem], _FunasrParseStats]:
+    stats = _FunasrParseStats()
+    has_bounds = ("start" in raw or "start_ms" in raw) and ("end" in raw or "end_ms" in raw)
+    start_ms = int(raw.get("start", raw.get("start_ms", fallback_start_ms or 0)) or 0)
+    end_default = fallback_end_ms if fallback_end_ms is not None else start_ms
+    end_ms = int(raw.get("end", raw.get("end_ms", end_default)) or end_default)
+    if not has_bounds:
+        stats.timestamp_fallback_items = 1
+        diagnostics["timestamp_fallback_bounds"] = True
+    item = _raw_item_from_parts(
+        item_id=0,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        text=text,
+        source="funasr_text",
+        is_sensevoice=is_sensevoice,
+        diagnostics=diagnostics,
+    )
+    return ([item] if item is not None else []), stats
+
+
+def _parse_funasr_record(
+    raw: dict[str, Any],
+    *,
+    is_sensevoice: bool,
+    split_timestamp_text: bool,
+    fallback_start_ms: int | None,
+    fallback_end_ms: int | None,
+) -> tuple[list[RawTranscriptItem], _FunasrParseStats]:
+    sentence_items = _funasr_sentence_items(raw, is_sensevoice)
+    if sentence_items is not None:
+        return sentence_items, _FunasrParseStats()
+    text = str(raw.get("text") or "").strip()
+    if not text:
+        return [], _FunasrParseStats()
+    timestamps = _valid_timestamp_pairs(raw.get("timestamp"))
+    words = raw.get("words")
+    word_aligned = isinstance(words, list) and bool(timestamps) and len(words) == len(timestamps)
+    if is_sensevoice and split_timestamp_text and word_aligned:
+        split_items = split_sensevoice_word_timestamp_text(
+            text, words, timestamps, source="funasr_word_timestamp_split"
+        )
+        if split_items:
+            return split_items, _FunasrParseStats(timestamp_split_items=len(split_items))
+    diagnostics: dict[str, Any] = {}
+    timestamp_text = "".join(str(word) for word in words) if word_aligned else text
+    timed_count = sum(1 for char in timestamp_text if _timed_char(char))
+    if timestamps and not word_aligned and timed_count >= 8 and len(timestamps) < int(timed_count * 0.4):
+        diagnostics["timestamp_mismatch"] = True
+        stats = _FunasrParseStats(timestamp_mismatch_items=1)
+        timestamps = []
+    else:
+        stats = _FunasrParseStats()
+    if timestamps:
+        items, timestamp_stats = _funasr_timestamp_items(
+            text,
+            timestamps,
+            is_sensevoice=is_sensevoice,
+            split_timestamp_text=split_timestamp_text,
+            diagnostics=diagnostics,
+        )
+    else:
+        items, timestamp_stats = _funasr_fallback_item(
+            raw,
+            text,
+            is_sensevoice=is_sensevoice,
+            fallback_start_ms=fallback_start_ms,
+            fallback_end_ms=fallback_end_ms,
+            diagnostics=diagnostics,
+        )
+    stats.merge(timestamp_stats)
+    return items, stats
 
 
 def parse_funasr_raw_transcript(
@@ -393,130 +626,20 @@ def parse_funasr_raw_transcript(
     fallback_end_ms: int | None = None,
 ) -> tuple[list[RawTranscriptItem], dict[str, int]]:
     items: list[RawTranscriptItem] = []
-    timestamp_mismatch_items = 0
-    timestamp_jump_warnings = 0
-    timestamp_split_items = 0
-    timestamp_fallback_items = 0
-    long_without_safe_boundary = 0
-
-    def add_item(
-        start_ms: int,
-        end_ms: int,
-        text: str,
-        source: str,
-        diagnostics: dict[str, Any] | None = None,
-    ) -> None:
-        item = _raw_item_from_parts(
-            item_id=len(items),
-            start_ms=start_ms,
-            end_ms=end_ms,
-            text=text,
-            source=source,
-            is_sensevoice=is_sensevoice,
-            diagnostics=diagnostics,
-        )
-        if item is not None:
-            items.append(
-                item
-            )
+    stats = _FunasrParseStats()
 
     source_items = result if isinstance(result, list) else [result]
     for raw in source_items:
         if not isinstance(raw, dict):
             continue
-        sentence_info = raw.get("sentence_info") or []
-        if isinstance(sentence_info, list) and sentence_info:
-            for sentence in sentence_info:
-                if not isinstance(sentence, dict):
-                    continue
-                start_ms = int(sentence.get("start", sentence.get("start_ms", 0)) or 0)
-                end_ms = int(sentence.get("end", sentence.get("end_ms", start_ms)) or start_ms)
-                add_item(start_ms, end_ms, str(sentence.get("text", sentence.get("sentence", ""))), "funasr_sentence")
-            continue
-
-        text = str(raw.get("text") or "").strip()
-        if not text:
-            continue
-
-        timestamps = _valid_timestamp_pairs(raw.get("timestamp"))
-        words = raw.get("words")
-        word_aligned_timestamps = isinstance(words, list) and bool(timestamps) and len(words) == len(timestamps)
-        if is_sensevoice and split_timestamp_text and word_aligned_timestamps:
-            split_items = split_sensevoice_word_timestamp_text(
-                text,
-                words,
-                timestamps,
-                source="funasr_word_timestamp_split",
-            )
-            if split_items:
-                for item in split_items:
-                    items.append(
-                        RawTranscriptItem(
-                            item_id=len(items),
-                            start_ms=item.start_ms,
-                            end_ms=item.end_ms,
-                            text=item.text,
-                            source=item.source,
-                            emotion=item.emotion,
-                            audio_event=item.audio_event,
-                            diagnostics=item.diagnostics,
-                        )
-                    )
-                timestamp_split_items += len(split_items)
-                continue
-
-        timestamp_text = "".join(str(word) for word in words) if word_aligned_timestamps else text
-        timed_count = sum(1 for char in timestamp_text if _timed_char(char))
-        diagnostics: dict[str, Any] = {}
-        if timestamps and not word_aligned_timestamps and timed_count >= 8 and len(timestamps) < int(timed_count * 0.4):
-            timestamp_mismatch_items += 1
-            diagnostics["timestamp_mismatch"] = True
-            timestamps = []
-        if timestamps:
-            starts = [pair[0] for pair in timestamps]
-            jumps = sum(1 for left, right in zip(starts, starts[1:]) if right - left > 5000)
-            timestamp_jump_warnings += jumps
-            if jumps:
-                diagnostics["timestamp_jumps"] = jumps
-            if is_sensevoice and split_timestamp_text:
-                split_items = split_sensevoice_timestamp_text(text, timestamps, source="funasr_timestamp_split")
-                if split_items:
-                    for item in split_items:
-                        if item.diagnostics.get("long_without_safe_boundary"):
-                            long_without_safe_boundary += 1
-                        items.append(
-                            RawTranscriptItem(
-                                item_id=len(items),
-                                start_ms=item.start_ms,
-                                end_ms=item.end_ms,
-                                text=item.text,
-                                source=item.source,
-                                emotion=item.emotion,
-                                audio_event=item.audio_event,
-                                diagnostics=item.diagnostics,
-                            )
-                        )
-                    timestamp_split_items += len(split_items)
-                    continue
-                timestamp_fallback_items += 1
-            add_item(timestamps[0][0], timestamps[-1][1], text, "funasr_timestamp", diagnostics)
-            continue
-
-        has_raw_start = "start" in raw or "start_ms" in raw
-        has_raw_end = "end" in raw or "end_ms" in raw
-        start_ms = int(raw.get("start", raw.get("start_ms", fallback_start_ms or 0)) or 0)
-        end_default = fallback_end_ms if fallback_end_ms is not None else start_ms
-        end_ms = int(raw.get("end", raw.get("end_ms", end_default)) or end_default)
-        if not has_raw_start or not has_raw_end:
-            timestamp_fallback_items += 1
-            diagnostics["timestamp_fallback_bounds"] = True
-        add_item(start_ms, end_ms, text, "funasr_text", diagnostics)
-
-    return items, {
-        "raw_items": len(items),
-        "timestamp_mismatch_items": timestamp_mismatch_items,
-        "timestamp_jump_warnings": timestamp_jump_warnings,
-        "timestamp_split_items": timestamp_split_items,
-        "timestamp_fallback_items": timestamp_fallback_items,
-        "long_without_safe_boundary": long_without_safe_boundary,
-    }
+        record_items, record_stats = _parse_funasr_record(
+            raw,
+            is_sensevoice=is_sensevoice,
+            split_timestamp_text=split_timestamp_text,
+            fallback_start_ms=fallback_start_ms,
+            fallback_end_ms=fallback_end_ms,
+        )
+        items.extend(record_items)
+        stats.merge(record_stats)
+    items = _reindex_raw_items(items)
+    return items, stats.to_dict(len(items))

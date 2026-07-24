@@ -518,7 +518,7 @@ curl -fsS "${MS_API}/api/jobs/${JOB_ID}" | python3 -m json.tool \
 
 ```bash
 docker inspect "$MS_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' \
-  | grep -E 'NPU|FACE_PROVIDER|OCR_DEVICE|ASR_DEVICE|INDEXER_MODE|MODEL_IDLE'
+  | grep -E 'NPU|FACE_PROVIDER|OCR_DEVICE|ASR_DEVICE|INDEXER_MODE|INDEXER_IDLE_TIMEOUT'
 ```
 
 ### 9.6 NPU `Resource_Busy / 507899`

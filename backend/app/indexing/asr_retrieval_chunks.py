@@ -107,52 +107,51 @@ def _merge_decision(
     return False, flags
 
 
-def build_retrieval_chunks(
-    raw_items: Iterable[RawTranscriptItem],
-    *,
-    config: RetrievalChunkConfig | None = None,
-) -> tuple[list[RetrievalChunk], dict[str, int]]:
-    config = config or RetrievalChunkConfig()
-    source_items = list(raw_items)
-    normalized: list[RawTranscriptItem] = []
+def _normalize_raw_items(source_items: list[RawTranscriptItem]) -> tuple[list[RawTranscriptItem], int]:
+    normalized = []
     dropped_empty = 0
     for item in source_items:
         text = normalize_asr_text(item.text)
         if not text:
             dropped_empty += 1
             continue
-        normalized.append(
-            RawTranscriptItem(
-                item_id=item.item_id,
-                start_ms=item.start_ms,
-                end_ms=max(item.start_ms, item.end_ms),
-                text=text,
-                source=item.source,
-                unit_id=item.unit_id,
-                emotion=item.emotion,
-                audio_event=item.audio_event,
-                diagnostics=item.diagnostics,
-            )
-        )
+        normalized.append(RawTranscriptItem(
+            item_id=item.item_id,
+            start_ms=item.start_ms,
+            end_ms=max(item.start_ms, item.end_ms),
+            text=text,
+            source=item.source,
+            unit_id=item.unit_id,
+            emotion=item.emotion,
+            audio_event=item.audio_event,
+            diagnostics=item.diagnostics,
+        ))
+    return normalized, dropped_empty
 
+
+def _chunk_from_item(item: RawTranscriptItem, chunk_id: int) -> RetrievalChunk:
+    return RetrievalChunk(
+        chunk_id=chunk_id,
+        start_ms=item.start_ms,
+        end_ms=item.end_ms,
+        text=item.text,
+        source_item_ids=[item.item_id],
+        emotion=item.emotion,
+        audio_event=item.audio_event,
+    )
+
+
+def _merge_normalized_items(
+    normalized: list[RawTranscriptItem],
+    config: RetrievalChunkConfig,
+) -> tuple[list[RetrievalChunk], int, int]:
     chunks: list[RetrievalChunk] = []
     chunk_unit_ids: list[int | None] = []
     merged_items = 0
     cross_unit_merge_blocks = 0
-
     for item in normalized:
         if not chunks:
-            chunks.append(
-                RetrievalChunk(
-                    chunk_id=0,
-                    start_ms=item.start_ms,
-                    end_ms=item.end_ms,
-                    text=item.text,
-                    source_item_ids=[item.item_id],
-                    emotion=item.emotion,
-                    audio_event=item.audio_event,
-                )
-            )
+            chunks.append(_chunk_from_item(item, 0))
             chunk_unit_ids.append(item.unit_id)
             continue
         current = chunks[-1]
@@ -163,73 +162,70 @@ def build_retrieval_chunks(
             and item.unit_id is not None
             and current_unit_id != item.unit_id
         )
-        allowed, flags = _merge_decision(
-            current,
-            item,
-            config=config,
-            current_unit_id=current_unit_id,
-        )
+        allowed, flags = _merge_decision(current, item, config=config, current_unit_id=current_unit_id)
         if not allowed:
-            if cross_unit:
-                cross_unit_merge_blocks += 1
-            chunks.append(
-                RetrievalChunk(
-                    chunk_id=len(chunks),
-                    start_ms=item.start_ms,
-                    end_ms=item.end_ms,
-                    text=item.text,
-                    source_item_ids=[item.item_id],
-                    emotion=item.emotion,
-                    audio_event=item.audio_event,
-                )
-            )
+            cross_unit_merge_blocks += int(cross_unit)
+            chunks.append(_chunk_from_item(item, len(chunks)))
             chunk_unit_ids.append(item.unit_id)
             continue
-        merged_text = _join_text(current.text, item.text)
-        merged_flags = list(dict.fromkeys([*current.quality_flags, *flags]))
         chunks[-1] = RetrievalChunk(
             chunk_id=current.chunk_id,
             start_ms=current.start_ms,
             end_ms=max(current.end_ms, item.end_ms),
-            text=merged_text,
+            text=_join_text(current.text, item.text),
             source_item_ids=[*current.source_item_ids, item.item_id],
-            quality_flags=merged_flags,
+            quality_flags=list(dict.fromkeys([*current.quality_flags, *flags])),
             emotion=_merge_labels(current.emotion, item.emotion),
             audio_event=_merge_labels(current.audio_event, item.audio_event),
         )
         merged_items += 1
+    return chunks, merged_items, cross_unit_merge_blocks
 
-    final_chunks: list[RetrievalChunk] = []
-    semantic_ineligible = 0
-    long_chunks = 0
-    low_boundary_chunks = 0
+
+def _finalize_chunks(
+    chunks: list[RetrievalChunk],
+    config: RetrievalChunkConfig,
+) -> tuple[list[RetrievalChunk], dict[str, int]]:
+    final_chunks = []
+    counters = {"semantic_ineligible_chunks": 0, "long_chunks": 0, "low_boundary_chunks": 0}
     for chunk in chunks:
         duration_ms = chunk.end_ms - chunk.start_ms
         quality = semantic_text_quality(chunk.text, duration_ms=duration_ms)
         quality_flags = list(chunk.quality_flags)
         if not _ends_sentence(chunk.text):
             quality_flags.append("non_terminal_boundary")
-            low_boundary_chunks += 1
+            counters["low_boundary_chunks"] += 1
         if duration_ms > config.soft_max_duration_ms:
-            long_chunks += 1
             quality_flags.append("long_chunk")
+            counters["long_chunks"] += 1
         if not quality.eligible:
-            semantic_ineligible += 1
             quality_flags.append(f"embedding_ineligible:{quality.reason}")
-        final_chunks.append(
-            RetrievalChunk(
-                chunk_id=len(final_chunks),
-                start_ms=chunk.start_ms,
-                end_ms=chunk.end_ms,
-                text=chunk.text,
-                source_item_ids=chunk.source_item_ids,
-                semantic_eligible=bool(quality.eligible),
-                semantic_reason=quality.reason,
-                quality_flags=list(dict.fromkeys(quality_flags)),
-                emotion=chunk.emotion,
-                audio_event=chunk.audio_event,
-            )
-        )
+            counters["semantic_ineligible_chunks"] += 1
+        final_chunks.append(RetrievalChunk(
+            chunk_id=len(final_chunks),
+            start_ms=chunk.start_ms,
+            end_ms=chunk.end_ms,
+            text=chunk.text,
+            source_item_ids=chunk.source_item_ids,
+            semantic_eligible=bool(quality.eligible),
+            semantic_reason=quality.reason,
+            quality_flags=list(dict.fromkeys(quality_flags)),
+            emotion=chunk.emotion,
+            audio_event=chunk.audio_event,
+        ))
+    return final_chunks, counters
+
+
+def build_retrieval_chunks(
+    raw_items: Iterable[RawTranscriptItem],
+    *,
+    config: RetrievalChunkConfig | None = None,
+) -> tuple[list[RetrievalChunk], dict[str, int]]:
+    config = config or RetrievalChunkConfig()
+    source_items = list(raw_items)
+    normalized, dropped_empty = _normalize_raw_items(source_items)
+    chunks, merged_items, cross_unit_merge_blocks = _merge_normalized_items(normalized, config)
+    final_chunks, quality_counters = _finalize_chunks(chunks, config)
 
     return final_chunks, {
         "raw_items": len(source_items),
@@ -238,7 +234,5 @@ def build_retrieval_chunks(
         "dropped_empty_items": dropped_empty,
         "merged_items": merged_items,
         "cross_unit_merge_blocks": cross_unit_merge_blocks,
-        "long_chunks": long_chunks,
-        "low_boundary_chunks": low_boundary_chunks,
-        "semantic_ineligible_chunks": semantic_ineligible,
+        **quality_counters,
     }

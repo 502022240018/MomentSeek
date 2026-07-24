@@ -35,9 +35,9 @@ def _is_retryable_context_error(message: str) -> bool:
 def _execute_stage(stage: str, video: dict, options: dict, pool: ModelPool) -> dict:
     # Import lazily so the child owns every accelerator import and runtime
     # context created by the stage. The parent scheduler never imports a model.
-    from app.indexer_daemon import _stage_runner
+    from app.stage_executor import execute_stage
 
-    return _stage_runner(stage, video, options, get_settings(), pool)
+    return execute_stage(stage, video, options, get_settings(), pool)
 
 
 def isolated_stage_worker_main(stage: str, connection: Connection) -> None:
@@ -50,11 +50,7 @@ def isolated_stage_worker_main(stage: str, connection: Connection) -> None:
             request = connection.recv()
             operation = request.get("operation")
             if operation == "shutdown":
-                connection.send({"type": "stopped", "stage": stage, "pid": os.getpid()})
                 return
-            if operation == "ping":
-                connection.send({"type": "pong", "stage": stage, "pid": os.getpid(), "warm": pool.keys()})
-                continue
             if operation != "run":
                 raise ValueError(f"unsupported isolated worker operation: {operation}")
 

@@ -109,6 +109,63 @@ class Track:
     best_crop: np.ndarray | None = None
 
 
+def _expire_face_tracks(active: list[Track], timestamp: float, max_gap: float) -> tuple[list[Track], list[Track]]:
+    retained, expired = [], []
+    for track in active:
+        (retained if timestamp - track.end <= max_gap else expired).append(track)
+    return retained, expired
+
+
+def _best_face_track_match(
+    active: list[Track],
+    used_tracks: set[int],
+    embedding: np.ndarray,
+    bbox: np.ndarray,
+    cosine_threshold: float,
+) -> tuple[Track | None, int | None]:
+    candidates = []
+    for index, track in enumerate(active):
+        if index in used_tracks:
+            continue
+        track_embedding = normalize(np.mean(track.embeddings, axis=0))
+        cosine = float(np.dot(embedding, track_embedding))
+        candidates.append((0.85 * cosine + 0.15 * _iou(bbox, track.bbox), cosine, index))
+    match = max(candidates, default=None)
+    if match and match[1] >= cosine_threshold:
+        return active[match[2]], int(match[2])
+    return None, None
+
+
+def _update_best_face_crop(track: Track, face, frame: np.ndarray, bbox: np.ndarray, timestamp: float) -> None:
+    x1, y1, x2, y2 = bbox.astype(int)
+    area = max(0, x2 - x1) * max(0, y2 - y1)
+    quality = float(face.det_score) * float(np.sqrt(area))
+    if quality <= track.best_quality:
+        return
+    pad = max(4, int(0.15 * max(x2 - x1, y2 - y1)))
+    height, width = frame.shape[:2]
+    track.best_crop = frame[
+        max(0, y1 - pad):min(height, y2 + pad),
+        max(0, x1 - pad):min(width, x2 + pad),
+    ].copy()
+    track.best_quality = quality
+    track.best_time = timestamp
+
+
+def _face_track_arrays(tracks: list[Track]) -> tuple[list[np.ndarray], list[list[int]]]:
+    embeddings, track_times_ms = [], []
+    for track in tracks:
+        if not track.embeddings:
+            continue
+        embeddings.append(normalize(np.mean(track.embeddings, axis=0)))
+        track_times_ms.append([
+            int(round(track.start * 1000)),
+            int(round(track.end * 1000)),
+            int(round(track.best_time * 1000)),
+        ])
+    return embeddings, track_times_ms
+
+
 def build_face_index(
     video_path: str,
     output_path: str,
@@ -142,30 +199,19 @@ def build_face_index(
     detections = 0
 
     for timestamp, frame in read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg):
-        retained = []
-        for track in active:
-            if timestamp - track.end <= max_gap:
-                retained.append(track)
-            else:
-                finished.append(track)
-        active = retained
+        active, expired = _expire_face_tracks(active, timestamp, max_gap)
+        finished.extend(expired)
         used_tracks: set[int] = set()
         faces = sorted(encoder.detect(frame), key=lambda item: float(item.det_score), reverse=True)
         detections += len(faces)
         for face in faces:
             embedding = normalize(face.normed_embedding)
             bbox = np.asarray(face.bbox, dtype=np.float32)
-            candidates = []
-            for index, track in enumerate(active):
-                if index in used_tracks:
-                    continue
-                track_embedding = normalize(np.mean(track.embeddings, axis=0))
-                cosine = float(np.dot(embedding, track_embedding))
-                candidates.append((0.85 * cosine + 0.15 * _iou(bbox, track.bbox), cosine, index))
-            match = max(candidates, default=None)
-            if match and match[1] >= cosine_threshold:
-                track = active[match[2]]
-                used_tracks.add(match[2])
+            track, matched_index = _best_face_track_match(
+                active, used_tracks, embedding, bbox, cosine_threshold
+            )
+            if track is not None and matched_index is not None:
+                used_tracks.add(matched_index)
                 track.end = timestamp + 1 / sample_fps
                 track.bbox = bbox
                 track.embeddings.append(embedding)
@@ -174,31 +220,9 @@ def build_face_index(
                 next_number += 1
                 active.append(track)
                 used_tracks.add(len(active) - 1)
-
-            x1, y1, x2, y2 = bbox.astype(int)
-            area = max(0, x2 - x1) * max(0, y2 - y1)
-            quality = float(face.det_score) * float(np.sqrt(area))
-            if quality > track.best_quality:
-                pad = max(4, int(0.15 * max(x2 - x1, y2 - y1)))
-                height, width = frame.shape[:2]
-                track.best_crop = frame[
-                    max(0, y1 - pad):min(height, y2 + pad),
-                    max(0, x1 - pad):min(width, x2 + pad),
-                ].copy()
-                track.best_quality = quality
-                track.best_time = timestamp
+            _update_best_face_crop(track, face, frame, bbox, timestamp)
     finished.extend(active)
-
-    embeddings, track_times_ms = [], []
-    for track in finished:
-        if not track.embeddings:
-            continue
-        embeddings.append(normalize(np.mean(track.embeddings, axis=0)))
-        track_times_ms.append([
-            int(round(track.start * 1000)),
-            int(round(track.end * 1000)),
-            int(round(track.best_time * 1000)),
-        ])
+    embeddings, track_times_ms = _face_track_arrays(finished)
 
     dimension = len(embeddings[0]) if embeddings else 512
     atomic_save_npz(

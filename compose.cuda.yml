@@ -18,7 +18,6 @@ services:
       APP_PUBLIC_URL: "${APP_PUBLIC_URL:-http://127.0.0.1:8000}"
       NPU_ENABLED: "false"
       CUDA_ENABLED: "true"
-      MODEL_IDLE_POLICY: "${MODEL_IDLE_POLICY:-process_exit}"
       VISUAL_MODEL: "${VISUAL_MODEL:-siglip2-so400m-384}"
       VISUAL_HF_CACHE_DIR: "${VISUAL_HF_CACHE_DIR:-/app/runtime/hf_cache}"
       ASR_SEMANTIC_DEVICE: "${ASR_SEMANTIC_DEVICE:-cpu}"

@@ -63,7 +63,7 @@ def test_isolated_worker_serves_one_stage_and_keeps_its_pool(monkeypatch):
 
     workers.isolated_stage_worker_main("visual", connection)
 
-    assert [item["type"] for item in connection.sent] == ["ready", "result", "stopped"]
+    assert [item["type"] for item in connection.sent] == ["ready", "result"]
     assert connection.sent[1]["result"] == {"frames": 3}
     assert connection.sent[1]["warm"] == ["warm-model"]
     assert calls[0][:3] == ("visual", {"id": "video-1"}, {"visual_model": "siglip2"})

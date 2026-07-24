@@ -1,197 +1,54 @@
-"""Warm-pool indexer daemon.
-
-A long-lived alternative to the per-job `process_exit` subprocess worker. It polls
-the job queue and runs stages in-process, keeping the CLIP / InsightFace models
-resident in a ModelPool so back-to-back jobs skip model loading and NPU kernel
-compilation. A positive `indexer_idle_timeout_seconds` releases idle models;
-zero keeps them resident until the daemon stops on a dedicated indexing card.
-
-Run instead of relying on launch_job's subprocess fan-out:
-
-    python -m app.indexer_daemon
-
-The API path (create job -> status=queued) is unchanged; this daemon drains it.
-"""
+"""Serial indexing scheduler with optional persistent per-modality workers."""
 from __future__ import annotations
 
+import os
 import time
 import traceback
-import os
+from contextlib import contextmanager
+from pathlib import Path
 
 from app.db import Catalog
-from app.indexing.pipeline_manifest import write_stage_manifest
 from app.model_pool import ModelPool
 from app.settings import Settings, get_settings
+from app.stage_executor import execute_stage
 
 
-def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, pool: ModelPool) -> dict:
-    video_index_dir = settings.index_dir / video["id"]
-    working_dir = video_index_dir / "work"
-    for directory in (video_index_dir, working_dir):
-        directory.mkdir(parents=True, exist_ok=True)
-    video_path = str(settings.resolve_path(video["file_path"]))
+@contextmanager
+def indexer_singleton_lock(path: Path):
+    """Try to become the only indexer daemon for one runtime directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+    handle.seek(0)
+    acquired = False
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
 
-    if stage == "visual":
-        from app.indexing.visual import ClipEncoder, build_visual_index, resolve_device
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
 
-        device = resolve_device(settings.npu_enabled, settings.npu_device_id, settings.cuda_enabled)
-        visual_model = str(options.get("visual_model", settings.visual_model))
-        model_cache_dir = str(settings.resolve_path(settings.visual_hf_cache_dir))
-        key = f"clip:{visual_model}:{device}"
-        encoder = pool.get(
-            key,
-            lambda: ClipEncoder(
-                settings.clip_model,
-                settings.clip_pretrained,
-                device,
-                visual_model=visual_model,
-                model_cache_dir=model_cache_dir,
-            ),
-        )
-        result = build_visual_index(
-            video_path=video_path,
-            output_path=str(video_index_dir / "visual.npz"),
-            model_name=settings.clip_model,
-            pretrained=settings.clip_pretrained,
-            sample_fps=float(options.get("visual_sample_fps", settings.visual_sample_fps)),
-            segment_seconds=float(options.get("visual_segment_seconds", settings.visual_segment_seconds)),
-            batch_size=int(options.get("visual_batch_size", settings.visual_batch_size)),
-            npu_enabled=settings.npu_enabled,
-            npu_device_id=settings.npu_device_id,
-            cuda_enabled=settings.cuda_enabled,
-            encoder=encoder,
-            visual_model=visual_model,
-            model_cache_dir=model_cache_dir,
-            decode_height=settings.visual_decode_height,
-            prefer_ffmpeg=settings.frame_reader == "ffmpeg",
-            duration_seconds=float(video.get("duration") or 0),
-            segment_strategy=str(options.get("visual_segment_strategy", settings.visual_segment_strategy)),
-            min_segment_seconds=float(options.get("visual_min_segment_seconds", settings.visual_min_segment_seconds)),
-            max_segment_seconds=float(options.get("visual_max_segment_seconds", settings.visual_max_segment_seconds)),
-            shot_detector=str(options.get("visual_shot_detector", settings.visual_shot_detector)),
-            shot_detector_threshold=float(options.get("visual_shot_threshold", settings.visual_shot_threshold)),
-        )
-        write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
-        return result
-    if stage == "face":
-        from app.indexing.faces import FaceEncoder, build_face_index
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError:
+            pass
+        yield acquired
+    finally:
+        if acquired:
+            if os.name == "nt":
+                import msvcrt
 
-        root = str(settings.app_model_dir / "insightface")
-        key = f"face:{settings.face_model}:{settings.face_provider}:{settings.npu_device_id}"
-        encoder = pool.get(
-            key,
-            lambda: FaceEncoder(
-                settings.face_model,
-                settings.face_provider,
-                settings.npu_device_id,
-                root,
-                settings.face_ort_intra_op_threads,
-                settings.face_ort_inter_op_threads,
-            ),
-        )
-        result = build_face_index(
-            video_path=video_path,
-            output_path=str(video_index_dir / "face.npz"),
-            model_name=settings.face_model,
-            sample_fps=float(options.get("face_sample_fps", settings.face_sample_fps)),
-            provider=settings.face_provider,
-            device_id=settings.npu_device_id,
-            model_root=root,
-            encoder=encoder,
-            decode_height=settings.face_decode_height,
-            prefer_ffmpeg=settings.frame_reader == "ffmpeg",
-            ort_intra_op_threads=settings.face_ort_intra_op_threads,
-            ort_inter_op_threads=settings.face_ort_inter_op_threads,
-        )
-        write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
-        return result
-    if stage == "asr":
-        from app.indexing.asr import build_asr_index, resolve_asr_device
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
 
-        sidecar_path = options.get("sidecar_path")
-        if sidecar_path:
-            sidecar_path = str(settings.resolve_path(sidecar_path))
-        result = build_asr_index(
-            video_path=video_path,
-            output_path=str(video_index_dir / "asr.npz"),
-            working_dir=str(working_dir),
-            engine=str(options.get("asr_engine", settings.asr_engine)),
-            model_name=str(options.get("asr_model", settings.asr_model)),
-            device=resolve_asr_device(settings.asr_device, settings.cuda_enabled, settings.npu_enabled, settings.npu_device_id),
-            model_dir=str(settings.app_model_dir / "whisper"),
-            language=str(options.get("asr_language", settings.asr_language)),
-            sidecar_path=sidecar_path,
-            funasr_model=settings.asr_zh_model,
-            funasr_model_dir=str(settings.app_model_dir / "funasr"),
-            faster_whisper_model_dir=str(settings.app_model_dir / "faster-whisper"),
-            model_local_files_only=settings.asr_model_local_files_only,
-            semantic_enabled=settings.asr_semantic_enabled,
-            semantic_model=settings.asr_semantic_model,
-            semantic_device=settings.asr_semantic_device,
-            semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
-            semantic_batch_size=settings.asr_semantic_batch_size,
-            semantic_local_files_only=settings.asr_semantic_local_files_only,
-            debug_artifacts_enabled=bool(options.get("asr_debug_artifacts", settings.asr_debug_artifacts)),
-            save_raw_transcript=bool(options.get("asr_save_raw_transcript", settings.asr_save_raw_transcript)),
-            vad_strategy=str(options.get("asr_vad_strategy", settings.asr_vad_strategy)),
-        )
-        write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
-        return result
-    if stage == "ocr":
-        from app.indexing.ocr import build_ocr_index, create_ocr_backend
-
-        device = settings.ocr_device
-        if device == "auto":
-            device = "npu" if settings.npu_enabled else "cpu"
-        model_root = str(settings.app_model_dir / "rapidocr")
-        key = f"ocr:{settings.ocr_engine}:{settings.ocr_version}:{settings.ocr_model_type}:{device}:{settings.npu_device_id}"
-        backend_pool_started = time.perf_counter()
-        backend = pool.get(
-            key,
-            lambda: create_ocr_backend(
-                settings.ocr_engine,
-                device=device,
-                device_id=settings.npu_device_id,
-                model_root=model_root,
-                ocr_version=settings.ocr_version,
-                det_lang=settings.ocr_det_lang,
-                rec_lang=settings.ocr_rec_lang,
-                model_type=settings.ocr_model_type,
-                npu_self_test=settings.ocr_npu_self_test,
-                acl_model_dir=str(settings.app_model_dir / settings.ocr_acl_model_dir),
-            ),
-        )
-        backend_pool_elapsed = time.perf_counter() - backend_pool_started
-        result = build_ocr_index(
-            video_path=video_path,
-            output_path=str(video_index_dir / "ocr.npz"),
-            working_dir=str(working_dir),
-            sample_fps=float(options.get("ocr_sample_fps", settings.ocr_sample_fps)),
-            decode_height=settings.ocr_decode_height,
-            min_confidence=settings.ocr_min_confidence,
-            device=device,
-            device_id=settings.npu_device_id,
-            model_root=model_root,
-            ocr_version=settings.ocr_version,
-            det_lang=settings.ocr_det_lang,
-            rec_lang=settings.ocr_rec_lang,
-            model_type=settings.ocr_model_type,
-            npu_self_test=settings.ocr_npu_self_test,
-            prefer_ffmpeg=settings.frame_reader == "ffmpeg",
-            semantic_enabled=settings.ocr_semantic_enabled,
-            semantic_model=settings.asr_semantic_model,
-            semantic_device=settings.asr_semantic_device,
-            semantic_model_dir=str(settings.app_model_dir / "text-embeddings"),
-            semantic_batch_size=settings.asr_semantic_batch_size,
-            semantic_local_files_only=settings.asr_semantic_local_files_only,
-            engine=settings.ocr_engine,
-            acl_model_dir=str(settings.app_model_dir / settings.ocr_acl_model_dir),
-            backend=backend,
-        )
-        result["backend_pool_get_elapsed_seconds"] = round(backend_pool_elapsed, 3)
-        write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
-        return result
-    raise ValueError(f"未知索引阶段: {stage}")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool) -> None:
@@ -219,7 +76,7 @@ def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool) -> None
             if hasattr(pool, "run_stage"):
                 result = pool.run_stage(stage, video, options)
             else:
-                result = _stage_runner(stage, video, options, settings, pool)
+                result = execute_stage(stage, video, options, settings, pool)
             metrics["stages"][stage] = {
                 "elapsed_seconds": round(time.perf_counter() - stage_start, 3),
                 "status": "completed",
@@ -227,9 +84,20 @@ def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool) -> None
             }
             completed.add(stage)
             catalog.update_video(video["id"], indexed_modalities=sorted(completed))
-            catalog.update_job(job_id, progress=round((index + 1) / max(1, len(stages)), 3), metrics=metrics)
+            catalog.update_job(
+                job_id,
+                progress=round((index + 1) / max(1, len(stages)), 3),
+                metrics=metrics,
+            )
         metrics["total_elapsed_seconds"] = round(time.perf_counter() - job_start, 3)
-        catalog.update_job(job_id, status="completed", stage="completed", progress=1, error=None, metrics=metrics)
+        catalog.update_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            progress=1,
+            error=None,
+            metrics=metrics,
+        )
         catalog.update_video(video["id"], status="ready")
     except Exception as exc:
         metrics["total_elapsed_seconds"] = round(time.perf_counter() - job_start, 3)
@@ -238,46 +106,42 @@ def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool) -> None
         traceback.print_exc()
 
 
-def next_queued_job(catalog: Catalog) -> dict | None:
-    queued = [job for job in catalog.list_jobs() if job.get("status") == "queued"]
-    if not queued:
-        return None
-    queued.sort(key=lambda job: job.get("created_at") or "")  # oldest first
-    return queued[0]
-
-
 def main() -> None:
     settings = get_settings()
     catalog = Catalog(settings.db_path)
-    worker_mode = settings.npu_worker_mode.strip().casefold()
-    if worker_mode == "isolated":
-        from app.isolated_stage_workers import IsolatedStageWorkerPool
+    with indexer_singleton_lock(settings.app_data_dir / "indexer-daemon.lock") as acquired:
+        if not acquired:
+            print("[indexer-daemon] another scheduler already owns the runtime; exiting", flush=True)
+            return
+        if settings.npu_worker_mode == "isolated":
+            from app.isolated_stage_workers import IsolatedStageWorkerPool
 
-        pool = IsolatedStageWorkerPool(
-            start_timeout_seconds=settings.indexer_worker_start_timeout_seconds,
-            max_attempts=settings.indexer_stage_max_attempts,
+            pool = IsolatedStageWorkerPool(
+                start_timeout_seconds=settings.indexer_worker_start_timeout_seconds,
+                max_attempts=settings.indexer_stage_max_attempts,
+            )
+        else:
+            pool = ModelPool(idle_timeout=settings.indexer_idle_timeout_seconds)
+        print(
+            f"[indexer-daemon] up; worker_mode={settings.npu_worker_mode} "
+            f"idle_timeout={settings.indexer_idle_timeout_seconds}s poll={settings.indexer_poll_seconds}s",
+            flush=True,
         )
-    elif worker_mode == "legacy":
-        pool = ModelPool(idle_timeout=settings.indexer_idle_timeout_seconds)
-    else:
-        raise ValueError(f"NPU_WORKER_MODE must be legacy or isolated, got: {settings.npu_worker_mode}")
-    print(
-        f"[indexer-daemon] up; worker_mode={worker_mode} "
-        f"idle_timeout={settings.indexer_idle_timeout_seconds}s poll={settings.indexer_poll_seconds}s",
-        flush=True,
-    )
-    try:
-        while True:
-            job = next_queued_job(catalog)
-            if job is None:
-                time.sleep(settings.indexer_poll_seconds)
-                continue
-            print(f"[indexer-daemon] job {job['id']} stages={job['modalities']} warm={pool.keys()}", flush=True)
-            execute_job(job["id"], settings, catalog, pool)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        pool.shutdown()
+        try:
+            while True:
+                job = catalog.next_queued_job()
+                if job is None:
+                    time.sleep(settings.indexer_poll_seconds)
+                    continue
+                print(
+                    f"[indexer-daemon] job {job['id']} stages={job['modalities']} warm={pool.keys()}",
+                    flush=True,
+                )
+                execute_job(job["id"], settings, catalog, pool)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            pool.shutdown()
 
 
 if __name__ == "__main__":

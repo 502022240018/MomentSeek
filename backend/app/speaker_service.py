@@ -17,14 +17,7 @@ def _texts(asr_path: Path) -> list[str]:
         return [str(value) for value in data["texts"]]
 
 
-def video_speakers(index_dir: Path, catalog: Catalog, video_id: str) -> dict:
-    speaker_path = index_dir / video_id / "speaker.npz"
-    asr_path = index_dir / video_id / "asr.npz"
-    if not speaker_path.exists() or not asr_path.exists():
-        raise FileNotFoundError("该视频尚未构建 Speaker 索引")
-    data = load_speaker_index(speaker_path)
-    texts = _texts(asr_path)
-    overlays = catalog.speaker_overlays(video_id)
+def _speaker_utterances(data: dict, texts: list[str], overlays: dict, video_id: str) -> list[dict]:
     refs = data["utterance_refs"].astype(np.int32)
     times = data["utterance_times_ms"].astype(np.int32)
     utterances = []
@@ -44,65 +37,114 @@ def video_speakers(index_dir: Path, catalog: Catalog, video_id: str) -> dict:
             "searchable": bool(override.get("searchable", 1)),
             "clip_url": f"/api/videos/{video_id}/clip?{urlencode({'start': start_ms / 1000, 'end': end_ms / 1000})}",
         })
+    return utterances
+
+
+def _speaker_track_ids(data: dict, utterances: list[dict]) -> set[int]:
     track_ids = set(range(len(data["track_embeddings"])))
-    track_ids.update(int(item["track_id"]) for item in utterances if item["track_id"] is not None and int(item["track_id"]) >= 0)
+    track_ids.update(
+        int(item["track_id"])
+        for item in utterances
+        if item["track_id"] is not None and int(item["track_id"]) >= 0
+    )
+    return track_ids
+
+
+def _rank_speaker_utterances(indices: list[int], embeddings: np.ndarray, utterances: list[dict]) -> list[int]:
+    member_vectors = embeddings[indices]
+    centroid = member_vectors.mean(axis=0)
+    centroid /= max(float(np.linalg.norm(centroid)), 1e-12)
+    scores = {index: float(score) for index, score in zip(indices, member_vectors @ centroid)}
+    return sorted(
+        indices,
+        key=lambda index: (
+            -scores[index],
+            -(utterances[index]["end_ms"] - utterances[index]["start_ms"]),
+            index,
+        ),
+    )
+
+
+def _speaker_preview_indices(
+    candidates: list[int],
+    utterances: list[dict],
+) -> list[int]:
+    preview = []
+    for index in candidates:
+        start_ms, end_ms = utterances[index]["start_ms"], utterances[index]["end_ms"]
+        overlaps = any(
+            min(end_ms, utterances[chosen]["end_ms"]) > max(start_ms, utterances[chosen]["start_ms"])
+            for chosen in preview
+        )
+        if overlaps:
+            continue
+        preview.append(index)
+        if len(preview) == SPEAKER_PREVIEW_UTTERANCES:
+            break
+    return preview
+
+
+def _speaker_track_view(
+    track_id: int,
+    *,
+    utterances: list[dict],
+    embeddings: np.ndarray,
+    auto_representatives: np.ndarray,
+    overlays: dict,
+) -> tuple[dict, list[int]]:
+    overlay = overlays["speakers"].get(track_id, {})
+    indices = [item["index"] for item in utterances if item["track_id"] == track_id]
+    representative = overlay.get("representative_utterance_index")
+    if representative is None and track_id < len(auto_representatives):
+        representative = int(auto_representatives[track_id])
+    if representative not in indices:
+        representative = -1
+    preview = []
+    if indices:
+        ranked = _rank_speaker_utterances(indices, embeddings, utterances)
+        if representative < 0:
+            representative = ranked[0]
+        candidates = [representative, *(index for index in ranked if index != representative)]
+        preview = _speaker_preview_indices(candidates, utterances)
+    view = {
+        "track_id": track_id,
+        "label": overlay.get("display_name") or f"Speaker {track_id}",
+        "display_name": overlay.get("display_name"),
+        "representative_utterance_index": representative,
+        "utterance_indices": preview,
+        "utterance_count": len(indices),
+        "duration_ms": sum(utterances[i]["end_ms"] - utterances[i]["start_ms"] for i in indices),
+        "hidden": bool(overlay.get("hidden", 0)),
+        "entity_id": overlays["bindings"].get(track_id, {}).get("entity_id"),
+    }
+    return view, preview
+
+
+def video_speakers(index_dir: Path, catalog: Catalog, video_id: str) -> dict:
+    speaker_path = index_dir / video_id / "speaker.npz"
+    asr_path = index_dir / video_id / "asr.npz"
+    if not speaker_path.exists() or not asr_path.exists():
+        raise FileNotFoundError("该视频尚未构建 Speaker 索引")
+    data = load_speaker_index(speaker_path)
+    texts = _texts(asr_path)
+    overlays = catalog.speaker_overlays(video_id)
+    utterances = _speaker_utterances(data, texts, overlays, video_id)
+    track_ids = _speaker_track_ids(data, utterances)
     auto_representatives = data["track_representative_indices"].astype(np.int32)
     embeddings = data["utterance_embeddings"].astype(np.float32)
     embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
     tracks = []
     preview_indices: set[int] = set()
     for track_id in sorted(track_ids):
-        overlay = overlays["speakers"].get(track_id, {})
-        indices = [item["index"] for item in utterances if item["track_id"] == track_id]
-        representative = overlay.get("representative_utterance_index")
-        if representative is None and track_id < len(auto_representatives):
-            representative = int(auto_representatives[track_id])
-        if representative not in indices:
-            representative = -1
-        if indices:
-            member_vectors = embeddings[indices]
-            centroid = member_vectors.mean(axis=0)
-            centroid /= max(float(np.linalg.norm(centroid)), 1e-12)
-            centrality = member_vectors @ centroid
-            scores = {index: float(score) for index, score in zip(indices, centrality)}
-            ranked = sorted(
-                indices,
-                key=lambda index: (
-                    -scores[index],
-                    -(utterances[index]["end_ms"] - utterances[index]["start_ms"]),
-                    index,
-                ),
-            )
-            if representative < 0:
-                representative = ranked[0]
-            candidates = ([representative] if representative >= 0 else []) + [
-                index for index in ranked if index != representative
-            ]
-            preview = []
-            for index in candidates:
-                start_ms, end_ms = utterances[index]["start_ms"], utterances[index]["end_ms"]
-                if any(
-                    min(end_ms, utterances[chosen]["end_ms"]) > max(start_ms, utterances[chosen]["start_ms"])
-                    for chosen in preview
-                ):
-                    continue
-                preview.append(index)
-                if len(preview) == SPEAKER_PREVIEW_UTTERANCES:
-                    break
-        else:
-            preview = []
+        track, preview = _speaker_track_view(
+            track_id,
+            utterances=utterances,
+            embeddings=embeddings,
+            auto_representatives=auto_representatives,
+            overlays=overlays,
+        )
         preview_indices.update(preview)
-        tracks.append({
-            "track_id": track_id,
-            "label": overlay.get("display_name") or f"Speaker {track_id}",
-            "display_name": overlay.get("display_name"),
-            "representative_utterance_index": representative,
-            "utterance_indices": preview,
-            "utterance_count": len(indices),
-            "duration_ms": sum(utterances[i]["end_ms"] - utterances[i]["start_ms"] for i in indices),
-            "hidden": bool(overlay.get("hidden", 0)),
-            "entity_id": overlays["bindings"].get(track_id, {}).get("entity_id"),
-        })
+        tracks.append(track)
     tracks.sort(key=lambda item: (-item["duration_ms"], item["track_id"]))
     preview_utterances = [item for item in utterances if item["index"] in preview_indices]
     return {"video_id": video_id, "tracks": tracks, "utterances": preview_utterances}

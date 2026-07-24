@@ -271,7 +271,6 @@ docker run -d \
   -e APP_MODEL_DIR=/app/models \
   -e NPU_ENABLED=true \
   -e NPU_DEVICE_ID=0 \
-  -e MODEL_IDLE_POLICY=resident \
   -e INDEXER_MODE=daemon \
   -e NPU_WORKER_MODE=isolated \
   -e INDEXER_IDLE_TIMEOUT_SECONDS=0 \

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,20 +28,18 @@ class Settings(BaseSettings):
     ascend_visible_devices: str | None = None
     ascend_rt_visible_devices: str | None = None
     torch_device_backend_autoload: str | None = None
-    model_idle_policy: str = "process_exit"
-
     # Indexing execution mode:
     #   "subprocess" (default) — API spawns a per-job worker; models load+exit per
     #     stage (process_exit). Safe, no resident NPU memory.
     #   "daemon" — API only enqueues jobs and starts the single warm-pool indexer
     #     daemon. Jobs and their channels run serially; pooled CLIP/InsightFace
     #     models can stay resident and skip reload/kernel compilation.
-    indexer_mode: str = "subprocess"
+    indexer_mode: Literal["subprocess", "daemon"] = "subprocess"
     # Worker isolation inside daemon mode:
     #   "legacy" keeps every runtime/model in the daemon process itself.
     #   "isolated" gives each modality a persistent child process and its own
     #   NPU context, while the daemon remains the single serial scheduler.
-    npu_worker_mode: str = "legacy"
+    npu_worker_mode: Literal["legacy", "isolated"] = "legacy"
     # <= 0 keeps pooled models resident until daemon/container shutdown.
     indexer_idle_timeout_seconds: float = 300.0
     indexer_poll_seconds: float = 2.0
@@ -118,15 +118,37 @@ class Settings(BaseSettings):
     ocr_npu_self_test: bool = True
     ocr_acl_model_dir: str = "rapidocr/ascend/910b4-cann9-profile"
 
-    # Optional query orchestration layer.  The JSON profile registry keeps
-    # planner and reranker providers independent, so they may point at one
-    # shared VLM today and separate specialist models in later experiments.
+    # Optional query orchestration layer. The JSON profile registry keeps
+    # planner and reranker providers independent so they can share one VLM or
+    # use separate specialist models.
     orchestration_enabled: bool = False
     orchestration_config_path: Path = Path("deploy/orchestration/qwen35-vllm.json")
     orchestration_profile: str = "qwen35-unified"
     orchestration_fail_open: bool = True
     orchestration_trace_enabled: bool = True
     orchestration_trace_path: Path = Path("runtime/orchestration-traces.jsonl")
+
+    @field_validator("indexer_mode", mode="before")
+    @classmethod
+    def normalize_indexer_mode(cls, value: object) -> object:
+        # Backward-compatible alias used by older environment profiles.
+        if isinstance(value, str) and value.strip().casefold() == "process_exit":
+            return "subprocess"
+        return value.strip().casefold() if isinstance(value, str) else value
+
+    @field_validator("npu_worker_mode", mode="before")
+    @classmethod
+    def normalize_npu_worker_mode(cls, value: object) -> object:
+        return value.strip().casefold() if isinstance(value, str) else value
+
+    @property
+    def model_idle_policy(self) -> Literal["process_exit", "idle_release", "resident"]:
+        """Describe the effective model lifetime without a second configuration knob."""
+        if self.indexer_mode == "subprocess":
+            return "process_exit"
+        if self.indexer_idle_timeout_seconds <= 0:
+            return "resident"
+        return "idle_release"
 
     @property
     def db_path(self) -> Path:

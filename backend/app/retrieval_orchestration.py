@@ -162,7 +162,7 @@ def _extract_json_object(value: str) -> dict[str, Any]:
             # not executable expressions, and keeps fail-open robust.
             try:
                 parsed = ast.literal_eval(candidate)
-            except (SyntaxError, ValueError) as exc:
+            except (SyntaxError, ValueError):
                 preview = " ".join(candidate[:200].splitlines())
                 raise OrchestrationError(
                     f"planner response is not valid JSON: {preview}"
@@ -712,7 +712,7 @@ class SearchOrchestrator:
             with path.open("a", encoding="utf-8") as target:
                 target.write(encoded + "\n")
 
-    def search(
+    def search(  # noqa: C901
         self,
         text: str | None,
         image_path: str | None,

@@ -118,8 +118,11 @@ def test_health_endpoint_serializes_release_manifest_metadata(monkeypatch, tmp_p
     assert body["status"] == "ok"
     assert body["env_profile"] == "staging.ascend"
     assert body["release_id"] == "2026-07-03-health"
+    assert body["model_idle_policy"] == settings.model_idle_policy
     assert body["indexer_mode"] == settings.indexer_mode
     assert body["npu_worker_mode"] == settings.npu_worker_mode
+    assert body["orchestration_enabled"] is False
+    assert body["orchestration_profile"] == settings.orchestration_profile
     assert body["git_commit"] == "abc123"
     assert body["image_tag"] == "momentseek-mvp:ascend-abc123"
     assert body["model_manifest"] == "deploy/models/ascend-prod.models.json"
