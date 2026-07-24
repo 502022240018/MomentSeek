@@ -13,6 +13,7 @@ docker exec momentseek-mvp-app-cuda bash -c "PYTHONPATH=/app/backend python -u /
 import sys
 import logging
 from pathlib import Path
+import uuid
 
 # Add backend to path so `app.*` imports resolve correctly
 sys.path.insert(0, str(Path(__file__).parent.parent))  # /app/backend
@@ -33,7 +34,7 @@ _ALL_COLLECTIONS = [
 ]
 
 
-def test_milvus_connection() -> bool:
+def _check_milvus_connection() -> bool:
     """Test Milvus connection, health check, and collection status."""
     try:
         from app.indexing.milvus_client import MilvusClient
@@ -76,15 +77,21 @@ def test_milvus_connection() -> bool:
         return False
 
 
-def test_batch_buffer() -> bool:
+def test_milvus_connection() -> None:
+    """Expose the live connection check as a real pytest assertion."""
+    assert _check_milvus_connection()
+
+
+def _check_batch_buffer() -> bool:
     """Test BatchBuffer upsert using the current MilvusClient + visual_pk API.
 
-    Drops and recreates visual_embeddings to ensure the live collection matches
-    the current schema (asset_version field may be absent in older deployments).
+    A uniquely named temporary collection is used so this test can never drop
+    or rewrite the production visual_embeddings collection.
     """
+    temporary_collection = f"test_visual_embeddings_{uuid.uuid4().hex}"
     try:
         import numpy as np
-        from pymilvus import utility
+        from pymilvus import Collection
         from app.indexing.milvus_client import MilvusClient, _COLLECTION_CONFIGS
         from app.indexing.batch_buffer import BatchBuffer
         from app.indexing.milvus_schema import visual_pk, MODEL_VERSIONS
@@ -95,22 +102,19 @@ def test_batch_buffer() -> bool:
 
         client = MilvusClient()
 
-        # Ensure visual_embeddings has the current schema.
-        # Drop + recreate if it already exists (schema may be stale).
-        logger.info("\n0. Schema reset: drop + recreate visual_embeddings")
-        if utility.has_collection("visual_embeddings"):
-            from pymilvus import Collection
-            Collection("visual_embeddings").drop()
-            logger.info("   Dropped stale visual_embeddings")
+        logger.info("\n0. Create isolated collection %s", temporary_collection)
         config = _COLLECTION_CONFIGS["visual_embeddings"]
-        from pymilvus import Collection
         schema = config["schema"]()
-        col_new = Collection(name="visual_embeddings", schema=schema, consistency_level="Strong")
+        col_new = Collection(
+            name=temporary_collection,
+            schema=schema,
+            consistency_level="Strong",
+        )
         col_new.create_index(field_name="embedding", index_params=config["index"])
         col_new.load()
-        logger.info("   Recreated visual_embeddings with current schema")
+        logger.info("   Temporary collection ready")
 
-        collection = client.collection("visual_embeddings")
+        collection = client.collection(temporary_collection)
 
         model_ver = MODEL_VERSIONS["visual"]
         test_video = "connection_test_video"
@@ -141,8 +145,8 @@ def test_batch_buffer() -> bool:
 
         logger.info("   Total flushed: %d", buf.total_flushed)
 
-        stats_after = client.stats("visual_embeddings")
-        logger.info("\n2. visual_embeddings now has %d entities", stats_after["num_entities"])
+        stats_after = client.stats(temporary_collection)
+        logger.info("\n2. temporary collection now has %d entities", stats_after["num_entities"])
 
         # 2. Idempotent re-insert: same PKs → entity count must not grow
         logger.info("\n3. Idempotent re-insert (same 5 frames, different embeddings)")
@@ -159,19 +163,16 @@ def test_batch_buffer() -> bool:
                     "embedding":     np.random.rand(1152).tolist(),
                 })
 
-        count_after = client.stats("visual_embeddings")["num_entities"]
+        count_after = client.stats(temporary_collection)["num_entities"]
         delta = count_after - count_before
         logger.info("   Entities before: %d", count_before)
         logger.info("   Entities after:  %d", count_after)
         logger.info("   Delta: %d (expected 0 — upsert is idempotent)", delta)
 
         if delta != 0:
-            logger.warning("   ⚠ Entity count changed — upsert dedup may not be working")
-
-        # 3. Clean up test records
-        logger.info("\n4. Cleaning up test records")
-        deleted = client.delete_video(test_video)
-        logger.info("   Deleted from visual_embeddings: %d", deleted.get("visual_embeddings", 0))
+            raise AssertionError(
+                f"Upsert is not idempotent: entity count changed by {delta}"
+            )
 
         logger.info("\n" + "=" * 60)
         logger.info("✓ Batch buffer test passed!")
@@ -181,10 +182,28 @@ def test_batch_buffer() -> bool:
     except Exception as exc:
         logger.error("\n✗ Batch buffer test failed: %s", exc, exc_info=True)
         return False
+    finally:
+        try:
+            from pymilvus import Collection, utility
+
+            if utility.has_collection(temporary_collection):
+                Collection(temporary_collection).drop()
+                logger.info("Dropped temporary collection %s", temporary_collection)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Failed to drop temporary collection %s: %s",
+                temporary_collection,
+                cleanup_exc,
+            )
+
+
+def test_batch_buffer() -> None:
+    """Expose the isolated batch-buffer check as a real pytest assertion."""
+    assert _check_batch_buffer()
 
 
 if __name__ == "__main__":
-    ok = test_milvus_connection()
+    ok = _check_milvus_connection()
     if ok:
-        ok = test_batch_buffer()
+        ok = _check_batch_buffer()
     sys.exit(0 if ok else 1)
