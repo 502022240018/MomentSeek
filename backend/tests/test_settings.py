@@ -29,3 +29,8 @@ def test_model_idle_policy_is_derived_from_effective_runtime_settings(values, ex
 def test_invalid_worker_modes_fail_during_settings_load(field, value):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{field: value})
+
+
+def test_milvus_query_timeout_must_be_positive():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, milvus_query_timeout_seconds=0)

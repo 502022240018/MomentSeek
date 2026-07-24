@@ -1,0 +1,7 @@
+# Install with --no-deps so pip cannot replace the vendor-validated
+# torch==2.9.0 / torch_npu==2.9.0.post1 stack in the MindIE base image.
+torchaudio==2.9.0
+open_clip_torch==3.3.0
+timm==1.0.28
+silero-vad==5.1.2
+sentence-transformers==3.3.1

@@ -1230,7 +1230,7 @@ class SearchEngine:
                 visual_queries,
                 visual_subqueries,
             ))
-        if face_query is not None and "face" in indexed:
+        if "face" in modalities and face_query is not None and "face" in indexed:
             candidates.extend(self._face_for_video(video, face_query, channel_limits["face"]))
         if "asr" in modalities and text and "asr" in indexed:
             candidates.extend(self._asr_for_video(video, text, channel_limits["asr"]))
@@ -1252,7 +1252,10 @@ class SearchEngine:
         channel_limits: dict[str, int],
         visual_subqueries: list[str] | None,
     ) -> list[Candidate]:
-        from app.indexing.milvus_client import get_milvus_client
+        from app.indexing.milvus_client import (
+            ensure_milvus_reachable,
+            get_milvus_client,
+        )
         from app.indexing.milvus_search import (
             milvus_asr_candidates,
             milvus_face_candidates,
@@ -1260,6 +1263,7 @@ class SearchEngine:
             milvus_visual_candidates,
         )
 
+        ensure_milvus_reachable()
         client = get_milvus_client()
         video_id = video["id"]
         index_dir = self.settings.index_dir / video_id
@@ -1289,7 +1293,7 @@ class SearchEngine:
                 visual_profile,
                 channel_limits["visual"],
             ))
-        if face_query is not None and "face" in indexed:
+        if "face" in modalities and face_query is not None and "face" in indexed:
             candidates.extend(milvus_face_candidates(
                 client, video_id, face_query, channel_limits["face"], 0.35
             ))
@@ -1325,6 +1329,32 @@ class SearchEngine:
             ))
         return candidates
 
+    @staticmethod
+    def _requested_indexed_modalities(
+        video: dict,
+        *,
+        text: str | None,
+        image_path: str | None,
+        modalities: list[str],
+        face_query: np.ndarray | None,
+    ) -> set[str]:
+        """Return channels that should have produced candidates for this query.
+
+        This mirrors the routing guards in both storage backends.  Keeping the
+        set explicit lets a partially populated Milvus deployment fall back one
+        channel at a time instead of discarding successful Milvus results from
+        the other channels.
+        """
+        indexed = set(video.get("indexed_modalities") or [])
+        requested: set[str] = set()
+        if "visual" in modalities and bool(text or image_path) and "visual" in indexed:
+            requested.add("visual")
+        if face_query is not None and "face" in indexed:
+            requested.add("face")
+        if text:
+            requested.update({"asr", "ocr"} & set(modalities) & indexed)
+        return requested
+
     def search(
         self,
         text: str | None,
@@ -1350,6 +1380,7 @@ class SearchEngine:
         }
         visual_queries: dict[str, np.ndarray] = {}
         face_query = self._resolve_face_query(text, image_path) if "face" in modalities else None
+        milvus_failed = False
         from app.indexing.milvus_flags import (
             milvus_fallback_enabled,
             milvus_shadow_compare_enabled,
@@ -1361,7 +1392,7 @@ class SearchEngine:
             use_milvus = should_use_milvus_for_video(video["id"])
             shadow = milvus_shadow_compare_enabled()
             npz_candidates: list[Candidate] | None = None
-            if not use_milvus or shadow:
+            if not use_milvus or shadow or milvus_failed:
                 npz_candidates = self._candidates_for_video(
                     video,
                     text=text,
@@ -1376,7 +1407,7 @@ class SearchEngine:
                     visual_subqueries=visual_subqueries,
                 )
             milvus_candidates: list[Candidate] | None = None
-            if use_milvus or shadow:
+            if (use_milvus or shadow) and not milvus_failed:
                 try:
                     milvus_candidates = self._milvus_candidates_for_video(
                         video,
@@ -1393,6 +1424,7 @@ class SearchEngine:
                 except Exception as exc:
                     if use_milvus and not milvus_fallback_enabled():
                         raise
+                    milvus_failed = True
                     logger.warning(
                         "Milvus search failed for video=%s; using NPZ fallback: %s",
                         video["id"],
@@ -1412,6 +1444,55 @@ class SearchEngine:
                             channel_limits=resolved_channel_limits,
                             visual_subqueries=visual_subqueries,
                         )
+                else:
+                    # A successful request with no rows for one channel is the
+                    # normal symptom of an incomplete/failed backfill.  Milvus
+                    # is still primary for populated channels; only missing
+                    # channels use the retained NPZ recovery artifact.
+                    if use_milvus and milvus_fallback_enabled():
+                        expected_modalities = self._requested_indexed_modalities(
+                            video,
+                            text=text,
+                            image_path=image_path,
+                            modalities=modalities,
+                            face_query=face_query,
+                        )
+                        present_modalities = {
+                            item.modality for item in (milvus_candidates or [])
+                        }
+                        missing_modalities = expected_modalities - present_modalities
+                        if missing_modalities:
+                            if npz_candidates is None:
+                                npz_candidates = self._candidates_for_video(
+                                    video,
+                                    text=text,
+                                    image_path=image_path,
+                                    modalities=sorted(missing_modalities),
+                                    alpha=alpha,
+                                    limit=limit,
+                                    visual_profile=visual_profile,
+                                    visual_queries=visual_queries,
+                                    face_query=face_query,
+                                    channel_limits=resolved_channel_limits,
+                                    visual_subqueries=visual_subqueries,
+                                )
+                            recovered = [
+                                item
+                                for item in npz_candidates
+                                if item.modality in missing_modalities
+                            ]
+                            if recovered:
+                                logger.warning(
+                                    "Milvus coverage gap video=%s modalities=%s; "
+                                    "recovered %d NPZ candidates",
+                                    video["id"],
+                                    sorted(missing_modalities),
+                                    len(recovered),
+                                )
+                                milvus_candidates = [
+                                    *(milvus_candidates or []),
+                                    *recovered,
+                                ]
             if shadow and npz_candidates is not None and milvus_candidates is not None:
                 for modality in modalities:
                     shadow_compare_log(

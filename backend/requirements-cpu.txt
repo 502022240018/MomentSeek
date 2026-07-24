@@ -1,7 +1,6 @@
 -r requirements.txt
 numpy==1.26.4
 scipy==1.14.1
-fastcluster==1.2.6
 torch==2.6.0
 torchvision==0.21.0
 torchaudio==2.6.0

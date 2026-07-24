@@ -65,6 +65,27 @@
       "id": "PP-OCRv6-Ascend910B4-CANN8.5.1",
       "target": "/app/models/rapidocr/ascend/910b4-cann9-profile",
       "required": true
+    },
+    {
+      "name": "speaker_3dspeaker_source",
+      "kind": "source",
+      "id": "065629c313ea",
+      "target": "/app/models/3D-Speaker",
+      "required": true
+    },
+    {
+      "name": "speaker_campplus_zh_en",
+      "kind": "directory",
+      "id": "iic/speech_campplus_sv_zh_en_16k-common_advanced@v1.0.0",
+      "target": "/app/models/3dspeaker-cache/models/iic--speech_campplus_sv_zh_en_16k-common_advanced/snapshots/v1.0.0",
+      "required": true
+    },
+    {
+      "name": "speaker_fsmn_vad",
+      "kind": "directory",
+      "id": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch@v2.0.4",
+      "target": "/app/models/3dspeaker-cache/models/iic--speech_fsmn_vad_zh-cn-16k-common-pytorch/snapshots/v2.0.4",
+      "required": true
     }
   ]
 }

@@ -1,0 +1,10 @@
+# Contract of the validated MindIE 3.0.0b2 openEuler 24.03 ARM64 base image.
+# These versions are validated together and must not be independently upgraded.
+numpy==1.26.4
+torch==2.9.0
+torch-npu==2.9.0.post1
+torchvision==0.16.0
+torchaudio==2.9.0
+opencv-python==4.11.0.86
+transformers==4.51.0
+scikit-learn==1.5.0

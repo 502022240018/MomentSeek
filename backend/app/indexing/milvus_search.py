@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from app.settings import get_settings
 from app.search import (
     Candidate,
     _asr_candidates,
@@ -131,6 +132,7 @@ def _query_all(
     output_fields = _schema_available_fields(col, output_fields)
     expr = f'video_id == "{video_id}"'
     rows: list[dict] = []
+    timeout = get_settings().milvus_query_timeout_seconds
 
     try:
         # --- QueryIterator path (pymilvus ≥ 2.3) ----------------------------
@@ -139,6 +141,7 @@ def _query_all(
                 batch_size=_QUERY_BATCH,
                 expr=expr,
                 output_fields=output_fields,
+                timeout=timeout,
             )
             try:
                 while True:
@@ -159,6 +162,7 @@ def _query_all(
                     output_fields=output_fields,
                     limit=_QUERY_BATCH,
                     offset=offset,
+                    timeout=timeout,
                 )
                 rows.extend(page)
                 if len(page) < _QUERY_BATCH:
@@ -200,6 +204,7 @@ def _ann_search(
             limit=limit,
             expr=f'video_id == "{video_id}"',
             output_fields=output_fields,
+            timeout=get_settings().milvus_query_timeout_seconds,
         )
     except Exception as exc:
         raise MilvusServiceError(
@@ -637,9 +642,10 @@ def milvus_face_candidates(
     for hit in hits:
         raw_emb = hit.get("embedding")
         if raw_emb is None:
-            # Fallback: derive cosine from L2 distance for unit vectors.
-            l2 = float(hit["_distance"])
-            cosine = max(-1.0, min(1.0, 1.0 - (l2 ** 2) / 2.0))
+            # Milvus reports squared L2 distance.  For unit vectors:
+            # squared_l2 = 2 - 2*cosine.
+            squared_l2 = float(hit["_distance"])
+            cosine = max(-1.0, min(1.0, 1.0 - squared_l2 / 2.0))
         else:
             track_vec = normalize(np.asarray(raw_emb, dtype=np.float32))
             cosine = float(np.dot(query_norm, track_vec))

@@ -45,6 +45,9 @@ ASR_SEMANTIC_ENABLED=true
 ASR_SEMANTIC_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 ASR_SEMANTIC_DEVICE=cpu
 ASR_SEMANTIC_LOCAL_FILES_ONLY=true
+SPEAKER_DEVICE=npu
+SPEAKER_MODEL_REPO=/app/models/3D-Speaker
+SPEAKER_MODEL_CACHE_DIR=/app/models/3dspeaker-cache
 OCR_ENGINE=rapidocr_acl
 # PP-OCRv6 executes as precompiled OM models through the ACL runtime.
 OCR_DEVICE=npu
@@ -56,6 +59,7 @@ OCR_MODEL_TYPE=small
 OCR_SAMPLE_FPS=0.5
 OCR_SEMANTIC_ENABLED=true
 MODEL_MANIFEST=deploy/models/ascend-prod.models.json
+MILVUS_QUERY_TIMEOUT_SECONDS=3
 ORCHESTRATION_ENABLED=false
 ORCHESTRATION_CONFIG_PATH=deploy/orchestration/qwen35-vllm.json
 ORCHESTRATION_PROFILE=qwen35-unified

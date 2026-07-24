@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Milvus schema migration script.
 
-Detects collections created with older schema versions (missing fields such as
-``has_embedding``) and recreates them with the current schema.
+Detects collections created with older schema/index versions and recreates
+them with the current runtime configuration.
 
 Usage
 -----
@@ -29,51 +29,81 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))  # backend/
 
 # ---------------------------------------------------------------------------
-# Canonical field sets — derived from milvus_schema.py
+# Canonical schema/index comparison
 # ---------------------------------------------------------------------------
 
-# Fields that MUST be present in each collection for the current code to work.
-_REQUIRED_FIELDS: dict[str, set[str]] = {
-    "visual":  {"pk", "video_id", "asset_version", "model_version",
-                "frame_idx", "timestamp_ms", "segment_id",
-                "segment_start_ms", "segment_end_ms", "embedding"},
-    "asr":     {"pk", "video_id", "asset_version", "model_version",
-                "segment_idx", "start_ms", "end_ms", "text",
-                "has_embedding", "embedding"},
-    "ocr":     {"pk", "video_id", "asset_version", "model_version",
-                "frame_idx", "region_idx", "frame_ms", "text",
-                "start_ms", "end_ms", "avg_box_score",
-                "has_embedding", "embedding"},
-    "face":    {"pk", "video_id", "asset_version", "model_version",
-                "track_idx", "start_ms", "end_ms", "best_ms", "embedding"},
-    "speaker": {"pk", "video_id", "asset_version", "model_version",
-                "utterance_idx", "start_ms", "end_ms",
-                "asr_chunk_idx", "track_id", "embedding"},
-}
+def _field_signature(field) -> tuple:
+    params = getattr(field, "params", {}) or {}
+    return (
+        field.dtype,
+        params.get("dim"),
+        params.get("max_length"),
+        bool(getattr(field, "is_primary", False)),
+    )
 
 
-def _check_collections(client) -> dict[str, set[str]]:
-    """Return {modality: missing_fields} for every outdated collection."""
-    outdated: dict[str, set[str]] = {}
-    for modality, required in _REQUIRED_FIELDS.items():
+def _check_collections(client) -> dict[str, list[str]]:
+    """Return incompatibility reasons for every outdated collection."""
+    from app.indexing.milvus_client import (
+        _COLLECTION_CONFIGS,
+        _COLLECTION_FOR_MODALITY,
+    )
+
+    outdated: dict[str, list[str]] = {}
+    for modality, collection_name in _COLLECTION_FOR_MODALITY.items():
+        reasons: list[str] = []
         try:
             col = client.collection_for(modality)
-            actual = {f.name for f in col.schema.fields}
-            missing = required - actual
-            if missing:
-                outdated[modality] = missing
+            config = _COLLECTION_CONFIGS[collection_name]
+            expected_fields = {
+                field.name: _field_signature(field)
+                for field in config["schema"]().fields
+            }
+            actual_fields = {
+                field.name: _field_signature(field)
+                for field in col.schema.fields
+            }
+            for name in sorted(expected_fields.keys() - actual_fields.keys()):
+                reasons.append(f"missing field: {name}")
+            for name in sorted(expected_fields.keys() & actual_fields.keys()):
+                if actual_fields[name] != expected_fields[name]:
+                    reasons.append(
+                        f"field mismatch: {name} "
+                        f"actual={actual_fields[name]} expected={expected_fields[name]}"
+                    )
+
+            embedding_indexes = [
+                index for index in col.indexes
+                if getattr(index, "field_name", None) == "embedding"
+            ]
+            if not embedding_indexes:
+                reasons.append("missing embedding index")
+            else:
+                actual_index = getattr(embedding_indexes[0], "params", {}) or {}
+                expected_index = config["index"]
+                for key in ("index_type", "metric_type"):
+                    actual_value = str(actual_index.get(key, "")).upper()
+                    expected_value = str(expected_index[key]).upper()
+                    if actual_value != expected_value:
+                        reasons.append(
+                            f"index {key} mismatch: "
+                            f"actual={actual_value or '<missing>'} expected={expected_value}"
+                        )
         except Exception as exc:
-            print(f"  [WARN] Could not inspect '{modality}' collection: {exc}")
+            reasons.append(f"inspection failed: {exc}")
+        if reasons:
+            outdated[modality] = reasons
     return outdated
 
 
-def _migrate(client, outdated: dict[str, set[str]], dry_run: bool) -> None:
+def _migrate(client, outdated: dict[str, list[str]], dry_run: bool) -> None:
     from pymilvus import utility
 
-    for modality, missing in outdated.items():
+    for modality, reasons in outdated.items():
         col_name = client.collection_for(modality).name
         print(f"\n[{'DRY RUN' if dry_run else 'MIGRATE'}] {modality} ({col_name})")
-        print(f"  Missing fields: {sorted(missing)}")
+        for reason in reasons:
+            print(f"  - {reason}")
 
         if dry_run:
             print(f"  → Would drop and recreate '{col_name}'")
@@ -84,23 +114,16 @@ def _migrate(client, outdated: dict[str, set[str]], dry_run: bool) -> None:
         print("done")
 
         print(f"  Recreating '{col_name}' …", end=" ", flush=True)
-        # Re-import here to get the factory for this modality.
         from app.indexing.milvus_client import _COLLECTION_CONFIGS
-        cfg = _COLLECTION_CONFIGS[modality]
-        from pymilvus import Collection, CollectionSchema
+        from pymilvus import Collection
 
-        schema: CollectionSchema = cfg["schema_factory"]()
-        col = Collection(name=col_name, schema=schema)
-
-        for index_cfg in cfg.get("indexes", []):
-            col.create_index(
-                field_name=index_cfg["field"],
-                index_params={
-                    "metric_type": index_cfg["metric_type"],
-                    "index_type":  index_cfg["index_type"],
-                    "params":      index_cfg.get("params", {}),
-                },
-            )
+        cfg = _COLLECTION_CONFIGS[col_name]
+        col = Collection(
+            name=col_name,
+            schema=cfg["schema"](),
+            consistency_level="Strong",
+        )
+        col.create_index(field_name="embedding", index_params=cfg["index"])
         col.load()
         print("done")
         print(f"  ✓ '{col_name}' recreated with correct schema")
@@ -114,6 +137,10 @@ def main() -> None:
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Report outdated collections without making any changes.",
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="Confirm destructive migration non-interactively.",
     )
     args = parser.parse_args()
 
@@ -135,17 +162,18 @@ def main() -> None:
         return
 
     print(f"\nFound {len(outdated)} outdated collection(s):")
-    for modality, missing in outdated.items():
-        print(f"  {modality:8s}  missing: {sorted(missing)}")
+    for modality, reasons in outdated.items():
+        print(f"  {modality:8s}  issues: {'; '.join(reasons)}")
 
     if args.dry_run:
         print("\n[dry-run] No changes made. Re-run without --dry-run to migrate.")
     else:
         print("\nWARNING: Migration will DROP these collections (all data lost).")
-        confirm = input("Type 'yes' to proceed: ").strip().lower()
-        if confirm != "yes":
-            print("Aborted.")
-            sys.exit(0)
+        if not args.yes:
+            confirm = input("Type 'yes' to proceed: ").strip().lower()
+            if confirm != "yes":
+                print("Aborted.")
+                sys.exit(0)
 
     _migrate(client, outdated, dry_run=args.dry_run)
 
@@ -153,7 +181,7 @@ def main() -> None:
         print("\nMigration complete.")
         print("Next steps:")
         print("  1. Restart the backend service.")
-        print("  2. Re-index every video that was previously indexed.")
+        print("  2. Run scripts/backfill_milvus.py against the retained NPZ indexes.")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
-name: momentseek-mvp
+name: ${COMPOSE_PROJECT_NAME:-momentseek-mvp}
 services:
   app:
     build:
       context: .
       dockerfile: Dockerfile.cpu
     image: momentseek-mvp:cpu
-    container_name: momentseek-mvp-app
+    container_name: ${COMPOSE_PROJECT_NAME:-momentseek-mvp}-app
     restart: unless-stopped
     ports:
       - "${APP_PORT:-8000}:8000"
@@ -28,4 +28,4 @@ services:
 
 networks:
   momentseek:
-    name: momentseek-mvp-net
+    name: ${MOMENTSEEK_NETWORK_NAME:-momentseek-mvp-net}

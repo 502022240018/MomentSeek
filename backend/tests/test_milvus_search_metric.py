@@ -5,8 +5,6 @@ lookup tables and conversion math that were incorrect before the fix.
 """
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 
@@ -76,10 +74,10 @@ def test_per_modality_metric_and_index(modality, expected_metric, expected_index
 
 @pytest.mark.parametrize("cosine", [-1.0, -0.5, 0.0, 0.35, 0.5, 0.8, 0.9, 1.0])
 def test_l2_cosine_round_trip(cosine):
-    """For unit vectors, cosine = 1 - L2² / 2 must be exact (no floating-point loss)."""
-    # L2 from cosine: L2 = sqrt(2 * (1 - cosine))
-    l2 = math.sqrt(max(0.0, 2.0 * (1.0 - cosine)))
-    recovered = 1.0 - (l2 ** 2) / 2.0
+    """Milvus squared-L2 converts to cosine exactly for unit vectors."""
+    # Milvus L2 metric returns the squared Euclidean distance.
+    l2 = max(0.0, 2.0 * (1.0 - cosine))
+    recovered = 1.0 - l2 / 2.0
     assert abs(recovered - cosine) < 1e-6, (
         f"cosine={cosine} → L2={l2:.6f} → recovered={recovered:.6f}"
     )
@@ -96,8 +94,8 @@ def test_face_candidates_l2_to_cosine_conversion():
 
     # Known cosine value we want to recover
     cosine_expected = 0.72
-    # L2 distance corresponding to that cosine for normalized vectors
-    l2_dist = math.sqrt(2.0 * (1.0 - cosine_expected))
+    # Squared L2 distance corresponding to that cosine for normalized vectors.
+    l2_dist = 2.0 * (1.0 - cosine_expected)
 
     # Build a fake Milvus hit object
     fake_hit = MagicMock()

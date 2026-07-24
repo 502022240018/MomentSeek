@@ -685,6 +685,7 @@ def test_shadow_compare_fires_without_milvus_read_routing(tmp_path):
         patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=False),
         patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
         patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch("app.indexing.milvus_client.ensure_milvus_reachable"),
         patch("app.indexing.milvus_client.get_milvus_client", return_value=MagicMock()),
         patch("app.indexing.milvus_search.milvus_visual_candidates", return_value=[]),
         patch("app.indexing.milvus_search.shadow_compare_log") as mock_shadow_log,
@@ -722,6 +723,7 @@ def test_shadow_compare_milvus_error_silenced_in_shadow_only_mode(tmp_path):
         patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=False),
         patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
         patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch("app.indexing.milvus_client.ensure_milvus_reachable"),
         patch("app.indexing.milvus_client.get_milvus_client", return_value=MagicMock()),
         patch("app.indexing.milvus_search.milvus_visual_candidates",
               side_effect=MilvusServiceError("connection refused")),
@@ -816,3 +818,112 @@ def test_milvus_service_failure_falls_back_to_npz(tmp_path):
 
     npz_search.assert_called_once()
     assert results[0]["start_time"] == 0.0
+
+
+def test_milvus_service_failure_is_not_retried_for_every_video(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    _make_visual_index(settings, catalog, video_id="v-fallback-1")
+    _make_visual_index(settings, catalog, video_id="v-fallback-2")
+    engine = SearchEngine(settings, catalog)
+
+    with (
+        patch(
+            "app.indexing.milvus_flags.should_use_milvus_for_video",
+            return_value=True,
+        ),
+        patch(
+            "app.indexing.milvus_flags.milvus_shadow_compare_enabled",
+            return_value=False,
+        ),
+        patch(
+            "app.indexing.milvus_flags.milvus_fallback_enabled",
+            return_value=True,
+        ),
+        patch.object(
+            engine,
+            "_milvus_candidates_for_video",
+            side_effect=ConnectionError("Milvus unavailable"),
+        ) as milvus_search,
+        patch.object(
+            engine,
+            "_candidates_for_video",
+            return_value=[],
+        ) as npz_search,
+    ):
+        engine.search("football", None, ["visual"])
+
+    assert milvus_search.call_count == 1
+    assert npz_search.call_count == 2
+
+
+def test_milvus_empty_channel_falls_back_to_npz(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    video_id = _make_visual_index(settings, catalog, video_id="v-coverage-gap")
+    engine = SearchEngine(settings, catalog)
+    npz_hit = Candidate(
+        video_id=video_id,
+        start_time=3.0,
+        end_time=8.0,
+        score=0.85,
+        modality="visual",
+    )
+
+    with (
+        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=True),
+        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
+        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch.object(engine, "_milvus_candidates_for_video", return_value=[]),
+        patch.object(
+            engine, "_candidates_for_video", return_value=[npz_hit]
+        ) as npz_search,
+    ):
+        results = engine.search("football", None, ["visual"], [video_id])
+
+    npz_search.assert_called_once()
+    assert results[0]["start_time"] == 3.0
+
+
+def test_milvus_partial_coverage_only_recovers_missing_channel(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    video_id = _make_visual_index(settings, catalog, video_id="v-partial")
+    video = catalog.get_video(video_id)
+    catalog.update_video(
+        video_id,
+        indexed_modalities=[*video["indexed_modalities"], "asr"],
+    )
+    engine = SearchEngine(settings, catalog)
+    milvus_hit = Candidate(video_id, 5.0, 10.0, 0.9, "visual")
+    stale_npz_visual = Candidate(video_id, 0.0, 5.0, 0.99, "visual")
+    npz_asr = Candidate(video_id, 6.0, 9.0, 0.7, "asr")
+
+    with (
+        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=True),
+        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
+        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch.object(
+            engine, "_milvus_candidates_for_video", return_value=[milvus_hit]
+        ),
+        patch.object(
+            engine,
+            "_candidates_for_video",
+            return_value=[stale_npz_visual, npz_asr],
+        ),
+    ):
+        results = engine.search("football", None, ["visual", "asr"], [video_id])
+
+    evidence_modalities = {
+        evidence["modality"]
+        for result in results
+        for evidence in result["evidence"]
+    }
+    assert evidence_modalities == {"visual", "asr"}
+    assert all(result["start_time"] != 0.0 for result in results)

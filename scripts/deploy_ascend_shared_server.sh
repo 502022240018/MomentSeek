@@ -16,6 +16,14 @@ APP_PORT="${APP_PORT:-}"
 CPU_THREAD_LIMIT="${CPU_THREAD_LIMIT:-8}"
 CONTAINER_CPU_LIMIT="${CONTAINER_CPU_LIMIT:-24}"
 CONTAINER_PID_LIMIT="${CONTAINER_PID_LIMIT:-2048}"
+MILVUS_ENABLED="${MILVUS_ENABLED:-false}"
+MILVUS_HOST="${MILVUS_HOST:-127.0.0.1}"
+MILVUS_PORT="${MILVUS_PORT:-19530}"
+MILVUS_READ_ENABLED="${MILVUS_READ_ENABLED:-true}"
+MILVUS_WRITE_ENABLED="${MILVUS_WRITE_ENABLED:-true}"
+MILVUS_FALLBACK_ENABLED="${MILVUS_FALLBACK_ENABLED:-true}"
+MILVUS_ROLLOUT_PERCENT="${MILVUS_ROLLOUT_PERCENT:-100}"
+MILVUS_QUERY_TIMEOUT_SECONDS="${MILVUS_QUERY_TIMEOUT_SECONDS:-3}"
 BUILD_DIR="${SOURCE_DIR}/.server-build"
 INSIGHTFACE_WHEEL="${INSIGHTFACE_WHEEL:-${SOURCE_DIR}/vendor-wheels/insightface-1.0.1-py3-none-any.whl}"
 INSIGHTFACE_SHA256="5f373f6fedbdda5cbc59a34ca386a75a2995cdaf6899402590ae9eb4308fc2e8"
@@ -62,6 +70,32 @@ fi
 [[ "$APP_PORT" =~ ^[0-9]+$ ]] && ((APP_PORT >= 1 && APP_PORT <= 65535)) \
   || fail "Invalid APP_PORT: $APP_PORT"
 printf 'app_port=%s source=%s\n' "$APP_PORT" "$APP_PORT_SOURCE"
+[[ -n "$MILVUS_HOST" ]] || fail "MILVUS_HOST must not be empty"
+[[ "$MILVUS_PORT" =~ ^[0-9]+$ ]] && ((MILVUS_PORT >= 1 && MILVUS_PORT <= 65535)) \
+  || fail "Invalid MILVUS_PORT: $MILVUS_PORT"
+for boolean_name in \
+  MILVUS_ENABLED MILVUS_READ_ENABLED MILVUS_WRITE_ENABLED MILVUS_FALLBACK_ENABLED; do
+  boolean_value="${!boolean_name}"
+  boolean_value="${boolean_value,,}"
+  case "$boolean_value" in
+    true|false|1|0|yes|no|on|off) ;;
+    *) fail "${boolean_name} must be a boolean, got: ${!boolean_name}" ;;
+  esac
+done
+if [[ "${MILVUS_ENABLED,,}" =~ ^(true|1|yes|on)$ ]]; then
+  python3 - "$MILVUS_HOST" "$MILVUS_PORT" "$MILVUS_QUERY_TIMEOUT_SECONDS" <<'PY'
+import socket
+import sys
+
+host, port_text, timeout_text = sys.argv[1:]
+timeout = float(timeout_text)
+if timeout <= 0:
+    raise SystemExit("MILVUS_QUERY_TIMEOUT_SECONDS must be greater than zero")
+with socket.create_connection((host, int(port_text)), timeout=timeout):
+    pass
+print(f"milvus_preflight=PASS endpoint={host}:{port_text}")
+PY
+fi
 
 exec 9>"$WORK_ROOT/.platform-deploy.lock"
 flock -n 9 || fail "Another MomentSeek deployment is running"
@@ -97,90 +131,8 @@ git -C "$SOURCE_DIR" log -1 --oneline
 printf '.server-build/\n' >>"$SOURCE_DIR/.git/info/exclude"
 sort -u "$SOURCE_DIR/.git/info/exclude" -o "$SOURCE_DIR/.git/info/exclude"
 
-log "2/8 Generate openEuler/MindIE build overlay"
-cat >"$BUILD_DIR/requirements-server.txt" <<'REQ'
-numpy==1.26.4
-onnx==1.17.0
-onnxruntime-cann==1.24.4
-scikit-image==0.25.2
-tifffile==2025.6.11
-scenedetect==0.7
-transformers>=4.51.0,<5
-python-multipart==0.0.22
-pydantic-settings==2.12.0
-sentence-transformers==3.3.1
-rapidocr==3.9.0
-opencc-python-reimplemented==0.1.7
-pypinyin==0.54.0
-funasr==1.3.9
-scikit-learn==1.5.0
-umap-learn==0.5.7
-ftfy==6.3.1
-REQ
-
-cat >"$BUILD_DIR/constraints-server.txt" <<'CONSTRAINTS'
-numpy==1.26.4
-torch==2.9.0
-torchvision==0.16.0
-torchaudio==2.9.0
-transformers==4.51.0
-scikit-learn==1.5.0
-umap-learn==0.5.7
-CONSTRAINTS
-
-cat >"$BUILD_DIR/Dockerfile" <<'DOCKERFILE'
-ARG ASCEND_RUNTIME_IMAGE
-FROM ${ASCEND_RUNTIME_IMAGE} AS frontend-build
-USER root
-RUN dnf install -y nodejs npm \
-    && dnf clean all \
-    && node --version \
-    && npm --version
-WORKDIR /src/frontend
-COPY frontend/package*.json ./
-RUN npm config set registry https://registry.npmmirror.com \
-    && npm ci --include=optional --ignore-scripts --registry=https://registry.npmmirror.com \
-    && npm cache clean --force
-COPY frontend/ ./
-RUN npm run build
-
-FROM ${ASCEND_RUNTIME_IMAGE}
-USER root
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
-    OPENBLAS_NUM_THREADS=8 \
-    OPENBLAS_DEFAULT_NUM_THREADS=8 \
-    OMP_NUM_THREADS=8 \
-    MKL_NUM_THREADS=8 \
-    NUMEXPR_NUM_THREADS=8 \
-    BLIS_NUM_THREADS=8 \
-    TOKENIZERS_PARALLELISM=false \
-    APP_DATA_DIR=/app/runtime \
-    APP_MODEL_DIR=/app/models \
-    APP_PORT=18500
-RUN command -v ffmpeg && python3 -c "import cv2, PIL; print('base media dependencies: PASS')"
-WORKDIR /app/backend
-COPY .server-build/wheels/insightface-1.0.1-py3-none-any.whl /tmp/insightface-1.0.1-py3-none-any.whl
-COPY .server-build/requirements-server.txt /tmp/requirements-server.txt
-COPY .server-build/constraints-server.txt /tmp/constraints-server.txt
-RUN python3 -m pip install --no-index --no-deps /tmp/insightface-1.0.1-py3-none-any.whl \
-    && python3 -m pip install -c /tmp/constraints-server.txt -r /tmp/requirements-server.txt \
-    && python3 -m pip install --no-deps torchaudio==2.9.0 open_clip_torch==3.3.0 timm==1.0.28 silero-vad==5.1.2 \
-    && python3 -c "from importlib.metadata import version; assert version('torch') == '2.9.0'; assert version('torch-npu') == '2.9.0.post1'; assert version('torchaudio') == '2.9.0'; print('vendor torch stack preserved')" \
-    && rm -f /tmp/insightface-1.0.1-py3-none-any.whl /tmp/requirements-server.txt /tmp/constraints-server.txt
-COPY backend/ ./
-COPY deploy/models/ascend-prod.models.json /app/deploy/models/ascend-prod.models.json
-COPY scripts/verify_models.py /app/scripts/verify_models.py
-COPY --from=frontend-build /src/frontend/dist /tmp/frontend-dist
-RUN rm -rf ./app/static \
-    && mv /tmp/frontend-dist ./app/static
-RUN mkdir -p /app/runtime /app/models \
-    && python3 -c "from importlib.metadata import version; import fastapi, uvicorn, cv2, PIL, transformers, funasr, onnxruntime, rapidocr, insightface; assert version('open-clip-torch') == '3.3.0'; assert version('silero-vad') == '5.1.2'; assert version('onnxruntime-cann') == '1.24.4'; assert 'CANNExecutionProvider' in onnxruntime.get_available_providers(); from app.indexing.asr import _load_silero_onnx_vad; _load_silero_onnx_vad(); print('device-neutral imports, CANN EP and Silero ONNX session: PASS')"
-EXPOSE 18500
-HEALTHCHECK --interval=20s --timeout=5s --retries=6 CMD python3 -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('APP_PORT', '18500') + '/api/health', timeout=3)"
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT:-18500} --workers 1"]
-DOCKERFILE
+log "2/8 Stage the checked-in production build definition"
+cp "$SOURCE_DIR/Dockerfile.ascend" "$BUILD_DIR/Dockerfile"
 
 log "3/8 Check required external endpoints"
 for url in \
@@ -198,6 +150,14 @@ docker build --network host \
   -f "$BUILD_DIR/Dockerfile" \
   -t "$IMAGE_NAME" \
   "$SOURCE_DIR" 2>&1 | tee "$LOG_DIR/platform-image-build.log"
+
+log "Verify required production models before quiescing the current platform"
+docker run --rm \
+  -v "$MODEL_DIR:/app/models:ro" \
+  "$IMAGE_NAME" \
+  python3 /app/scripts/verify_models.py \
+    --manifest /app/deploy/models/ascend-prod.models.json \
+    --lock /tmp/ascend-prod.models.lock.json
 
 DEVICE_ARGS=(
   --device "/dev/davinci${NPU_ID}"
@@ -291,6 +251,17 @@ docker run -d \
   -e ASR_VAD_STRATEGY=silero_12s \
   -e ASR_MODEL_LOCAL_FILES_ONLY=true \
   -e ASR_SEMANTIC_LOCAL_FILES_ONLY=true \
+  -e SPEAKER_DEVICE=npu \
+  -e SPEAKER_MODEL_REPO=/app/models/3D-Speaker \
+  -e SPEAKER_MODEL_CACHE_DIR=/app/models/3dspeaker-cache \
+  -e MILVUS_ENABLED="$MILVUS_ENABLED" \
+  -e MILVUS_HOST="$MILVUS_HOST" \
+  -e MILVUS_PORT="$MILVUS_PORT" \
+  -e MILVUS_READ_ENABLED="$MILVUS_READ_ENABLED" \
+  -e MILVUS_WRITE_ENABLED="$MILVUS_WRITE_ENABLED" \
+  -e MILVUS_FALLBACK_ENABLED="$MILVUS_FALLBACK_ENABLED" \
+  -e MILVUS_ROLLOUT_PERCENT="$MILVUS_ROLLOUT_PERCENT" \
+  -e MILVUS_QUERY_TIMEOUT_SECONDS="$MILVUS_QUERY_TIMEOUT_SECONDS" \
   -e OCR_ENGINE=rapidocr_acl \
   -e OCR_DEVICE=npu \
   -e OCR_ACL_MODEL_DIR=rapidocr/ascend/910b4-cann9-profile \
@@ -344,15 +315,16 @@ backend.close()
 print("OCR_ACL_BACKEND_SELF_TEST=PASS")
 PY
 
+log "8/8 Verify required model inventory in the replacement container"
+docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
+  --manifest /app/deploy/models/ascend-prod.models.json \
+  --lock /app/runtime/ascend-prod.models.lock.json
+
 if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
   docker rm "$ROLLBACK_NAME" >/dev/null
 fi
 
 docker image tag "$IMAGE_NAME" "${IMAGE_REPO}:current"
-
-log "8/8 Model inventory (missing models do not stop API deployment)"
-docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
-  --manifest /app/deploy/models/ascend-prod.models.json || true
 
 docker ps --filter "name=^/${CONTAINER_NAME}$" --format 'name={{.Names}} image={{.Image}} status={{.Status}}'
 npu-smi info -t proc-mem -i "$NPU_ID" -c 0 2>&1 || true
