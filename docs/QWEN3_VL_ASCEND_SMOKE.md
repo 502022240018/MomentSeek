@@ -14,17 +14,17 @@
 
 ## 执行
 
-模型准备好后，推荐使用一键入口。它会检查实验分支、正式服务 health、模型文件、NPU 7 和 runtime 视频，运行 smoke 后展示最新 JSON 并检查 NPU 是否释放：
+模型准备好后，推荐使用一键入口。它会检查工作区、正式服务 health、模型文件、NPU 7 和 runtime 视频，运行 smoke 后展示最新 JSON 并检查 NPU 是否释放：
 
 ```bash
 cd /home/momentseek-29154/platform
-git fetch origin agent/ascend-qwen3-vl-smoke
-git switch agent/ascend-qwen3-vl-smoke
+git fetch origin main
+git switch main
 git pull --ff-only
 bash scripts/run_qwen3_vl_ascend_experiment.sh
 ```
 
-前三条 Git 命令只在首次进入或更新实验分支时需要。之后重复测试只需执行最后一条命令。脚本不会自动切换分支或修改 tracked 文件。
+前三条 Git 命令只在首次进入或更新代码时需要。之后重复测试只需执行最后一条命令。脚本不会自动切换分支或修改 tracked 文件。如需锁定某个实验分支，可显式设置 `EXPECTED_BRANCH=branch-name`。
 
 测试图有三种来源，优先级如下：
 
@@ -33,7 +33,7 @@ bash scripts/run_qwen3_vl_ascend_experiment.sh
    ```bash
    mkdir -p /home/momentseek-29154/vlm-exp/input
    # 在本地执行：
-   scp test.jpg root@100.199.4.24:/home/momentseek-29154/vlm-exp/input/test.jpg
+   scp -P 3017 test.jpg root@140.210.239.19:/home/momentseek-29154/vlm-exp/input/test.jpg
    ```
 
 2. 指定服务器上的图片：

@@ -11,7 +11,7 @@ PHYSICAL_NPU="${PHYSICAL_NPU:-7}"
 MODEL_NAME="${MODEL_NAME:-Qwen3-VL-2B-Instruct}"
 MODEL_ID="${MODEL_ID:-Qwen/Qwen3-VL-2B-Instruct}"
 MODEL_HOST="${MODEL_HOST:-${EXPERIMENT_ROOT}/models/${MODEL_NAME}}"
-EXPECTED_BRANCH="${EXPECTED_BRANCH:-agent/ascend-qwen3-vl-smoke}"
+EXPECTED_BRANCH="${EXPECTED_BRANCH:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${EXPERIMENT_ROOT}/output}"
 
 fail() { printf '\nQWEN3_VL_EXPERIMENT_FAILED: %s\n' "$*" >&2; exit 1; }
@@ -26,8 +26,8 @@ cd "$SOURCE_DIR"
 current_branch="$(git branch --show-current)"
 printf 'repository=%s\nbranch=%s\ncommit=%s\n' \
   "$SOURCE_DIR" "$current_branch" "$(git rev-parse --short HEAD)"
-if [[ "$current_branch" != "$EXPECTED_BRANCH" ]]; then
-  fail "expected branch ${EXPECTED_BRANCH}; fetch and switch to the experiment branch first"
+if [[ -n "$EXPECTED_BRANCH" && "$current_branch" != "$EXPECTED_BRANCH" ]]; then
+  fail "expected branch ${EXPECTED_BRANCH}; current branch is ${current_branch}"
 fi
 [[ -x scripts/run_qwen3_vl_ascend_smoke.sh ]] \
   || fail "smoke runner missing or not executable"
