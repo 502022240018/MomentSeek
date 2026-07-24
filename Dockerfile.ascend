@@ -50,7 +50,7 @@ RUN (cd /tmp/vendor-wheels && sha256sum -c SHA256SUMS) \
     && rm -rf /tmp/vendor-wheels
 COPY backend/ ./
 COPY deploy/orchestration/ ./deploy/orchestration/
-COPY deploy/models/ascend-prod.models.json ./deploy/models/ascend-prod.models.json
+COPY deploy/models/ascend-prod.models.json /app/deploy/models/ascend-prod.models.json
 COPY scripts/verify_models.py /app/scripts/verify_models.py
 COPY --from=frontend-build /src/frontend/dist ./app/static
 RUN mkdir -p /app/runtime /app/models
