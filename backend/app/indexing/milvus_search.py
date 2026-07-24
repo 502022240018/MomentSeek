@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import defaultdict
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
@@ -780,6 +781,7 @@ def milvus_face_candidates(
         ["track_idx", "start_ms", "end_ms", "best_ms", "embedding"],
         profiler,
     )
+    scoring_started = time.perf_counter()
     scored: list[tuple[float, dict]] = []
     for hit in hits:
         raw_emb = hit.get("embedding")
@@ -819,6 +821,12 @@ def milvus_face_candidates(
             best_ms=best_ms,
             features={"face_cosine": cosine, "source": "milvus"},
         ))
+    if profiler:
+        profiler.add_seconds(
+            "local_processing",
+            "face_scoring",
+            time.perf_counter() - scoring_started,
+        )
     return candidates
 
 

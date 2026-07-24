@@ -1175,39 +1175,139 @@ class SearchEngine:
 
     def prewarm(self) -> dict:
         profiler = RetrievalProfiler()
-        try:
-            visual = self._clip(self.settings.visual_model, profiler)
-            with self._visual_encode_lock, profiler.span("query_encode", "visual"):
-                visual.encode_queries(["MomentSeek warmup"], None)
-            if self.settings.asr_semantic_enabled:
+        visual_models, text_models, manifest_errors = self._indexed_query_models()
+        model_errors: list[dict[str, str]] = []
+        for model_key in sorted(visual_models):
+            try:
+                visual = self._clip(model_key, profiler)
+                with self._visual_encode_lock, profiler.span(
+                    "query_encode", "visual"
+                ):
+                    visual.encode_queries(["MomentSeek warmup"], None)
+            except Exception as exc:
+                model_errors.append({
+                    "kind": "visual",
+                    "model": model_key,
+                    "error": str(exc),
+                })
+        for model_name in sorted(text_models):
+            try:
                 self._encode_asr_query(
                     "MomentSeek warmup",
-                    self.settings.asr_semantic_model,
+                    model_name,
                     profiler,
                 )
-        except Exception as exc:
-            self._prewarm_status = {
-                "status": "error",
-                "resident": True,
-                "error": str(exc),
-                **profiler.snapshot(),
-            }
-            if self.settings.search_prewarm_required:
-                raise
-        else:
-            self._prewarm_status = {
-                "status": "ready",
-                "resident": True,
-                **profiler.snapshot(),
-            }
+            except Exception as exc:
+                model_errors.append({
+                    "kind": "text",
+                    "model": model_name,
+                    "error": str(exc),
+                })
+
+        errors = [*manifest_errors, *model_errors]
+        status = {
+            "status": "error" if errors else "ready",
+            "resident": True,
+            "requested_visual_models": sorted(visual_models),
+            "requested_text_models": sorted(text_models),
+            "errors": errors,
+            **profiler.snapshot(),
+        }
+        with self._encoder_lock:
+            self._prewarm_status = status
+        if errors and self.settings.search_prewarm_required:
+            summary = "; ".join(
+                f"{item.get('kind')}:{item.get('model', item.get('video_id', 'unknown'))}:"
+                f" {item['error']}"
+                for item in errors
+            )
+            raise RuntimeError(f"Query-model prewarm failed: {summary}")
         return self.query_model_status()
 
+    def _indexed_query_models(
+        self,
+    ) -> tuple[set[str], set[str], list[dict[str, str]]]:
+        """Return deduplicated model keys used by currently searchable indexes."""
+        visual_models = {self.settings.visual_model}
+        text_models = (
+            {self.settings.asr_semantic_model}
+            if self.settings.asr_semantic_enabled
+            else set()
+        )
+        errors: list[dict[str, str]] = []
+        for video in self._selected_videos(None):
+            indexed = set(video.get("indexed_modalities") or [])
+            index_dir = self.settings.index_dir / video["id"]
+            for channel in sorted(indexed & {"visual", "asr", "ocr"}):
+                try:
+                    _manifest, channel_manifest, _index_file = (
+                        _channel_manifest_for(video, index_dir, channel)
+                    )
+                except (OSError, ValueError) as exc:
+                    errors.append({
+                        "kind": "manifest",
+                        "video_id": str(video["id"]),
+                        "model": channel,
+                        "error": str(exc),
+                    })
+                    continue
+                if channel == "visual":
+                    visual_models.add(
+                        str(
+                            channel_manifest.get("model_key")
+                            or self.settings.visual_model
+                        )
+                    )
+                elif self.settings.asr_semantic_enabled:
+                    text_models.add(
+                        str(
+                            channel_manifest.get("semantic_model_key")
+                            or self.settings.asr_semantic_model
+                        )
+                    )
+        return visual_models, text_models, errors
+
     def query_model_status(self) -> dict:
+        with self._encoder_lock:
+            status = dict(self._prewarm_status)
+            visual_models = sorted(self._clip_encoders)
+            text_models = sorted({
+                model for model, _device in self._text_encoders
+            })
         return {
-            **self._prewarm_status,
-            "visual_models": sorted(self._clip_encoders),
-            "text_models": sorted({model for model, _device in self._text_encoders}),
+            **status,
+            "visual_models": visual_models,
+            "text_models": text_models,
         }
+
+    def _get_milvus_client(self):
+        """Resolve the live client behind a unit-testable connection boundary."""
+        from app.indexing.milvus_client import (
+            ensure_milvus_reachable,
+            get_milvus_client,
+        )
+
+        ensure_milvus_reachable()
+        return get_milvus_client()
+
+    def _query_rows_for_videos(
+        self,
+        client,
+        modality: str,
+        video_ids: list[str],
+        output_fields: list[str],
+        profiler: RetrievalProfiler | None,
+    ) -> dict[str, list[dict]]:
+        """Resolve one bulk query behind a unit-testable data boundary."""
+        from app.indexing.milvus_search import query_rows_for_videos
+
+        return query_rows_for_videos(
+            client,
+            modality,
+            video_ids,
+            output_fields,
+            profiler,
+        )
 
     def close(self) -> None:
         with self._encoder_lock:
@@ -1235,27 +1335,17 @@ class SearchEngine:
     def _visual_for_video(
         self,
         video: dict,
-        text: str | None,
-        image_path: str | None,
-        alpha: float,
         profile: str,
         limit: int,
         visual_queries: dict[str, np.ndarray],
-        visual_subqueries: list[str] | None,
-        profiler: RetrievalProfiler | None,
     ) -> list[Candidate]:
         index_dir = self.settings.index_dir / video["id"]
         manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "visual")
         with np.load(index_file, allow_pickle=False) as data:
             visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
             if visual_model not in visual_queries:
-                query_texts: list[str | None] = (
-                    list(dict.fromkeys(visual_subqueries or []))
-                    if text and visual_subqueries
-                    else [text]
-                )
-                visual_queries[visual_model] = self._encode_visual_queries(
-                    visual_model, query_texts, image_path, alpha, profiler
+                raise RuntimeError(
+                    f"visual query vector was not prepared for model={visual_model}"
                 )
             return _visual_candidates(
                 data,
@@ -1302,12 +1392,15 @@ class SearchEngine:
         text: str,
         limit: int,
         semantic_queries: dict[str, np.ndarray | None],
-        profiler: RetrievalProfiler | None,
     ) -> list[Candidate]:
         index_dir = self.settings.index_dir / video["id"]
         _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "asr")
         with np.load(index_file, allow_pickle=False) as data:
             embeddings, indices = _semantic_arrays(data)
+            model_name = str(
+                channel_manifest.get("semantic_model_key")
+                or self.settings.asr_semantic_model
+            )
             return _asr_candidates(
                 _asr_chunks_from_npz(data),
                 text,
@@ -1315,13 +1408,7 @@ class SearchEngine:
                 limit,
                 semantic_embeddings=embeddings,
                 embedding_chunk_indices=indices,
-                semantic_query=self._semantic_query(
-                    text,
-                    channel_manifest,
-                    embeddings,
-                    semantic_queries,
-                    profiler,
-                ),
+                semantic_query=semantic_queries.get(model_name),
             )
 
     def _ocr_for_video(
@@ -1330,7 +1417,6 @@ class SearchEngine:
         text: str,
         limit: int,
         semantic_queries: dict[str, np.ndarray | None],
-        profiler: RetrievalProfiler | None,
     ) -> list[Candidate]:
         index_dir = self.settings.index_dir / video["id"]
         _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
@@ -1340,13 +1426,11 @@ class SearchEngine:
             embeddings, indices = _ocr_semantic_arrays(data)
             semantic_query = None
             if embeddings is not None:
-                semantic_query = self._semantic_query(
-                    text,
-                    channel_manifest,
-                    embeddings,
-                    semantic_queries,
-                    profiler,
+                model_name = str(
+                    channel_manifest.get("semantic_model_key")
+                    or self.settings.asr_semantic_model
                 )
+                semantic_query = semantic_queries.get(model_name)
             return _asr_candidates(
                 _ocr_chunks_from_npz(data),
                 text,
@@ -1363,31 +1447,22 @@ class SearchEngine:
         video: dict,
         *,
         text: str | None,
-        image_path: str | None,
         modalities: list[str],
-        alpha: float,
         limit: int,
         visual_profile: str,
         visual_queries: dict[str, np.ndarray],
         face_query: np.ndarray | None,
         channel_limits: dict[str, int],
-        visual_subqueries: list[str] | None,
         semantic_queries: dict[str, np.ndarray | None],
-        profiler: RetrievalProfiler | None,
     ) -> list[Candidate]:
         candidates = []
         indexed = set(video.get("indexed_modalities") or [])
-        if "visual" in modalities and bool(text or image_path) and "visual" in indexed:
+        if "visual" in modalities and "visual" in indexed:
             candidates.extend(self._visual_for_video(
                 video,
-                text,
-                image_path,
-                alpha,
                 visual_profile,
                 channel_limits["visual"],
                 visual_queries,
-                visual_subqueries,
-                profiler,
             ))
         if "face" in modalities and face_query is not None and "face" in indexed:
             candidates.extend(self._face_for_video(video, face_query, channel_limits["face"]))
@@ -1397,7 +1472,6 @@ class SearchEngine:
                 text,
                 channel_limits["asr"],
                 semantic_queries,
-                profiler,
             ))
         if "ocr" in modalities and text and "ocr" in indexed:
             candidates.extend(self._ocr_for_video(
@@ -1405,7 +1479,6 @@ class SearchEngine:
                 text,
                 channel_limits["ocr"],
                 semantic_queries,
-                profiler,
             ))
         return candidates
 
@@ -1414,14 +1487,11 @@ class SearchEngine:
         video: dict,
         *,
         text: str | None,
-        image_path: str | None,
         modalities: list[str],
-        alpha: float,
         visual_profile: str,
         visual_queries: dict[str, np.ndarray],
         face_query: np.ndarray | None,
         channel_limits: dict[str, int],
-        visual_subqueries: list[str] | None,
         semantic_queries: dict[str, np.ndarray | None],
         profiler: RetrievalProfiler | None,
         client=None,
@@ -1435,31 +1505,20 @@ class SearchEngine:
         )
 
         if client is None:
-            from app.indexing.milvus_client import (
-                ensure_milvus_reachable,
-                get_milvus_client,
-            )
-
-            ensure_milvus_reachable()
-            client = get_milvus_client()
+            client = self._get_milvus_client()
         prefetched_rows = prefetched_rows or {}
         video_id = video["id"]
         index_dir = self.settings.index_dir / video_id
         indexed = set(video.get("indexed_modalities") or [])
         candidates: list[Candidate] = []
-        if "visual" in modalities and bool(text or image_path) and "visual" in indexed:
+        if "visual" in modalities and "visual" in indexed:
             manifest, channel_manifest, _index_file = _channel_manifest_for(
                 video, index_dir, "visual"
             )
             visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
             if visual_model not in visual_queries:
-                query_texts: list[str | None] = (
-                    list(dict.fromkeys(visual_subqueries or []))
-                    if text and visual_subqueries
-                    else [text]
-                )
-                visual_queries[visual_model] = self._encode_visual_queries(
-                    visual_model, query_texts, image_path, alpha, profiler
+                raise RuntimeError(
+                    f"visual query vector was not prepared for model={visual_model}"
                 )
             candidates.extend(milvus_visual_candidates(
                 client,
@@ -1485,13 +1544,11 @@ class SearchEngine:
             _manifest, channel_manifest, _index_file = _channel_manifest_for(
                 video, index_dir, "asr"
             )
-            semantic_query = self._semantic_query(
-                text,
-                channel_manifest,
-                np.empty((1, 1), dtype=np.float32),
-                semantic_queries,
-                profiler,
+            model_name = str(
+                channel_manifest.get("semantic_model_key")
+                or self.settings.asr_semantic_model
             )
+            semantic_query = semantic_queries.get(model_name)
             candidates.extend(milvus_asr_candidates(
                 client,
                 video_id,
@@ -1505,13 +1562,11 @@ class SearchEngine:
             _manifest, channel_manifest, _index_file = _channel_manifest_for(
                 video, index_dir, "ocr"
             )
-            semantic_query = self._semantic_query(
-                text,
-                channel_manifest,
-                np.empty((1, 1), dtype=np.float32),
-                semantic_queries,
-                profiler,
+            model_name = str(
+                channel_manifest.get("semantic_model_key")
+                or self.settings.asr_semantic_model
             )
+            semantic_query = semantic_queries.get(model_name)
             candidates.extend(milvus_ocr_candidates(
                 client,
                 video_id,
@@ -1548,6 +1603,57 @@ class SearchEngine:
         if text:
             requested.update({"asr", "ocr"} & set(modalities) & indexed)
         return requested
+
+    def _prepare_query_vectors(
+        self,
+        videos: list[dict],
+        *,
+        text: str | None,
+        image_path: str | None,
+        alpha: float,
+        visual_subqueries: list[str] | None,
+        requested_by_video: dict[str, set[str]],
+        visual_queries: dict[str, np.ndarray],
+        semantic_queries: dict[str, np.ndarray | None],
+        profiler: RetrievalProfiler | None,
+    ) -> None:
+        """Encode all manifest-selected query models before candidate scoring."""
+        query_texts: list[str | None] = (
+            list(dict.fromkeys(visual_subqueries or []))
+            if text and visual_subqueries
+            else [text]
+        )
+        for video in videos:
+            requested = requested_by_video[video["id"]]
+            index_dir = self.settings.index_dir / video["id"]
+            if "visual" in requested:
+                _manifest, channel_manifest, _index_file = _channel_manifest_for(
+                    video, index_dir, "visual"
+                )
+                model_key = str(
+                    channel_manifest.get("model_key")
+                    or self.settings.visual_model
+                )
+                if model_key not in visual_queries:
+                    visual_queries[model_key] = self._encode_visual_queries(
+                        model_key,
+                        query_texts,
+                        image_path,
+                        alpha,
+                        profiler,
+                    )
+            if text:
+                for channel in sorted(requested & {"asr", "ocr"}):
+                    _manifest, channel_manifest, _index_file = (
+                        _channel_manifest_for(video, index_dir, channel)
+                    )
+                    self._semantic_query(
+                        text,
+                        channel_manifest,
+                        np.empty((1, 1), dtype=np.float32),
+                        semantic_queries,
+                        profiler,
+                    )
 
     def search(
         self,
@@ -1593,7 +1699,6 @@ class SearchEngine:
         )
         from app.indexing.milvus_search import (
             BULK_QUERY_FIELDS,
-            query_rows_for_videos,
             shadow_compare_log,
         )
 
@@ -1612,47 +1717,62 @@ class SearchEngine:
             )
             for video in videos
         }
+        self._prepare_query_vectors(
+            videos,
+            text=text,
+            image_path=image_path,
+            alpha=alpha,
+            visual_subqueries=visual_subqueries,
+            requested_by_video=requested_by_video,
+            visual_queries=visual_queries,
+            semantic_queries=semantic_queries,
+            profiler=profiler,
+        )
         milvus_video_ids = [
             video["id"]
             for video in videos
-            if use_milvus_by_video[video["id"]] or shadow
+            if requested_by_video[video["id"]]
+            and (use_milvus_by_video[video["id"]] or shadow)
         ]
-        prefetched_rows: dict[tuple[str, str], list[dict]] = {}
+        milvus_video_id_set = set(milvus_video_ids)
         milvus_errors: dict[str, Exception] = {}
         milvus_client = None
         if milvus_video_ids:
             try:
-                from app.indexing.milvus_client import (
-                    ensure_milvus_reachable,
-                    get_milvus_client,
-                )
-
-                ensure_milvus_reachable()
-                milvus_client = get_milvus_client()
+                milvus_client = self._get_milvus_client()
             except Exception as exc:
                 for modality in set(modalities):
                     milvus_errors[modality] = exc
-            else:
-                batch_size = self.settings.milvus_search_video_batch_size
+
+        batch_size = self.settings.milvus_search_video_batch_size
+        for batch_offset in range(0, len(videos), batch_size):
+            batch_videos = videos[batch_offset:batch_offset + batch_size]
+            batch_video_ids = [
+                video["id"]
+                for video in batch_videos
+                if video["id"] in milvus_video_id_set
+            ]
+            prefetched_rows: dict[tuple[str, str], list[dict]] = {}
+            modality_rows: dict[str, list[dict]] = {}
+            if milvus_client is not None and batch_video_ids:
                 for modality, output_fields in BULK_QUERY_FIELDS.items():
+                    if modality in milvus_errors:
+                        continue
                     eligible_ids = [
                         video_id
-                        for video_id in milvus_video_ids
+                        for video_id in batch_video_ids
                         if modality in requested_by_video[video_id]
                     ]
                     if not eligible_ids:
                         continue
-                    modality_rows: dict[str, list[dict]] = {}
                     try:
-                        for offset in range(0, len(eligible_ids), batch_size):
-                            batch_ids = eligible_ids[offset:offset + batch_size]
-                            modality_rows.update(query_rows_for_videos(
-                                milvus_client,
-                                modality,
-                                batch_ids,
-                                output_fields,
-                                profiler,
-                            ))
+                        modality_rows = self._query_rows_for_videos(
+                            milvus_client,
+                            modality,
+                            eligible_ids,
+                            output_fields,
+                            profiler,
+                        )
                     except Exception as exc:
                         milvus_errors[modality] = exc
                         logger.warning(
@@ -1667,123 +1787,144 @@ class SearchEngine:
                                 video_id, []
                             )
 
-        for video in videos:
-            video_id = video["id"]
-            use_milvus = use_milvus_by_video[video_id]
-            requested_modalities = requested_by_video[video_id]
-            milvus_candidates: list[Candidate] = []
-            npz_modalities = set(requested_modalities) if (not use_milvus or shadow) else set()
-            recovery_modalities: set[str] = set()
+            for video in batch_videos:
+                video_id = video["id"]
+                use_milvus = use_milvus_by_video[video_id]
+                requested_modalities = requested_by_video[video_id]
+                milvus_candidates: list[Candidate] = []
+                npz_modalities = (
+                    set(requested_modalities)
+                    if (not use_milvus or shadow)
+                    else set()
+                )
+                recovery_modalities: set[str] = set()
 
-            if use_milvus or shadow:
-                for modality in sorted(requested_modalities):
-                    if modality in milvus_errors:
-                        if use_milvus and not milvus_fallback_enabled():
-                            raise milvus_errors[modality]
-                        npz_modalities.add(modality)
-                        recovery_modalities.add(modality)
-                        continue
-                    try:
-                        scoring_span = (
-                            profiler.span("local_processing", f"{modality}_scoring")
-                            if profiler
-                            else nullcontext()
-                        )
-                        with scoring_span:
-                            modality_candidates = self._milvus_candidates_for_video(
-                                video,
-                                text=text,
-                                image_path=image_path,
-                                modalities=[modality],
-                                alpha=alpha,
-                                visual_profile=visual_profile,
-                                visual_queries=visual_queries,
-                                face_query=face_query,
-                                channel_limits=resolved_channel_limits,
-                                visual_subqueries=visual_subqueries,
-                                semantic_queries=semantic_queries,
-                                profiler=profiler,
-                                client=milvus_client,
-                                prefetched_rows={
-                                    modality: prefetched_rows.get((video_id, modality), [])
-                                } if modality in BULK_QUERY_FIELDS else None,
-                            )
-                    except Exception as exc:
-                        if use_milvus and not milvus_fallback_enabled():
-                            raise
-                        milvus_errors[modality] = exc
-                        npz_modalities.add(modality)
-                        recovery_modalities.add(modality)
-                        logger.warning(
-                            "Milvus search failed for video=%s modality=%s; "
-                            "using NPZ fallback: %s",
-                            video_id,
-                            modality,
-                            exc,
-                        )
-                    else:
-                        modality_candidates = [
-                            item
-                            for item in modality_candidates
-                            if item.modality == modality
-                        ]
-                        milvus_candidates.extend(modality_candidates)
-                        if (
-                            use_milvus
-                            and milvus_fallback_enabled()
-                            and not modality_candidates
-                        ):
+                if use_milvus or shadow:
+                    for modality in sorted(requested_modalities):
+                        if modality in milvus_errors:
+                            if use_milvus and not milvus_fallback_enabled():
+                                raise milvus_errors[modality]
                             npz_modalities.add(modality)
                             recovery_modalities.add(modality)
+                            continue
+                        try:
+                            scoring_span = (
+                                profiler.span(
+                                    "local_processing",
+                                    f"{modality}_scoring",
+                                )
+                                if profiler and modality != "face"
+                                else nullcontext()
+                            )
+                            with scoring_span:
+                                modality_candidates = (
+                                    self._milvus_candidates_for_video(
+                                        video,
+                                        text=text,
+                                        modalities=[modality],
+                                        visual_profile=visual_profile,
+                                        visual_queries=visual_queries,
+                                        face_query=face_query,
+                                        channel_limits=resolved_channel_limits,
+                                        semantic_queries=semantic_queries,
+                                        profiler=profiler,
+                                        client=milvus_client,
+                                        prefetched_rows={
+                                            modality: prefetched_rows.get(
+                                                (video_id, modality), []
+                                            )
+                                        }
+                                        if modality in BULK_QUERY_FIELDS
+                                        else None,
+                                    )
+                                )
+                        except Exception as exc:
+                            if use_milvus and not milvus_fallback_enabled():
+                                raise
+                            milvus_errors[modality] = exc
+                            npz_modalities.add(modality)
+                            recovery_modalities.add(modality)
+                            logger.warning(
+                                "Milvus search failed for video=%s modality=%s; "
+                                "using NPZ fallback: %s",
+                                video_id,
+                                modality,
+                                exc,
+                            )
+                        else:
+                            modality_candidates = [
+                                item
+                                for item in modality_candidates
+                                if item.modality == modality
+                            ]
+                            milvus_candidates.extend(modality_candidates)
+                            if (
+                                use_milvus
+                                and milvus_fallback_enabled()
+                                and not modality_candidates
+                            ):
+                                npz_modalities.add(modality)
+                                recovery_modalities.add(modality)
 
-            npz_candidates: list[Candidate] = []
-            if npz_modalities:
-                fallback_span = (
-                    profiler.span("npz_fallback", "search")
-                    if profiler and use_milvus
-                    else nullcontext()
+                npz_candidates: list[Candidate] = []
+                if npz_modalities:
+                    fallback_span = (
+                        profiler.span("npz_fallback", "search")
+                        if profiler and use_milvus
+                        else nullcontext()
+                    )
+                    with fallback_span:
+                        npz_candidates = self._candidates_for_video(
+                            video,
+                            text=text,
+                            modalities=sorted(npz_modalities),
+                            limit=limit,
+                            visual_profile=visual_profile,
+                            visual_queries=visual_queries,
+                            face_query=face_query,
+                            channel_limits=resolved_channel_limits,
+                            semantic_queries=semantic_queries,
+                        )
+
+                if use_milvus and recovery_modalities:
+                    recovered = [
+                        item
+                        for item in npz_candidates
+                        if item.modality in recovery_modalities
+                    ]
+                    if recovered:
+                        logger.warning(
+                            "Milvus coverage/failure recovery video=%s "
+                            "modalities=%s; recovered %d NPZ candidates",
+                            video_id,
+                            sorted(recovery_modalities),
+                            len(recovered),
+                        )
+                        milvus_candidates.extend(recovered)
+
+                if shadow:
+                    for modality in requested_modalities:
+                        shadow_compare_log(
+                            video_id,
+                            modality,
+                            [
+                                item
+                                for item in npz_candidates
+                                if item.modality == modality
+                            ],
+                            [
+                                item
+                                for item in milvus_candidates
+                                if item.modality == modality
+                            ],
+                        )
+                candidates.extend(
+                    milvus_candidates if use_milvus else npz_candidates
                 )
-                with fallback_span:
-                    npz_candidates = self._candidates_for_video(
-                        video,
-                        text=text,
-                        image_path=image_path,
-                        modalities=sorted(npz_modalities),
-                        alpha=alpha,
-                        limit=limit,
-                        visual_profile=visual_profile,
-                        visual_queries=visual_queries,
-                        face_query=face_query,
-                        channel_limits=resolved_channel_limits,
-                        visual_subqueries=visual_subqueries,
-                        semantic_queries=semantic_queries,
-                        profiler=profiler,
-                    )
-
-            if use_milvus and recovery_modalities:
-                recovered = [
-                    item for item in npz_candidates
-                    if item.modality in recovery_modalities
-                ]
-                if recovered:
-                    logger.warning(
-                        "Milvus coverage/failure recovery video=%s modalities=%s; "
-                        "recovered %d NPZ candidates",
-                        video_id,
-                        sorted(recovery_modalities),
-                        len(recovered),
-                    )
-                    milvus_candidates.extend(recovered)
-
-            if shadow:
-                for modality in requested_modalities:
-                    shadow_compare_log(
-                        video_id,
-                        modality,
-                        [item for item in npz_candidates if item.modality == modality],
-                        [item for item in milvus_candidates if item.modality == modality],
-                    )
-            candidates.extend(milvus_candidates if use_milvus else npz_candidates)
+            # Raw embeddings for this batch become unreachable before the next
+            # Milvus query, bounding peak memory by video batch size.
+            prefetched_rows.clear()
+            modality_rows.clear()
         fusion_span = (
             profiler.span("local_processing", "fusion")
             if profiler
