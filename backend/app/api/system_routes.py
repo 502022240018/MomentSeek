@@ -26,4 +26,11 @@ def health() -> dict:
         "npu_worker_mode": settings.npu_worker_mode,
         "orchestration_enabled": settings.orchestration_enabled,
         "orchestration_profile": settings.orchestration_profile,
+        "milvus_enabled": settings.milvus_enabled,
+        "milvus_primary": (
+            settings.milvus_enabled
+            and settings.milvus_read_enabled
+            and settings.milvus_rollout_percent == 100
+        ),
+        "milvus_fallback_enabled": settings.milvus_fallback_enabled,
     }

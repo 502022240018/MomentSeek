@@ -4,13 +4,16 @@ import re
 import unicodedata
 import time
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
 from app.indexing.common import atomic_save_npz
 from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
 from app.media import read_frames
+
+if TYPE_CHECKING:
+    from app.indexing.milvus_indexer import MilvusWriteContext
 
 
 def _rapidocr_params(
@@ -674,6 +677,7 @@ def build_ocr_index(
     engine: str = "rapidocr",
     acl_model_dir: str | Path | None = None,
     backend: OCRBackend | None = None,
+    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
     if sample_fps <= 0:
         raise ValueError("ocr_sample_fps 必须大于 0")
@@ -732,6 +736,10 @@ def build_ocr_index(
         embeddings,
         embedding_frame_indices,
     )
+    if milvus_ctx is not None:
+        from app.indexing.milvus_indexer import write_modality_to_milvus
+
+        write_modality_to_milvus(milvus_ctx, "ocr", output_path)
     save_elapsed = time.perf_counter() - save_started
 
     result.update(semantic_result)

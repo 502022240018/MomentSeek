@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from app.indexing.pipeline_manifest import write_stage_manifest
 from app.model_pool import ModelPool
 from app.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -19,6 +23,7 @@ class StageContext:
     video_path: str
     index_dir: Path
     working_dir: Path
+    milvus_ctx: Any | None = None
 
 
 def execute_stage(
@@ -33,15 +38,6 @@ def execute_stage(
     working_dir = index_dir / "work"
     index_dir.mkdir(parents=True, exist_ok=True)
     working_dir.mkdir(parents=True, exist_ok=True)
-    context = StageContext(
-        video=video,
-        options=options,
-        settings=settings,
-        pool=pool,
-        video_path=str(settings.resolve_path(video["file_path"])),
-        index_dir=index_dir,
-        working_dir=working_dir,
-    )
     runners: dict[str, Callable[[StageContext], dict]] = {
         "visual": _run_visual,
         "face": _run_face,
@@ -53,7 +49,76 @@ def execute_stage(
         runner = runners[stage]
     except KeyError as exc:
         raise ValueError(f"未知索引阶段: {stage}") from exc
-    return runner(context)
+    lock = nullcontext()
+    if settings.milvus_enabled and settings.milvus_write_enabled:
+        from app.indexing.milvus_stage_lock import video_stage_lock
+
+        lock = video_stage_lock(index_dir, video_id=video["id"], stage=stage)
+    with lock:
+        milvus_ctx = _setup_milvus_context(video["id"], index_dir, settings)
+        if milvus_ctx is not None:
+            _pre_delete_modality(milvus_ctx, video["id"], stage)
+        context = StageContext(
+            video=video,
+            options=options,
+            settings=settings,
+            pool=pool,
+            video_path=str(settings.resolve_path(video["file_path"])),
+            index_dir=index_dir,
+            working_dir=working_dir,
+            milvus_ctx=milvus_ctx,
+        )
+        return runner(context)
+
+
+def _setup_milvus_context(
+    video_id: str,
+    index_dir: Path,
+    settings: Settings | None = None,
+):
+    if settings is not None and not (
+        settings.milvus_enabled and settings.milvus_write_enabled
+    ):
+        return None
+    try:
+        from app.indexing.milvus_asset_version import bump_asset_version
+        from app.indexing.milvus_client import get_milvus_client
+        from app.indexing.milvus_indexer import MilvusWriteContext
+
+        client = get_milvus_client()
+        return MilvusWriteContext(
+            video_id=video_id,
+            asset_version=bump_asset_version(index_dir),
+            client=client,
+        )
+    except Exception as exc:
+        from app.indexing.milvus_flags import milvus_write_fail_policy
+
+        if milvus_write_fail_policy() == "raise":
+            raise RuntimeError(
+                f"Milvus connection failed，索引已中止: video={video_id}: {exc}"
+            ) from exc
+        logger.warning(
+            "Milvus unavailable for video=%s; retaining NPZ-only recovery copy: %s",
+            video_id,
+            exc,
+        )
+        return None
+
+
+def _pre_delete_modality(milvus_ctx, video_id: str, modality: str) -> None:
+    deleted = milvus_ctx.client.delete_video_modality(video_id, modality)
+    if deleted >= 0:
+        return
+    from app.indexing.milvus_flags import milvus_write_fail_policy
+
+    message = (
+        f"Pre-index Milvus cleanup failed for video={video_id} "
+        f"modality={modality}"
+    )
+    if milvus_write_fail_policy() == "raise":
+        raise RuntimeError(message)
+    logger.warning(message)
 
 
 def _write_manifest(stage: str, context: StageContext, result: dict) -> None:
@@ -110,6 +175,7 @@ def _run_visual(context: StageContext) -> dict:
         max_segment_seconds=float(options.get("visual_max_segment_seconds", settings.visual_max_segment_seconds)),
         shot_detector=str(options.get("visual_shot_detector", settings.visual_shot_detector)),
         shot_detector_threshold=float(options.get("visual_shot_threshold", settings.visual_shot_threshold)),
+        milvus_ctx=context.milvus_ctx,
     )
     _write_manifest("visual", context, result)
     return result
@@ -148,6 +214,7 @@ def _run_face(context: StageContext) -> dict:
         prefer_ffmpeg=settings.frame_reader == "ffmpeg",
         ort_intra_op_threads=settings.face_ort_intra_op_threads,
         ort_inter_op_threads=settings.face_ort_inter_op_threads,
+        milvus_ctx=context.milvus_ctx,
     )
     _write_manifest("face", context, result)
     return result
@@ -189,6 +256,7 @@ def _run_asr(context: StageContext) -> dict:
         debug_artifacts_enabled=bool(options.get("asr_debug_artifacts", settings.asr_debug_artifacts)),
         save_raw_transcript=bool(options.get("asr_save_raw_transcript", settings.asr_save_raw_transcript)),
         vad_strategy=str(options.get("asr_vad_strategy", settings.asr_vad_strategy)),
+        milvus_ctx=context.milvus_ctx,
     )
     _write_manifest("asr", context, result)
     if bool(options.get("asr_speaker_enabled", False)):
@@ -200,6 +268,8 @@ def _run_speaker(context: StageContext) -> dict:
     from app.indexing.speaker import build_speaker_index
 
     settings = context.settings
+    if context.milvus_ctx is not None:
+        _pre_delete_modality(context.milvus_ctx, context.video["id"], "speaker")
     asr_path = context.index_dir / "asr.npz"
     if not asr_path.exists():
         raise RuntimeError("Speaker 索引依赖 ASR，请先构建或在同一任务中选择 ASR")
@@ -211,6 +281,7 @@ def _run_speaker(context: StageContext) -> dict:
         model_repo=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_repo)),
         model_cache_dir=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_cache_dir)),
         device=settings.speaker_device,
+        milvus_ctx=context.milvus_ctx,
     )
     _write_manifest("speaker", context, result)
     return result
@@ -274,6 +345,7 @@ def _run_ocr(context: StageContext) -> dict:
         engine=settings.ocr_engine,
         acl_model_dir=str(settings.app_model_dir / settings.ocr_acl_model_dir),
         backend=backend,
+        milvus_ctx=context.milvus_ctx,
     )
     if backend_pool_elapsed is not None:
         result["backend_pool_get_elapsed_seconds"] = round(backend_pool_elapsed, 3)

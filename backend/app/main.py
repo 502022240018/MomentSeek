@@ -26,6 +26,7 @@ from app.settings import get_settings
 probe_video = media.probe_video
 export_preview_clip = media.export_preview_clip
 extract_video_frame = media.extract_video_frame
+extract_frame = media.extract_frame
 launch_job = worker.launch_job
 subprocess_environment = worker.subprocess_environment
 

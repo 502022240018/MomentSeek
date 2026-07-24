@@ -18,6 +18,8 @@ sentence-transformers==3.3.1
 rapidocr==3.9.0
 opencc-python-reimplemented==0.1.7
 pypinyin==0.54.0
+pymilvus==2.4.15
+setuptools<81
 # 3D-Speaker diarization and CAM++ voice embedding runtime
 addict==2.4.0
 simplejson==4.1.1

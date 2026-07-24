@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
@@ -8,6 +9,7 @@ from app.schemas import IndexRequest, VideoRenameRequest
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/api/videos", status_code=201)
@@ -89,11 +91,28 @@ def delete_video(video_id: str) -> dict:
     jobs = runtime.catalog.list_jobs(video_id)
     if any(job["status"] in {"queued", "running"} for job in jobs):
         raise HTTPException(status_code=409, detail="该视频有索引任务进行中，请等任务结束后再删除")
+    milvus_cleanup = None
+    if runtime.settings.milvus_enabled:
+        try:
+            from app.indexing.milvus_client import get_milvus_client
+
+            milvus_cleanup = get_milvus_client().delete_video(video_id)
+        except Exception as exc:
+            logger.warning(
+                "Milvus cleanup failed for video=%s; local deletion continues: %s",
+                video_id,
+                exc,
+            )
+            milvus_cleanup = {"status": "deferred", "error": str(exc)}
     runtime._remove_video_files(video, video_id)
     for job in jobs:
         (runtime.settings.app_data_dir / f"job-{job['id']}.log").unlink(missing_ok=True)
     runtime.catalog.delete_video(video_id)
-    return {"status": "deleted", "id": video_id}
+    return {
+        "status": "deleted",
+        "id": video_id,
+        "milvus_cleanup": milvus_cleanup,
+    }
 
 
 @router.get("/api/videos/{video_id}/media")
@@ -154,7 +173,11 @@ async def video_clip(
 
 
 @router.get("/api/videos/{video_id}/frame")
-async def video_frame(video_id: str, time: float = Query(..., ge=0)):
+async def video_frame(
+    video_id: str,
+    time: float | None = Query(default=None, ge=0),
+    ms: int | None = Query(default=None, ge=0),
+):
     from app import main as runtime
 
     video = runtime.catalog.get_video(video_id)
@@ -163,13 +186,27 @@ async def video_frame(video_id: str, time: float = Query(..., ge=0)):
     video_path = runtime.settings.resolve_path(video["file_path"])
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="视频文件不存在")
+    if time is None and ms is None:
+        raise HTTPException(status_code=422, detail="time 或 ms 至少提供一个")
     duration = float(video.get("duration") or 0)
-    bounded_time = min(time, duration) if duration > 0 else time
-    timestamp_ms = max(0, round(bounded_time * 1000))
+    if ms is not None:
+        duration_ms = round(duration * 1000)
+        timestamp_ms = min(ms, max(0, duration_ms - 1)) if duration_ms > 0 else ms
+        bounded_time = timestamp_ms / 1000
+    else:
+        bounded_time = min(float(time), duration) if duration > 0 else float(time)
+        timestamp_ms = max(0, round(bounded_time * 1000))
     frame_path = runtime._frame_cache_path(video_id, timestamp_ms)
     if not frame_path.exists() or frame_path.stat().st_size == 0:
         try:
-            await run_in_threadpool(runtime.extract_video_frame, video_path, frame_path, bounded_time)
+            if ms is not None:
+                await run_in_threadpool(
+                    runtime.extract_frame, video_path, frame_path, timestamp_ms
+                )
+            else:
+                await run_in_threadpool(
+                    runtime.extract_video_frame, video_path, frame_path, bounded_time
+                )
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
     return FileResponse(

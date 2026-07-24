@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
 from app.indexing.common import atomic_save_npz, normalize
 from app.media import read_frames
+
+if TYPE_CHECKING:
+    from app.indexing.milvus_indexer import MilvusWriteContext
 
 
 def _has_non_empty_onnx(path: Path) -> bool:
@@ -181,6 +185,7 @@ def build_face_index(
     prefer_ffmpeg: bool = True,
     ort_intra_op_threads: int = 8,
     ort_inter_op_threads: int = 1,
+    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
@@ -230,6 +235,10 @@ def build_face_index(
         embeddings=np.stack(embeddings).astype(np.float32) if embeddings else np.empty((0, dimension), np.float32),
         track_times_ms=np.asarray(track_times_ms, dtype=np.int32).reshape((-1, 3)),
     )
+    if milvus_ctx is not None:
+        from app.indexing.milvus_indexer import write_modality_to_milvus
+
+        write_modality_to_milvus(milvus_ctx, "face", output_path)
     return {
         "tracks": len(embeddings),
         "detections": detections,

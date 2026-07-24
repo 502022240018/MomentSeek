@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
@@ -13,6 +13,9 @@ from PIL import Image
 from app.indexing.common import atomic_save_npz, normalize
 from app.media import probe_video, read_frames
 from app.model_sources import hf_cached_snapshot_path, offline_env, resolve_hf_model_source
+
+if TYPE_CHECKING:
+    from app.indexing.milvus_indexer import MilvusWriteContext
 
 
 def resolve_device(npu_enabled: bool, npu_device_id: int, cuda_enabled: bool = False) -> str:
@@ -786,6 +789,7 @@ def build_visual_index(
     max_segment_seconds: float = 8.0,
     shot_detector: str = "simple",
     shot_detector_threshold: float = 0.20,
+    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
@@ -834,6 +838,10 @@ def build_visual_index(
         explicit_segment_times=explicit_segment_times,
     )
     atomic_save_npz(output_path, **payload)
+    if milvus_ctx is not None:
+        from app.indexing.milvus_indexer import write_modality_to_milvus
+
+        write_modality_to_milvus(milvus_ctx, "visual", output_path)
     return {
         "segments_total": segments_total,
         "segments_with_frames": segments_with_frames,

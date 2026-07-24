@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,8 @@ from app.indexing.common import normalize
 from app.indexing.manifest import require_channel_manifest
 from app.indexing.asr_text import normalize_search_text
 from app.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -1235,6 +1238,93 @@ class SearchEngine:
             candidates.extend(self._ocr_for_video(video, text, channel_limits["ocr"]))
         return candidates
 
+    def _milvus_candidates_for_video(
+        self,
+        video: dict,
+        *,
+        text: str | None,
+        image_path: str | None,
+        modalities: list[str],
+        alpha: float,
+        visual_profile: str,
+        visual_queries: dict[str, np.ndarray],
+        face_query: np.ndarray | None,
+        channel_limits: dict[str, int],
+        visual_subqueries: list[str] | None,
+    ) -> list[Candidate]:
+        from app.indexing.milvus_client import get_milvus_client
+        from app.indexing.milvus_search import (
+            milvus_asr_candidates,
+            milvus_face_candidates,
+            milvus_ocr_candidates,
+            milvus_visual_candidates,
+        )
+
+        client = get_milvus_client()
+        video_id = video["id"]
+        index_dir = self.settings.index_dir / video_id
+        indexed = set(video.get("indexed_modalities") or [])
+        candidates: list[Candidate] = []
+        if "visual" in modalities and bool(text or image_path) and "visual" in indexed:
+            manifest, channel_manifest, _index_file = _channel_manifest_for(
+                video, index_dir, "visual"
+            )
+            visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
+            if visual_model not in visual_queries:
+                query_texts: list[str | None] = (
+                    list(dict.fromkeys(visual_subqueries or []))
+                    if text and visual_subqueries
+                    else [text]
+                )
+                visual_queries[visual_model] = np.stack([
+                    self._clip(visual_model).encode_query(query_text, image_path, alpha)
+                    for query_text in query_texts
+                ])
+            candidates.extend(milvus_visual_candidates(
+                client,
+                video_id,
+                visual_queries[visual_model],
+                int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
+                int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
+                visual_profile,
+                channel_limits["visual"],
+            ))
+        if face_query is not None and "face" in indexed:
+            candidates.extend(milvus_face_candidates(
+                client, video_id, face_query, channel_limits["face"], 0.35
+            ))
+        if "asr" in modalities and text and "asr" in indexed:
+            _manifest, channel_manifest, _index_file = _channel_manifest_for(
+                video, index_dir, "asr"
+            )
+            model_name = str(
+                channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model
+            )
+            semantic_query = None
+            try:
+                semantic_query = self._encode_asr_query(text, model_name)
+            except Exception as exc:
+                logger.warning("Milvus ASR semantic query unavailable: %s", exc)
+            candidates.extend(milvus_asr_candidates(
+                client, video_id, text, semantic_query, channel_limits["asr"]
+            ))
+        if "ocr" in modalities and text and "ocr" in indexed:
+            _manifest, channel_manifest, _index_file = _channel_manifest_for(
+                video, index_dir, "ocr"
+            )
+            model_name = str(
+                channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model
+            )
+            semantic_query = None
+            try:
+                semantic_query = self._encode_asr_query(text, model_name)
+            except Exception as exc:
+                logger.warning("Milvus OCR semantic query unavailable: %s", exc)
+            candidates.extend(milvus_ocr_candidates(
+                client, video_id, text, semantic_query, channel_limits["ocr"]
+            ))
+        return candidates
+
     def search(
         self,
         text: str | None,
@@ -1260,20 +1350,81 @@ class SearchEngine:
         }
         visual_queries: dict[str, np.ndarray] = {}
         face_query = self._resolve_face_query(text, image_path) if "face" in modalities else None
+        from app.indexing.milvus_flags import (
+            milvus_fallback_enabled,
+            milvus_shadow_compare_enabled,
+            should_use_milvus_for_video,
+        )
+        from app.indexing.milvus_search import shadow_compare_log
+
         for video in videos:
-            candidates.extend(self._candidates_for_video(
-                video,
-                text=text,
-                image_path=image_path,
-                modalities=modalities,
-                alpha=alpha,
-                limit=limit,
-                visual_profile=visual_profile,
-                visual_queries=visual_queries,
-                face_query=face_query,
-                channel_limits=resolved_channel_limits,
-                visual_subqueries=visual_subqueries,
-            ))
+            use_milvus = should_use_milvus_for_video(video["id"])
+            shadow = milvus_shadow_compare_enabled()
+            npz_candidates: list[Candidate] | None = None
+            if not use_milvus or shadow:
+                npz_candidates = self._candidates_for_video(
+                    video,
+                    text=text,
+                    image_path=image_path,
+                    modalities=modalities,
+                    alpha=alpha,
+                    limit=limit,
+                    visual_profile=visual_profile,
+                    visual_queries=visual_queries,
+                    face_query=face_query,
+                    channel_limits=resolved_channel_limits,
+                    visual_subqueries=visual_subqueries,
+                )
+            milvus_candidates: list[Candidate] | None = None
+            if use_milvus or shadow:
+                try:
+                    milvus_candidates = self._milvus_candidates_for_video(
+                        video,
+                        text=text,
+                        image_path=image_path,
+                        modalities=modalities,
+                        alpha=alpha,
+                        visual_profile=visual_profile,
+                        visual_queries=visual_queries,
+                        face_query=face_query,
+                        channel_limits=resolved_channel_limits,
+                        visual_subqueries=visual_subqueries,
+                    )
+                except Exception as exc:
+                    if use_milvus and not milvus_fallback_enabled():
+                        raise
+                    logger.warning(
+                        "Milvus search failed for video=%s; using NPZ fallback: %s",
+                        video["id"],
+                        exc,
+                    )
+                    if npz_candidates is None:
+                        npz_candidates = self._candidates_for_video(
+                            video,
+                            text=text,
+                            image_path=image_path,
+                            modalities=modalities,
+                            alpha=alpha,
+                            limit=limit,
+                            visual_profile=visual_profile,
+                            visual_queries=visual_queries,
+                            face_query=face_query,
+                            channel_limits=resolved_channel_limits,
+                            visual_subqueries=visual_subqueries,
+                        )
+            if shadow and npz_candidates is not None and milvus_candidates is not None:
+                for modality in modalities:
+                    shadow_compare_log(
+                        video["id"],
+                        modality,
+                        [item for item in npz_candidates if item.modality == modality],
+                        [item for item in milvus_candidates if item.modality == modality],
+                    )
+            candidates.extend(
+                milvus_candidates
+                if use_milvus and milvus_candidates is not None
+                else (npz_candidates or [])
+            )
         results = _fuse_candidate_groups(candidates, videos, merge_gap, max_result_seconds)
         if set(modalities) == {"asr"} and text:
             results = _reserve_asr_lexical_results(results, limit)

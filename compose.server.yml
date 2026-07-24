@@ -1,5 +1,13 @@
-# Server bootstrap: use the compatible Ascend runtime image, but expose no NPU device.
-# Add compose.ascend.yml only after a card is explicitly approved.
+# Server bootstrap — build the Ascend-compatible image and connect to Milvus,
+# but expose no NPU device. Run this first to verify Milvus connectivity and
+# basic app health before requesting NPU card approval.
+#
+# Usage:
+#   docker compose -f compose.yml -f compose.milvus.yml -f compose.server.yml up -d
+#
+# To promote to NPU once a card is approved, append compose.ascend.yml:
+#   docker compose -f compose.yml -f compose.milvus.yml -f compose.server.yml \
+#                  -f compose.ascend.yml up -d
 services:
   app:
     build:
@@ -8,5 +16,31 @@ services:
       args:
         ASCEND_RUNTIME_IMAGE: "${ASCEND_RUNTIME_IMAGE:-0a8e7788f0d1}"
     image: momentseek-mvp:ascend
+    container_name: momentseek-mvp-app-server
     environment:
+      ENV_PROFILE: "${ENV_PROFILE:-prod.server}"
+      APP_DATA_DIR: /app/runtime
+      APP_MODEL_DIR: /app/models
+      APP_PUBLIC_URL: "${APP_PUBLIC_URL:-http://127.0.0.1:8000}"
       NPU_ENABLED: "false"
+      CUDA_ENABLED: "false"
+      MODEL_IDLE_POLICY: "${MODEL_IDLE_POLICY:-process_exit}"
+      FACE_PROVIDER: "${FACE_PROVIDER:-cpu}"
+      # OCR falls back to CPU (onnxruntime) when NPU_ENABLED=false.
+      OCR_DEVICE: "${OCR_DEVICE:-cpu}"
+      ASR_SEMANTIC_DEVICE: "${ASR_SEMANTIC_DEVICE:-cpu}"
+      # Milvus connection (resolved via Docker network DNS)
+      MILVUS_HOST: "${MILVUS_HOST:-milvus}"
+      MILVUS_PORT: "${MILVUS_PORT:-19530}"
+      MILVUS_ENABLED: "${MILVUS_ENABLED:-true}"
+      MILVUS_READ_ENABLED: "${MILVUS_READ_ENABLED:-true}"
+      MILVUS_WRITE_ENABLED: "${MILVUS_WRITE_ENABLED:-true}"
+      MILVUS_FALLBACK_ENABLED: "${MILVUS_FALLBACK_ENABLED:-true}"
+      MILVUS_ROLLOUT_PERCENT: "${MILVUS_ROLLOUT_PERCENT:-100}"
+      MILVUS_WRITE_FAIL_POLICY: "${MILVUS_WRITE_FAIL_POLICY:-warn}"
+    networks:
+      - momentseek
+
+networks:
+  momentseek:
+    name: momentseek-mvp-net
