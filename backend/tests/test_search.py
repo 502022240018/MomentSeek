@@ -374,7 +374,10 @@ def test_semantic_query_is_encoded_once_per_model_per_request(tmp_path):
         calls.append((text, model)) or np.asarray([1.0, 0.0], dtype=np.float32)
     )
     cache = {}
-    manifest = {"semantic_model_key": "semantic-a"}
+    manifest = {
+        "semantic_model_key": "semantic-a",
+        "semantic_status": "complete",
+    }
     embeddings = np.ones((1, 2), dtype=np.float32)
 
     first = engine._semantic_query("hello", manifest, embeddings, cache, None)
@@ -397,7 +400,7 @@ def test_retrieval_profiler_accumulates_timings_and_counters():
     assert snapshot["counters"]["milvus"]["visual_rows"] == 15
 
 
-def test_prewarm_loads_and_reports_resident_query_models(tmp_path):
+def test_prewarm_loads_visual_default_and_reports_resident_models(tmp_path):
     settings = Settings(
         _env_file=None,
         app_data_dir=tmp_path / "runtime",
@@ -407,7 +410,6 @@ def test_prewarm_loads_and_reports_resident_query_models(tmp_path):
     )
     engine = SearchEngine(settings, Catalog(settings.db_path))
     visual_calls = []
-    text_calls = []
 
     class StubVisual:
         def encode_queries(self, texts, image_path, alpha=0.5):
@@ -418,21 +420,20 @@ def test_prewarm_loads_and_reports_resident_query_models(tmp_path):
         engine._clip_encoders.setdefault(model, StubVisual())
     )
 
-    def fake_text(text, model, profiler=None):
-        text_calls.append((text, model))
-        engine._text_encoders[(model, "cpu")] = object()
-        return np.asarray([1.0, 0.0], dtype=np.float32)
-
-    engine._encode_asr_query = fake_text  # type: ignore[method-assign]
+    engine._encode_asr_query = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("no semantic-complete index requires a text model")
+        )
+    )
 
     status = engine.prewarm()
 
     assert status["status"] == "ready"
     assert status["resident"] is True
     assert status["visual_models"] == [settings.visual_model]
-    assert status["text_models"] == [settings.asr_semantic_model]
+    assert status["text_models"] == []
+    assert status["requested_text_models"] == []
     assert len(visual_calls) == 1
-    assert len(text_calls) == 1
 
 
 def test_prewarm_scans_deduplicated_manifest_model_keys(tmp_path):
@@ -465,6 +466,7 @@ def test_prewarm_scans_deduplicated_manifest_model_keys(tmp_path):
         "asr": {
             "file": "asr.npz",
             "semantic_model_key": "semantic-from-manifest",
+            "semantic_status": "complete",
         }
     })
     np.savez_compressed(asr_dir / "asr.npz", value=np.asarray([1]))
@@ -496,12 +498,156 @@ def test_prewarm_scans_deduplicated_manifest_model_keys(tmp_path):
         settings.visual_model,
         "chinese-clip-vit-b16",
     }
-    assert set(text_calls) == {
-        settings.asr_semantic_model,
-        "semantic-from-manifest",
-    }
+    assert set(text_calls) == {"semantic-from-manifest"}
     assert status["requested_visual_models"] == sorted(set(visual_calls))
     assert status["requested_text_models"] == sorted(set(text_calls))
+
+
+def test_prewarm_ignores_disabled_and_failed_semantic_models(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        search_prewarm_enabled=True,
+        search_prewarm_required=True,
+    )
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    for channel, semantic_status in (
+        ("asr", "disabled"),
+        ("ocr", "failed"),
+    ):
+        video_id = f"{channel}-{semantic_status}"
+        index_dir = _create_video(settings, catalog, video_id=video_id)
+        catalog.update_video(video_id, indexed_modalities=[channel])
+        _write_manifest(index_dir, video_id, {
+            channel: {
+                "file": f"{channel}.npz",
+                "semantic_model_key": f"unused-{channel}-model",
+                "semantic_status": semantic_status,
+            }
+        })
+        np.savez_compressed(
+            index_dir / f"{channel}.npz",
+            value=np.asarray([1]),
+        )
+
+    engine = SearchEngine(settings, catalog)
+
+    class StubVisual:
+        def encode_queries(self, texts, image_path, alpha=0.5):
+            return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    engine._clip = (  # type: ignore[method-assign]
+        lambda model=None, profiler=None: engine._clip_encoders.setdefault(
+            model,
+            StubVisual(),
+        )
+    )
+    text_calls = []
+    engine._encode_asr_query = (  # type: ignore[method-assign]
+        lambda text, model, profiler=None: text_calls.append(model)
+    )
+
+    status = engine.prewarm()
+
+    assert status["status"] == "ready"
+    assert status["requested_text_models"] == []
+    assert status["text_models"] == []
+    assert text_calls == []
+
+
+def test_prewarm_discovers_complete_ocr_model_when_asr_semantic_is_disabled(
+    tmp_path,
+):
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        search_prewarm_enabled=True,
+        asr_semantic_enabled=False,
+        ocr_semantic_enabled=True,
+    )
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    index_dir = _create_video(settings, catalog, video_id="ocr-semantic")
+    catalog.update_video("ocr-semantic", indexed_modalities=["ocr"])
+    _write_manifest(index_dir, "ocr-semantic", {
+        "ocr": {
+            "file": "ocr.npz",
+            "semantic_model_key": "ocr-semantic-model",
+            "semantic_status": "complete",
+        }
+    })
+    np.savez_compressed(index_dir / "ocr.npz", value=np.asarray([1]))
+    engine = SearchEngine(settings, catalog)
+
+    class StubVisual:
+        def encode_queries(self, texts, image_path, alpha=0.5):
+            return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    engine._clip = (  # type: ignore[method-assign]
+        lambda model=None, profiler=None: engine._clip_encoders.setdefault(
+            model,
+            StubVisual(),
+        )
+    )
+
+    def fake_text(text, model, profiler=None):
+        engine._text_encoders[(model, "cpu")] = object()
+        return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    engine._encode_asr_query = fake_text  # type: ignore[method-assign]
+
+    status = engine.prewarm()
+
+    assert status["status"] == "ready"
+    assert status["requested_text_models"] == ["ocr-semantic-model"]
+    assert status["text_models"] == ["ocr-semantic-model"]
+
+
+def test_required_prewarm_fails_for_missing_complete_semantic_model(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        search_prewarm_enabled=True,
+        search_prewarm_required=True,
+    )
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    index_dir = _create_video(settings, catalog, video_id="asr-semantic")
+    catalog.update_video("asr-semantic", indexed_modalities=["asr"])
+    _write_manifest(index_dir, "asr-semantic", {
+        "asr": {
+            "file": "asr.npz",
+            "semantic_model_key": "missing-semantic-model",
+            "semantic_status": "complete",
+        }
+    })
+    np.savez_compressed(index_dir / "asr.npz", value=np.asarray([1]))
+    engine = SearchEngine(settings, catalog)
+
+    class StubVisual:
+        def encode_queries(self, texts, image_path, alpha=0.5):
+            return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    engine._clip = (  # type: ignore[method-assign]
+        lambda model=None, profiler=None: engine._clip_encoders.setdefault(
+            model,
+            StubVisual(),
+        )
+    )
+    engine._encode_asr_query = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            FileNotFoundError("missing semantic model")
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="missing-semantic-model"):
+        engine.prewarm()
+
+    assert engine.query_model_status()["status"] == "error"
 
 
 def test_query_model_status_reads_encoder_maps_under_lock(tmp_path):
@@ -550,7 +696,14 @@ def test_asr_v3_lexical_search_uses_chunk_times_and_texts(tmp_path):
         embedding_chunk_indices=np.empty((0,), dtype=np.int32),
     )
 
-    results = SearchEngine(settings, catalog).search("电影投资", None, ["asr"], ["video-1"])
+    engine = SearchEngine(settings, catalog)
+    engine._encode_asr_query = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled semantic index must not encode a query")
+        )
+    )
+
+    results = engine.search("电影投资", None, ["asr"], ["video-1"])
 
     assert len(results) == 1
     assert results[0]["start_time"] == 10
@@ -689,7 +842,14 @@ def test_ocr_v3_search_groups_box_text_by_frame(tmp_path):
         boxes=np.zeros((4, 4, 2), dtype=np.float32),
     )
 
-    results = SearchEngine(settings, catalog).search("FIFA", None, ["ocr"], ["video-1"])
+    engine = SearchEngine(settings, catalog)
+    engine._encode_asr_query = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled semantic index must not encode a query")
+        )
+    )
+
+    results = engine.search("FIFA", None, ["ocr"], ["video-1"])
 
     assert len(results) == 1
     assert results[0]["start_time"] == 5

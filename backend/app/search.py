@@ -1229,11 +1229,7 @@ class SearchEngine:
     ) -> tuple[set[str], set[str], list[dict[str, str]]]:
         """Return deduplicated model keys used by currently searchable indexes."""
         visual_models = {self.settings.visual_model}
-        text_models = (
-            {self.settings.asr_semantic_model}
-            if self.settings.asr_semantic_enabled
-            else set()
-        )
+        text_models: set[str] = set()
         errors: list[dict[str, str]] = []
         for video in self._selected_videos(None):
             indexed = set(video.get("indexed_modalities") or [])
@@ -1258,13 +1254,12 @@ class SearchEngine:
                             or self.settings.visual_model
                         )
                     )
-                elif self.settings.asr_semantic_enabled:
-                    text_models.add(
-                        str(
-                            channel_manifest.get("semantic_model_key")
-                            or self.settings.asr_semantic_model
-                        )
+                else:
+                    model_name = self._semantic_model_for_channel(
+                        channel_manifest
                     )
+                    if model_name is not None:
+                        text_models.add(model_name)
         return visual_models, text_models, errors
 
     def query_model_status(self) -> dict:
@@ -1374,7 +1369,9 @@ class SearchEngine:
     ) -> np.ndarray | None:
         if embeddings is None:
             return None
-        model_name = str(channel_manifest.get("semantic_model_key") or self.settings.asr_semantic_model)
+        model_name = self._semantic_model_for_channel(channel_manifest)
+        if model_name is None:
+            return None
         if model_name not in semantic_queries:
             try:
                 semantic_queries[model_name] = (
@@ -1385,6 +1382,21 @@ class SearchEngine:
             except Exception:
                 semantic_queries[model_name] = None
         return semantic_queries[model_name]
+
+    def _semantic_model_for_channel(
+        self,
+        channel_manifest: dict,
+    ) -> str | None:
+        """Return the model only when this indexed channel has semantic data."""
+        semantic_status = str(
+            channel_manifest.get("semantic_status") or ""
+        ).strip().casefold()
+        if semantic_status != "complete":
+            return None
+        return str(
+            channel_manifest.get("semantic_model_key")
+            or self.settings.asr_semantic_model
+        )
 
     def _asr_for_video(
         self,
@@ -1397,10 +1409,7 @@ class SearchEngine:
         _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "asr")
         with np.load(index_file, allow_pickle=False) as data:
             embeddings, indices = _semantic_arrays(data)
-            model_name = str(
-                channel_manifest.get("semantic_model_key")
-                or self.settings.asr_semantic_model
-            )
+            model_name = self._semantic_model_for_channel(channel_manifest)
             return _asr_candidates(
                 _asr_chunks_from_npz(data),
                 text,
@@ -1408,7 +1417,11 @@ class SearchEngine:
                 limit,
                 semantic_embeddings=embeddings,
                 embedding_chunk_indices=indices,
-                semantic_query=semantic_queries.get(model_name),
+                semantic_query=(
+                    semantic_queries.get(model_name)
+                    if model_name is not None
+                    else None
+                ),
             )
 
     def _ocr_for_video(
@@ -1426,11 +1439,11 @@ class SearchEngine:
             embeddings, indices = _ocr_semantic_arrays(data)
             semantic_query = None
             if embeddings is not None:
-                model_name = str(
-                    channel_manifest.get("semantic_model_key")
-                    or self.settings.asr_semantic_model
+                model_name = self._semantic_model_for_channel(
+                    channel_manifest
                 )
-                semantic_query = semantic_queries.get(model_name)
+                if model_name is not None:
+                    semantic_query = semantic_queries.get(model_name)
             return _asr_candidates(
                 _ocr_chunks_from_npz(data),
                 text,
@@ -1544,11 +1557,12 @@ class SearchEngine:
             _manifest, channel_manifest, _index_file = _channel_manifest_for(
                 video, index_dir, "asr"
             )
-            model_name = str(
-                channel_manifest.get("semantic_model_key")
-                or self.settings.asr_semantic_model
+            model_name = self._semantic_model_for_channel(channel_manifest)
+            semantic_query = (
+                semantic_queries.get(model_name)
+                if model_name is not None
+                else None
             )
-            semantic_query = semantic_queries.get(model_name)
             candidates.extend(milvus_asr_candidates(
                 client,
                 video_id,
@@ -1562,11 +1576,12 @@ class SearchEngine:
             _manifest, channel_manifest, _index_file = _channel_manifest_for(
                 video, index_dir, "ocr"
             )
-            model_name = str(
-                channel_manifest.get("semantic_model_key")
-                or self.settings.asr_semantic_model
+            model_name = self._semantic_model_for_channel(channel_manifest)
+            semantic_query = (
+                semantic_queries.get(model_name)
+                if model_name is not None
+                else None
             )
-            semantic_query = semantic_queries.get(model_name)
             candidates.extend(milvus_ocr_candidates(
                 client,
                 video_id,
@@ -1647,13 +1662,16 @@ class SearchEngine:
                     _manifest, channel_manifest, _index_file = (
                         _channel_manifest_for(video, index_dir, channel)
                     )
-                    self._semantic_query(
-                        text,
-                        channel_manifest,
-                        np.empty((1, 1), dtype=np.float32),
-                        semantic_queries,
-                        profiler,
-                    )
+                    if self._semantic_model_for_channel(
+                        channel_manifest
+                    ) is not None:
+                        self._semantic_query(
+                            text,
+                            channel_manifest,
+                            np.empty((1, 1), dtype=np.float32),
+                            semantic_queries,
+                            profiler,
+                        )
 
     def search(
         self,
