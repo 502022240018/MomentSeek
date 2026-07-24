@@ -113,7 +113,7 @@ def hf_snapshot_exists(target: Path, model_id: str) -> bool:
 def verify_non_hf_target(kind: str, target: Path, model_id: str) -> bool:
     if kind == "directory":
         return has_non_empty_file_with_suffix(
-            target, {".onnx", ".pt", ".bin", ".safetensors"}
+            target, {".onnx", ".om", ".pt", ".bin", ".safetensors"}
         )
     if kind == "insightface":
         return has_non_empty_file_with_suffix(target, {".onnx"})

@@ -1,7 +1,10 @@
 import time
 
+from app.db import Catalog
 from app.indexer_daemon import next_queued_job
+from app.indexer_daemon import execute_job
 from app.model_pool import ModelPool
+from app.settings import Settings
 
 
 def test_pool_caches_by_key():
@@ -97,3 +100,51 @@ def test_next_queued_job_oldest_first():
 def test_next_queued_job_none_when_no_queued():
     jobs = [{"id": "x", "status": "completed", "created_at": "2026-06-26 00:00:00"}]
     assert next_queued_job(_FakeCatalog(jobs)) is None
+
+
+def test_daemon_dispatches_stage_to_isolated_pool(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        npu_worker_mode="isolated",
+    )
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    video_path = settings.upload_dir / "video.mp4"
+    video_path.write_bytes(b"fake")
+    catalog.create_video({
+        "id": "video-1",
+        "name": "demo.mp4",
+        "file_path": str(video_path),
+        "duration": 1.0,
+        "fps": 25.0,
+        "width": 1280,
+        "height": 720,
+        "status": "uploaded",
+    })
+    catalog.create_job({
+        "id": "job-1",
+        "video_id": "video-1",
+        "status": "queued",
+        "stage": "queued",
+        "progress": 0,
+        "modalities": ["visual"],
+        "options": {"visual_sample_fps": 1.0},
+    })
+
+    class FakeIsolatedPool:
+        def __init__(self):
+            self.calls = []
+
+        def run_stage(self, stage, video, options):
+            self.calls.append((stage, video["id"], options))
+            return {"frames": 2, "isolated_worker_pid": 456}
+
+    pool = FakeIsolatedPool()
+    execute_job("job-1", settings, catalog, pool)
+
+    job = catalog.get_job("job-1")
+    assert pool.calls == [("visual", "video-1", {"visual_sample_fps": 1.0})]
+    assert job["status"] == "completed"
+    assert job["metrics"]["stages"]["visual"]["isolated_worker_pid"] == 456

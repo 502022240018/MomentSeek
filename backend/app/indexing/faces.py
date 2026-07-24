@@ -39,7 +39,15 @@ def _iou(first: np.ndarray, second: np.ndarray) -> float:
 
 
 class FaceEncoder:
-    def __init__(self, model_name: str, provider: str = "cpu", device_id: int = 0, root: str | None = None):
+    def __init__(
+        self,
+        model_name: str,
+        provider: str = "cpu",
+        device_id: int = 0,
+        root: str | None = None,
+        ort_intra_op_threads: int = 8,
+        ort_inter_op_threads: int = 1,
+    ):
         face_root = _resolve_insightface_root(root, model_name)
         import onnxruntime as ort
 
@@ -57,7 +65,21 @@ class FaceEncoder:
         else:
             providers = ["CPUExecutionProvider"]
             ctx_id = -1
-        self.app = FaceAnalysis(name=model_name, providers=providers, root=str(face_root))
+        analysis_options = {
+            "name": model_name,
+            "providers": providers,
+            "root": str(face_root),
+            "allowed_modules": ["detection", "recognition"],
+        }
+        if provider != "cann":
+            # The Ascend ORT build currently fails CANN graph initialization
+            # when an explicit SessionOptions object is supplied. Bound the
+            # CPU query encoder, but leave CANN session creation to the EP.
+            session_options = ort.SessionOptions()
+            session_options.intra_op_num_threads = max(1, int(ort_intra_op_threads))
+            session_options.inter_op_num_threads = max(1, int(ort_inter_op_threads))
+            analysis_options["sess_options"] = session_options
+        self.app = FaceAnalysis(**analysis_options)
         self.app.prepare(ctx_id=ctx_id, det_size=(640, 640))
         self.provider = provider
 
@@ -100,11 +122,20 @@ def build_face_index(
     encoder: "FaceEncoder | None" = None,
     decode_height: int = 0,
     prefer_ffmpeg: bool = True,
+    ort_intra_op_threads: int = 8,
+    ort_inter_op_threads: int = 1,
 ) -> dict:
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
     if encoder is None:
-        encoder = FaceEncoder(model_name, provider, device_id, model_root)
+        encoder = FaceEncoder(
+            model_name,
+            provider,
+            device_id,
+            model_root,
+            ort_intra_op_threads,
+            ort_inter_op_threads,
+        )
     active: list[Track] = []
     finished: list[Track] = []
     next_number = 0

@@ -11,9 +11,9 @@ EXPERIMENT_NAME="${EXPERIMENT_NAME:-momentseek-ppocr-rec-dynamic-width}"
 IMAGE_NAME="${IMAGE_NAME:-$(docker container inspect --format '{{.Config.Image}}' "$PLATFORM_CONTAINER")}"
 ONNX_HOST="${MODEL_DIR}/rapidocr/PP-OCRv6_rec_small.onnx"
 OUTPUT_DIR_HOST="${MODEL_DIR}/rapidocr/ascend/910b4-cann9-profile/rec-dynamic-width-b5"
-OM_HOST="${OUTPUT_DIR_HOST}/PP-OCRv6_rec_small-b5-dynamic-width.om"
+OM_HOST="${OUTPUT_DIR_HOST}/PP-OCRv6_rec_small-b5-dynamic-width-1600.om"
 REPORT_HOST="${LOG_DIR}/ppocr-rec-dynamic-width.json"
-WIDTHS=(320 384 448 512 576 640 704 768 812 832 896 960 1024)
+WIDTHS=(320 384 448 512 576 640 704 768 812 832 896 960 1024 1088 1152 1216 1280 1344 1408 1472 1536 1600)
 
 fail() { printf '\nPPOCR_REC_DYNAMIC_WIDTH_FAILED: %s\n' "$*" >&2; exit 1; }
 trap 'printf "\nPPOCR_REC_DYNAMIC_WIDTH_FAILED_AT_LINE=%s\n" "$LINENO" >&2' ERR
@@ -42,7 +42,7 @@ docker run --rm --name "$EXPERIMENT_NAME" \
     set -eu
     export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
     . /usr/local/Ascend/cann/set_env.sh
-    om=/app/models/rapidocr/ascend/910b4-cann9-profile/rec-dynamic-width-b5/PP-OCRv6_rec_small-b5-dynamic-width.om
+    om=/app/models/rapidocr/ascend/910b4-cann9-profile/rec-dynamic-width-b5/PP-OCRv6_rec_small-b5-dynamic-width-1600.om
     mkdir -p "$(dirname "$om")"
     if [ ! -f "$om" ]; then
       atc \

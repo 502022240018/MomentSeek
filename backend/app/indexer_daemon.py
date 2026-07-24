@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 import traceback
+import os
 
 from app.db import Catalog
 from app.indexing.pipeline_manifest import write_stage_manifest
@@ -77,7 +78,17 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
 
         root = str(settings.app_model_dir / "insightface")
         key = f"face:{settings.face_model}:{settings.face_provider}:{settings.npu_device_id}"
-        encoder = pool.get(key, lambda: FaceEncoder(settings.face_model, settings.face_provider, settings.npu_device_id, root))
+        encoder = pool.get(
+            key,
+            lambda: FaceEncoder(
+                settings.face_model,
+                settings.face_provider,
+                settings.npu_device_id,
+                root,
+                settings.face_ort_intra_op_threads,
+                settings.face_ort_inter_op_threads,
+            ),
+        )
         result = build_face_index(
             video_path=video_path,
             output_path=str(video_index_dir / "face.npz"),
@@ -89,6 +100,8 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             encoder=encoder,
             decode_height=settings.face_decode_height,
             prefer_ffmpeg=settings.frame_reader == "ffmpeg",
+            ort_intra_op_threads=settings.face_ort_intra_op_threads,
+            ort_inter_op_threads=settings.face_ort_inter_op_threads,
         )
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result
@@ -132,6 +145,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             device = "npu" if settings.npu_enabled else "cpu"
         model_root = str(settings.app_model_dir / "rapidocr")
         key = f"ocr:{settings.ocr_engine}:{settings.ocr_version}:{settings.ocr_model_type}:{device}:{settings.npu_device_id}"
+        backend_pool_started = time.perf_counter()
         backend = pool.get(
             key,
             lambda: create_ocr_backend(
@@ -147,6 +161,7 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
                 acl_model_dir=str(settings.app_model_dir / settings.ocr_acl_model_dir),
             ),
         )
+        backend_pool_elapsed = time.perf_counter() - backend_pool_started
         result = build_ocr_index(
             video_path=video_path,
             output_path=str(video_index_dir / "ocr.npz"),
@@ -173,16 +188,17 @@ def _stage_runner(stage: str, video: dict, options: dict, settings: Settings, po
             acl_model_dir=str(settings.app_model_dir / settings.ocr_acl_model_dir),
             backend=backend,
         )
+        result["backend_pool_get_elapsed_seconds"] = round(backend_pool_elapsed, 3)
         write_stage_manifest(stage, index_dir=video_index_dir, video=video, options=options, settings=settings, result=result)
         return result
     raise ValueError(f"未知索引阶段: {stage}")
 
 
-def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool: ModelPool) -> None:
+def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool) -> None:
     job = catalog.get_job(job_id)
     if not job:
         return
-    if not catalog.claim_queued_job(job_id):
+    if not catalog.claim_queued_job(job_id, worker_pid=os.getpid()):
         return
     video = catalog.get_video(job["video_id"])
     if not video:
@@ -200,7 +216,10 @@ def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool: ModelPo
         for index, stage in enumerate(stages):
             stage_start = time.perf_counter()
             catalog.update_job(job_id, stage=stage, progress=round(index / max(1, len(stages)), 3))
-            result = _stage_runner(stage, video, options, settings, pool)
+            if hasattr(pool, "run_stage"):
+                result = pool.run_stage(stage, video, options)
+            else:
+                result = _stage_runner(stage, video, options, settings, pool)
             metrics["stages"][stage] = {
                 "elapsed_seconds": round(time.perf_counter() - stage_start, 3),
                 "status": "completed",
@@ -230,8 +249,23 @@ def next_queued_job(catalog: Catalog) -> dict | None:
 def main() -> None:
     settings = get_settings()
     catalog = Catalog(settings.db_path)
-    pool = ModelPool(idle_timeout=settings.indexer_idle_timeout_seconds)
-    print(f"[indexer-daemon] up; idle_timeout={settings.indexer_idle_timeout_seconds}s poll={settings.indexer_poll_seconds}s", flush=True)
+    worker_mode = settings.npu_worker_mode.strip().casefold()
+    if worker_mode == "isolated":
+        from app.isolated_stage_workers import IsolatedStageWorkerPool
+
+        pool = IsolatedStageWorkerPool(
+            start_timeout_seconds=settings.indexer_worker_start_timeout_seconds,
+            max_attempts=settings.indexer_stage_max_attempts,
+        )
+    elif worker_mode == "legacy":
+        pool = ModelPool(idle_timeout=settings.indexer_idle_timeout_seconds)
+    else:
+        raise ValueError(f"NPU_WORKER_MODE must be legacy or isolated, got: {settings.npu_worker_mode}")
+    print(
+        f"[indexer-daemon] up; worker_mode={worker_mode} "
+        f"idle_timeout={settings.indexer_idle_timeout_seconds}s poll={settings.indexer_poll_seconds}s",
+        flush=True,
+    )
     try:
         while True:
             job = next_queued_job(catalog)

@@ -63,6 +63,11 @@ def _host_monitor_max(path: Path) -> dict[str, int]:
 def _diagnosis(cases: dict[str, dict[str, Any]]) -> list[str]:
     passed = {name: bool(value.get("success")) for name, value in cases.items()}
     lines: list[str] = []
+    if set(cases) != set(CASES):
+        failed = [name for name, success in passed.items() if not success]
+        if failed:
+            return [f"Selected probe(s) failed: {', '.join(failed)}."]
+        return ["All selected probes passed; run the full four-case matrix before assigning a cross-stage cause."]
     if not passed["semantic_only"]:
         lines.append("A semantic_only failed: pure CPU semantic/OpenBLAS is independently unhealthy.")
     if not passed["ocr_only"]:
@@ -81,11 +86,16 @@ def _diagnosis(cases: dict[str, dict[str, Any]]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--suite-dir", type=Path, required=True)
+    parser.add_argument("--cases", default=",".join(CASES))
     args = parser.parse_args()
+    selected_cases = tuple(name.strip() for name in args.cases.split(",") if name.strip())
+    unsupported = [name for name in selected_cases if name not in CASES]
+    if not selected_cases or unsupported:
+        parser.error(f"unsupported or empty --cases value: {args.cases}")
 
     case_reports: dict[str, dict[str, Any]] = {}
     rows = []
-    for name in CASES:
+    for name in selected_cases:
         case_dir = args.suite_dir / "cases" / name
         report = _read_json(case_dir / "report.json")
         log = (case_dir / "case.log").read_text(encoding="utf-8", errors="replace") if (case_dir / "case.log").is_file() else ""
