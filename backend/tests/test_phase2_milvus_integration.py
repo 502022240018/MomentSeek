@@ -8,7 +8,9 @@ def test_texts_from_milvus_success():
     from app.speaker_service import _texts_from_milvus
 
     # Mock the Milvus client
-    with patch('app.speaker_service.get_milvus_client') as mock_get_client:
+    with patch(
+        'app.speaker_service.ensure_milvus_reachable'
+    ), patch('app.speaker_service.get_milvus_client') as mock_get_client:
         mock_client = MagicMock()
         mock_collection = Mock()
         mock_client.collection_for.return_value = mock_collection
@@ -35,7 +37,9 @@ def test_texts_from_milvus_empty():
     """Test Milvus returning no data."""
     from app.speaker_service import _texts_from_milvus
 
-    with patch('app.speaker_service.get_milvus_client') as mock_get_client:
+    with patch(
+        'app.speaker_service.ensure_milvus_reachable'
+    ), patch('app.speaker_service.get_milvus_client') as mock_get_client:
         mock_client = MagicMock()
         mock_collection = Mock()
         mock_client.collection_for.return_value = mock_collection
