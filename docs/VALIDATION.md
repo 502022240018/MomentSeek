@@ -35,6 +35,34 @@ pytest
 pytest tests/test_search.py -v
 ```
 
+## GitHub 自动测试
+
+`.github/workflows/ci.yml` 在每个 Pull Request、`main` 分支 push 和手动触发时运行：
+
+- `python -m ruff check backend/app`
+- `python -m pytest backend/tests -m "not integration" -q`
+- `npm ci`
+- `npm run build`
+
+CI 使用 `backend/requirements-ci.txt`，不安装 Torch、FunASR、InsightFace 或
+Ascend/NPU 运行栈。模型运行时由单元测试 mock；真实 NPU 测试仍需专用
+Ascend Runner。
+
+`.github/workflows/milvus-integration.yml` 在 Milvus 相关文件变化、每天
+`18:00 UTC`（北京时间次日 `02:00`）或手动触发时运行。工作流会启动独立的
+Milvus、etcd 和 MinIO 容器，只在临时集合中验证连接、schema、批量写入和幂等
+upsert，结束后销毁容器和 volume，不连接正式服务器。
+
+本地运行对应测试：
+
+```powershell
+$env:RUN_MILVUS_INTEGRATION_TESTS = "1"
+$env:MILVUS_ENABLED = "true"
+$env:MILVUS_HOST = "127.0.0.1"
+$env:MILVUS_PORT = "19530"
+python -m pytest backend/tests/test_milvus_connection.py -m integration -q
+```
+
 ## 本地基础 API smoke check
 
 后端启动后，在仓库根目录运行：
