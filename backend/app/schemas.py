@@ -223,3 +223,6 @@ class HealthResponse(BaseModel):
     npu_worker_mode: str
     orchestration_enabled: bool = False
     orchestration_profile: str | None = None
+    milvus_enabled: bool = False
+    milvus_primary: bool = False
+    milvus_fallback_enabled: bool = True

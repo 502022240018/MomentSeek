@@ -12,9 +12,142 @@ from app.indexing.speaker import load_speaker_index
 SPEAKER_PREVIEW_UTTERANCES = 5
 
 
-def _texts(asr_path: Path) -> list[str]:
+def get_milvus_client():
+    from app.indexing.milvus_client import get_milvus_client as factory
+
+    return factory()
+
+
+def milvus_read_enabled() -> bool:
+    from app.indexing.milvus_flags import milvus_read_enabled as enabled
+
+    return enabled()
+
+
+def _texts(asr_path: Path, video_id: str | None = None) -> list[str]:
+    if video_id is not None and milvus_read_enabled():
+        texts = _texts_from_milvus(video_id)
+        if texts:
+            return texts
     with np.load(asr_path, allow_pickle=False) as data:
         return [str(value) for value in data["texts"]]
+
+
+def _milvus_rows(video_id: str, modality: str, fields: list[str]) -> list[dict]:
+    collection = get_milvus_client().collection_for(modality)
+    expression = f'video_id == "{video_id}"'
+    rows: list[dict] = []
+    if hasattr(collection, "query_iterator"):
+        iterator = collection.query_iterator(
+            batch_size=2000,
+            expr=expression,
+            output_fields=fields,
+        )
+        try:
+            while True:
+                page = iterator.next()
+                if not page:
+                    break
+                rows.extend(page)
+        finally:
+            iterator.close()
+    else:
+        rows = collection.query(
+            expr=expression,
+            output_fields=fields,
+            limit=16_384,
+        )
+    return rows
+
+
+def _texts_for_video(index_dir: Path, video_id: str) -> list[str]:
+    if milvus_read_enabled():
+        try:
+            texts = _texts_from_milvus(video_id)
+            if texts:
+                return texts
+        except Exception:
+            pass
+    path = index_dir / video_id / "asr.npz"
+    return _texts(path) if path.exists() else []
+
+
+def _texts_from_milvus(video_id: str) -> list[str]:
+    try:
+        rows = get_milvus_client().collection_for("asr").query(
+            expr=f'video_id == "{video_id}"',
+            output_fields=["segment_idx", "text"],
+            limit=16_384,
+        )
+    except Exception:
+        return []
+    if not rows:
+        return []
+    values = {
+        int(row.get("segment_idx") or 0): str(row.get("text") or "")
+        for row in rows
+    }
+    return [values.get(index, "") for index in range(max(values) + 1)]
+
+
+def _speaker_data_from_milvus(video_id: str) -> dict[str, np.ndarray] | None:
+    rows = _milvus_rows(
+        video_id,
+        "speaker",
+        [
+            "utterance_idx",
+            "start_ms",
+            "end_ms",
+            "asr_chunk_idx",
+            "track_id",
+            "embedding",
+        ],
+    )
+    if not rows:
+        return None
+    rows.sort(key=lambda row: int(row.get("utterance_idx") or 0))
+    embeddings = np.asarray([row["embedding"] for row in rows], dtype=np.float32)
+    embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
+    times = np.asarray([
+        [int(row.get("start_ms") or 0), int(row.get("end_ms") or 0)]
+        for row in rows
+    ], dtype=np.int32)
+    refs = np.asarray([
+        [int(row.get("asr_chunk_idx") or 0), int(row.get("track_id") or 0)]
+        for row in rows
+    ], dtype=np.int32)
+    track_ids = refs[:, 1]
+    track_count = int(track_ids.max()) + 1 if len(track_ids) else 0
+    track_embeddings = np.zeros((track_count, embeddings.shape[1]), dtype=np.float32)
+    representatives = np.full((track_count,), -1, dtype=np.int32)
+    for track_id in range(track_count):
+        members = np.flatnonzero(track_ids == track_id)
+        if not len(members):
+            continue
+        center = embeddings[members].mean(axis=0)
+        center /= max(float(np.linalg.norm(center)), 1e-12)
+        track_embeddings[track_id] = center
+        representatives[track_id] = int(
+            members[int(np.argmax(embeddings[members] @ center))]
+        )
+    return {
+        "utterance_embeddings": embeddings.astype(np.float16),
+        "utterance_times_ms": times,
+        "utterance_refs": refs,
+        "track_embeddings": track_embeddings.astype(np.float16),
+        "track_representative_indices": representatives,
+    }
+
+
+def _load_speaker_data(path: Path, video_id: str) -> dict[str, np.ndarray]:
+    if milvus_read_enabled():
+        try:
+            data = _speaker_data_from_milvus(video_id)
+            if data is not None:
+                return data
+        except Exception:
+            pass
+    return load_speaker_index(path)
 
 
 def _speaker_utterances(data: dict, texts: list[str], overlays: dict, video_id: str) -> list[dict]:
@@ -122,11 +255,8 @@ def _speaker_track_view(
 
 def video_speakers(index_dir: Path, catalog: Catalog, video_id: str) -> dict:
     speaker_path = index_dir / video_id / "speaker.npz"
-    asr_path = index_dir / video_id / "asr.npz"
-    if not speaker_path.exists() or not asr_path.exists():
-        raise FileNotFoundError("该视频尚未构建 Speaker 索引")
-    data = load_speaker_index(speaker_path)
-    texts = _texts(asr_path)
+    data = _load_speaker_data(speaker_path, video_id)
+    texts = _texts_for_video(index_dir, video_id)
     overlays = catalog.speaker_overlays(video_id)
     utterances = _speaker_utterances(data, texts, overlays, video_id)
     track_ids = _speaker_track_ids(data, utterances)
@@ -155,7 +285,7 @@ def voice_search(
     video_ids: list[str] | None = None, limit: int = 50,
 ) -> list[dict]:
     query_path = index_dir / query_video_id / "speaker.npz"
-    query = load_speaker_index(query_path)
+    query = _load_speaker_data(query_path, query_video_id)
     if not 0 <= query_utterance_index < len(query["utterance_embeddings"]):
         raise IndexError("查询声音不存在")
     query_vector = query["utterance_embeddings"][query_utterance_index].astype(np.float32)
@@ -174,6 +304,24 @@ def voice_search_vectors(
     if queries.ndim != 2 or not len(queries):
         raise ValueError("没有有效查询声纹")
     queries /= np.maximum(np.linalg.norm(queries, axis=1, keepdims=True), 1e-12)
+    from app.indexing.milvus_flags import (
+        milvus_fallback_enabled,
+        milvus_read_enabled,
+    )
+
+    if milvus_read_enabled():
+        try:
+            return _voice_search_vectors_milvus(
+                index_dir,
+                catalog,
+                queries=queries,
+                video_ids=video_ids,
+                limit=limit,
+                exclude=exclude,
+            )
+        except Exception:
+            if not milvus_fallback_enabled():
+                raise
     selected = set(video_ids) if video_ids else None
     hits = []
     for video in catalog.list_videos():
@@ -181,9 +329,10 @@ def voice_search_vectors(
         if selected is not None and video_id not in selected:
             continue
         path = index_dir / video_id / "speaker.npz"
-        if not path.exists():
+        try:
+            data = _load_speaker_data(path, video_id)
+        except FileNotFoundError:
             continue
-        data = load_speaker_index(path)
         vectors = data["utterance_embeddings"].astype(np.float32)
         if not len(vectors):
             continue
@@ -211,7 +360,71 @@ def voice_search_vectors(
     hits.sort(key=lambda item: item["score"], reverse=True)
     texts_by_video: dict[str, list[str]] = {}
     for hit in hits[:limit]:
-        texts = texts_by_video.setdefault(hit["video_id"], _texts(index_dir / hit["video_id"] / "asr.npz"))
+        texts = texts_by_video.setdefault(
+            hit["video_id"], _texts_for_video(index_dir, hit["video_id"])
+        )
         index = hit["asr_chunk_index"]
         hit["text"] = texts[index] if 0 <= index < len(texts) else ""
+    return hits[:limit]
+
+
+def _voice_search_vectors_milvus(
+    index_dir: Path,
+    catalog: Catalog,
+    *,
+    queries: np.ndarray,
+    video_ids: list[str] | None,
+    limit: int,
+    exclude: tuple[str, int] | None,
+) -> list[dict]:
+    from app.indexing.milvus_client import get_milvus_client
+    from app.indexing.milvus_search import milvus_speaker_candidates
+
+    client = get_milvus_client()
+    selected = set(video_ids) if video_ids else None
+    hits: list[dict] = []
+    for video in catalog.list_videos():
+        video_id = video["id"]
+        if selected is not None and video_id not in selected:
+            continue
+        best_by_utterance = {}
+        for query in queries:
+            for candidate in milvus_speaker_candidates(
+                client, video_id, query, limit, threshold=-1.0
+            ):
+                previous = best_by_utterance.get(candidate.unit_id)
+                if previous is None or candidate.score > previous.score:
+                    best_by_utterance[candidate.unit_id] = candidate
+        overlays = catalog.speaker_overlays(video_id)["utterances"]
+        for utterance_index, candidate in best_by_utterance.items():
+            if exclude == (video_id, int(utterance_index)):
+                continue
+            override = overlays.get(int(utterance_index), {})
+            if not bool(override.get("searchable", 1)):
+                continue
+            hits.append({
+                "video_id": video_id,
+                "video_name": video["name"],
+                "utterance_index": int(utterance_index),
+                "asr_chunk_index": int(candidate.features.get("asr_chunk_idx", -1)),
+                "track_id": override.get(
+                    "corrected_track_id",
+                    int(candidate.features.get("track_id", -1)),
+                ),
+                "start_ms": int(round(candidate.start_time * 1000)),
+                "end_ms": int(round(candidate.end_time * 1000)),
+                "score": float(candidate.score),
+                "clip_url": (
+                    f"/api/videos/{video_id}/clip?"
+                    f"{urlencode({'start': candidate.start_time, 'end': candidate.end_time})}"
+                ),
+            })
+    hits.sort(key=lambda item: item["score"], reverse=True)
+    texts_by_video: dict[str, list[str]] = {}
+    for hit in hits[:limit]:
+        texts = texts_by_video.setdefault(
+            hit["video_id"], _texts_for_video(index_dir, hit["video_id"])
+        )
+        chunk_index = hit["asr_chunk_index"]
+        hit["text"] = texts[chunk_index] if 0 <= chunk_index < len(texts) else ""
     return hits[:limit]

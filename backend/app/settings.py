@@ -128,6 +128,20 @@ class Settings(BaseSettings):
     orchestration_trace_enabled: bool = True
     orchestration_trace_path: Path = Path("runtime/orchestration-traces.jsonl")
 
+    # Milvus is the primary vector store. SQLite remains the metadata/catalog
+    # database and NPZ files are retained as a local recovery/search fallback.
+    milvus_enabled: bool = True
+    milvus_host: str = "milvus"
+    milvus_port: int = 19530
+    milvus_read_enabled: bool = True
+    milvus_write_enabled: bool = True
+    milvus_fallback_enabled: bool = True
+    milvus_shadow_compare_enabled: bool = False
+    milvus_rollout_percent: int = 100
+    # Local NPZ is written before Milvus, so "warn" preserves service
+    # availability and leaves a recoverable artifact for later backfill.
+    milvus_write_fail_policy: Literal["raise", "warn"] = "warn"
+
     @field_validator("indexer_mode", mode="before")
     @classmethod
     def normalize_indexer_mode(cls, value: object) -> object:
@@ -140,6 +154,13 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_npu_worker_mode(cls, value: object) -> object:
         return value.strip().casefold() if isinstance(value, str) else value
+
+    @field_validator("milvus_rollout_percent")
+    @classmethod
+    def validate_milvus_rollout_percent(cls, value: int) -> int:
+        if not 0 <= value <= 100:
+            raise ValueError("milvus_rollout_percent 必须在 0 到 100 之间")
+        return value
 
     @property
     def model_idle_policy(self) -> Literal["process_exit", "idle_release", "resident"]:

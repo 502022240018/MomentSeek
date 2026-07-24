@@ -10,7 +10,7 @@ import wave
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
 
@@ -23,6 +23,9 @@ from app.indexing.asr_transcript_parser import (
     parse_funasr_raw_transcript,
     raw_items_from_chunks,
 )
+
+if TYPE_CHECKING:
+    from app.indexing.milvus_indexer import MilvusWriteContext
 from app.indexing.common import atomic_save_npz
 from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
 from app.media import extract_audio, parse_timecode
@@ -1211,6 +1214,7 @@ def build_asr_index(
     save_raw_transcript: bool = False,
     debug_output_dir: str | None = None,
     vad_strategy: str = "funasr_fsmn",
+    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
     semantic_target = Path(semantic_output_path) if semantic_output_path else None
     requested_language = language or "auto"
@@ -1280,6 +1284,10 @@ def build_asr_index(
         np.asarray(semantic_result["embeddings"], dtype=np.float16),
         np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32),
     )
+    if milvus_ctx is not None:
+        from app.indexing.milvus_indexer import write_modality_to_milvus
+
+        write_modality_to_milvus(milvus_ctx, "asr", output_path)
     return _asr_result_payload(decode, chunks, chunk_builder_stats, semantic_result)
 
 

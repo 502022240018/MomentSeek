@@ -5,7 +5,11 @@ import json
 
 from app.db import Catalog
 from app.settings import get_settings
-from app.stage_executor import execute_stage
+from app.stage_executor import (
+    _pre_delete_modality,  # noqa: F401 - compatibility re-export
+    _setup_milvus_context,  # noqa: F401 - compatibility re-export
+    execute_stage,
+)
 
 
 def run(stage: str, job_id: str) -> dict:
