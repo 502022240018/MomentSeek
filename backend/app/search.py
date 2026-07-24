@@ -179,25 +179,48 @@ def _visual_segment_scores(
     frame_scores: np.ndarray,
     frame_times_ms: np.ndarray,
     offsets: np.ndarray,
-) -> tuple[list[int], np.ndarray, list[float], list[float], list[int]]:
+) -> tuple[list[int], np.ndarray, list[float], list[float], list[list[float]], list[int]]:
+    score_values = np.asarray(frame_scores, dtype=np.float32)
+    if score_values.ndim == 1:
+        score_values = score_values.reshape(-1, 1)
+    if score_values.ndim != 2 or score_values.shape[0] != len(frame_times_ms):
+        raise ValueError("visual frame score shape does not match the index")
     segment_ids: list[int] = []
     raw_scores: list[float] = []
     top3_scores: list[float] = []
     mean_scores: list[float] = []
+    subquery_scores: list[list[float]] = []
     best_times_ms: list[int] = []
     for segment_id in range(len(offsets) - 1):
         start, end = int(offsets[segment_id]), int(offsets[segment_id + 1])
         if start == end:
             continue
-        bucket_scores = frame_scores[start:end]
-        order = np.argsort(bucket_scores)[::-1]
-        top_values = bucket_scores[order]
+        bucket_scores = score_values[start:end]
+        per_query_top = np.max(bucket_scores, axis=0)
+        if score_values.shape[1] == 1:
+            aggregate_score = float(per_query_top[0])
+            frame_aggregate = bucket_scores[:, 0]
+        else:
+            aggregate_score = float(0.65 * np.mean(per_query_top) + 0.35 * np.min(per_query_top))
+            frame_aggregate = 0.65 * np.mean(bucket_scores, axis=1) + 0.35 * np.min(
+                bucket_scores, axis=1
+            )
+        order = np.argsort(frame_aggregate)[::-1]
+        top_values = frame_aggregate[order]
         segment_ids.append(segment_id)
-        raw_scores.append(float(top_values[0]))
+        raw_scores.append(aggregate_score)
         top3_scores.append(float(np.mean(top_values[:min(3, len(top_values))])))
-        mean_scores.append(float(np.mean(bucket_scores)))
+        mean_scores.append(float(np.mean(frame_aggregate)))
+        subquery_scores.append([float(value) for value in per_query_top])
         best_times_ms.append(int(frame_times_ms[start + int(order[0])]))
-    return segment_ids, np.asarray(raw_scores, dtype=np.float32), top3_scores, mean_scores, best_times_ms
+    return (
+        segment_ids,
+        np.asarray(raw_scores, dtype=np.float32),
+        top3_scores,
+        mean_scores,
+        subquery_scores,
+        best_times_ms,
+    )
 
 
 def _visual_decision(
@@ -262,8 +285,21 @@ def _visual_candidates(
     frame_embeddings, frame_times_ms, offsets, segment_times_ms = _visual_index_arrays(data)
     if not len(frame_embeddings):
         return []
-    segment_ids, raw_values, top3_scores, mean_scores, best_times_ms = _visual_segment_scores(
-        frame_embeddings @ normalize(query), frame_times_ms, offsets
+    query_values = np.asarray(query, dtype=np.float32)
+    if query_values.ndim == 1:
+        query_values = query_values.reshape(1, -1)
+    if query_values.ndim != 2 or query_values.shape[1] != frame_embeddings.shape[1]:
+        raise ValueError("visual query embedding shape does not match the index")
+    query_values = np.stack([normalize(value) for value in query_values])
+    (
+        segment_ids,
+        raw_values,
+        top3_scores,
+        mean_scores,
+        subquery_scores,
+        best_times_ms,
+    ) = _visual_segment_scores(
+        frame_embeddings @ query_values.T, frame_times_ms, offsets
     )
     if not len(raw_values):
         return []
@@ -299,6 +335,10 @@ def _visual_candidates(
         mean = float(mean_scores[local_index])
         best_ms = int(best_times_ms[local_index])
         detail += f" · best_frame={best_ms / 1000:.2f}s · top1={raw_score:.3f} · top3={top3:.3f} · mean={mean:.3f}"
+        if query_values.shape[0] > 1:
+            detail += " · subqueries=" + ",".join(
+                f"{value:.3f}" for value in subquery_scores[local_index]
+            )
         start_ms, end_ms, time_source = _visual_segment_bounds(
             segment_id, segment_times_ms, segment_ms, duration_ms
         )
@@ -329,6 +369,8 @@ def _visual_candidates(
                 "visual_top3": top3,
                 "visual_mean": mean,
                 "visual_rank_score": ranking_score,
+                "visual_subquery_scores": subquery_scores[local_index],
+                "visual_subquery_count": int(query_values.shape[0]),
                 "percentile": percentile,
                 "robust_z": z_score,
                 "segment_time_source": time_source,
@@ -1078,13 +1120,22 @@ class SearchEngine:
         profile: str,
         limit: int,
         visual_queries: dict[str, np.ndarray],
+        visual_subqueries: list[str] | None,
     ) -> list[Candidate]:
         index_dir = self.settings.index_dir / video["id"]
         manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "visual")
         with np.load(index_file, allow_pickle=False) as data:
             visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
             if visual_model not in visual_queries:
-                visual_queries[visual_model] = self._clip(visual_model).encode_query(text, image_path, alpha)
+                query_texts: list[str | None] = (
+                    list(dict.fromkeys(visual_subqueries or []))
+                    if text and visual_subqueries
+                    else [text]
+                )
+                visual_queries[visual_model] = np.stack([
+                    self._clip(visual_model).encode_query(query_text, image_path, alpha)
+                    for query_text in query_texts
+                ])
             return _visual_candidates(
                 data,
                 visual_queries[visual_model],
@@ -1092,7 +1143,7 @@ class SearchEngine:
                 int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
                 int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
                 profile,
-                limit * 3,
+                limit,
                 str(channel_manifest.get("segment_strategy") or "fixed"),
             )
 
@@ -1100,7 +1151,7 @@ class SearchEngine:
         index_dir = self.settings.index_dir / video["id"]
         _manifest, _channel_manifest, index_file = _channel_manifest_for(video, index_dir, "face")
         with np.load(index_file, allow_pickle=False) as data:
-            return _face_candidates(data, face_query, video["id"], limit * 3, 0.35)
+            return _face_candidates(data, face_query, video["id"], limit, 0.35)
 
     def _semantic_query(self, text: str, channel_manifest: dict, embeddings: np.ndarray | None) -> np.ndarray | None:
         if embeddings is None:
@@ -1120,7 +1171,7 @@ class SearchEngine:
                 _asr_chunks_from_npz(data),
                 text,
                 video["id"],
-                limit * 3,
+                limit,
                 semantic_embeddings=embeddings,
                 embedding_chunk_indices=indices,
                 semantic_query=self._semantic_query(text, channel_manifest, embeddings),
@@ -1141,7 +1192,7 @@ class SearchEngine:
                 _ocr_chunks_from_npz(data),
                 text,
                 video["id"],
-                limit * 3,
+                limit,
                 modality="ocr",
                 semantic_embeddings=embeddings,
                 embedding_chunk_indices=indices,
@@ -1160,19 +1211,28 @@ class SearchEngine:
         visual_profile: str,
         visual_queries: dict[str, np.ndarray],
         face_query: np.ndarray | None,
+        channel_limits: dict[str, int],
+        visual_subqueries: list[str] | None,
     ) -> list[Candidate]:
         candidates = []
         indexed = set(video.get("indexed_modalities") or [])
         if "visual" in modalities and bool(text or image_path) and "visual" in indexed:
             candidates.extend(self._visual_for_video(
-                video, text, image_path, alpha, visual_profile, limit, visual_queries
+                video,
+                text,
+                image_path,
+                alpha,
+                visual_profile,
+                channel_limits["visual"],
+                visual_queries,
+                visual_subqueries,
             ))
         if face_query is not None and "face" in indexed:
-            candidates.extend(self._face_for_video(video, face_query, limit))
+            candidates.extend(self._face_for_video(video, face_query, channel_limits["face"]))
         if "asr" in modalities and text and "asr" in indexed:
-            candidates.extend(self._asr_for_video(video, text, limit))
+            candidates.extend(self._asr_for_video(video, text, channel_limits["asr"]))
         if "ocr" in modalities and text and "ocr" in indexed:
-            candidates.extend(self._ocr_for_video(video, text, limit))
+            candidates.extend(self._ocr_for_video(video, text, channel_limits["ocr"]))
         return candidates
 
     def search(
@@ -1186,11 +1246,18 @@ class SearchEngine:
         merge_gap: float = 2,
         max_result_seconds: float = 15,
         visual_profile: str = "balanced",
+        channel_limits: dict[str, int] | None = None,
+        visual_subqueries: list[str] | None = None,
     ) -> list[dict]:
         if visual_profile not in {"recall", "balanced", "precision"}:
             raise ValueError("visual_profile 必须是 recall、balanced 或 precision")
         videos = self._selected_videos(video_ids)
         candidates: list[Candidate] = []
+        requested_channel_limits = channel_limits or {}
+        resolved_channel_limits = {
+            name: max(1, int(requested_channel_limits.get(name, limit * 3)))
+            for name in ("visual", "face", "asr", "ocr")
+        }
         visual_queries: dict[str, np.ndarray] = {}
         face_query = self._resolve_face_query(text, image_path) if "face" in modalities else None
         for video in videos:
@@ -1204,6 +1271,8 @@ class SearchEngine:
                 visual_profile=visual_profile,
                 visual_queries=visual_queries,
                 face_query=face_query,
+                channel_limits=resolved_channel_limits,
+                visual_subqueries=visual_subqueries,
             ))
         results = _fuse_candidate_groups(candidates, videos, merge_gap, max_result_seconds)
         if set(modalities) == {"asr"} and text:

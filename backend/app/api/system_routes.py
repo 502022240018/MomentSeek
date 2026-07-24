@@ -24,4 +24,6 @@ def health() -> dict:
         "model_idle_policy": settings.model_idle_policy,
         "indexer_mode": settings.indexer_mode,
         "npu_worker_mode": settings.npu_worker_mode,
+        "orchestration_enabled": settings.orchestration_enabled,
+        "orchestration_profile": settings.orchestration_profile,
     }

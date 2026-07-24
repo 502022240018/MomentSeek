@@ -50,8 +50,11 @@ asr    -> 音频 -> Whisper/FunASR chunks + 可选文本语义向量 -> asr.npz
 ocr    -> 抽帧 -> RapidOCR boxes + 可选文本语义向量 -> ocr.npz
 ```
 
-搜索时，各通道先独立产生 candidates，然后按时间重叠或邻近关系合并为最终可播放片段。
+搜索时，可选 Planner 先根据 query、可用索引和 profile 选择通道与召回参数；各通道再独立产生
+candidates，按时间重叠或邻近关系合并。可选 Reranker 对第一阶段 Top-N 做文本或多图精排，
+最后返回可播放片段。Planner/Reranker 均通过独立 provider 配置，不要求使用同一个模型。
 通道索引协议和数组 schema 见 `docs/RETRIEVAL_CHANNELS.md`。
+编排 profile、trace 和模型替换协议见 `docs/QUERY_ORCHESTRATION.md`。
 
 ## 模型生命周期
 
@@ -87,6 +90,7 @@ backend/app/isolated_stage_workers.py
 | `backend/app/worker.py` | 索引任务编排和 worker lock |
 | `backend/app/stage_runner.py` | 各通道索引子进程入口 |
 | `backend/app/search.py` | visual / face / ASR / OCR 召回和结果融合 |
+| `backend/app/retrieval_orchestration.py` | Planner、可插拔模型 provider、VLM 精排和 execution trace |
 | `backend/app/media.py` | 视频探测、抽帧、抽音频、缩略图、clip |
 | `backend/app/indexing/manifest.py` | v3 index manifest 读写和版本校验 |
 | `backend/app/indexing/pipeline_manifest.py` | 将索引阶段结果写入通道 manifest |
@@ -142,6 +146,7 @@ staging/prod 验证时应把这些字段与 `docs/DEPLOYMENT.md` 中的 release 
 | `GET` | `/api/entities` | `main.py::list_entities` | 人物库列表 | `api.ts::entities` | `db.py` |
 | `GET` | `/api/entities/{entity_id}/reference` | `main.py::entity_reference` | 返回人物参考图 | entity UI | `runtime/entities` |
 | `POST` | `/api/search` | `main.py::search` | 多模态搜索 | `api.ts::search` | `search.py`, indexes, frame cache/clips |
+| `GET` | `/api/orchestration/profiles` | `main.py::orchestration_profiles` | 返回可用 Planner/Reranker 实验 profile（不暴露 endpoint/key） | Search Builder | `retrieval_orchestration.py` |
 | `GET` | `/api/videos/{video_id}/frame` | `main.py::video_frame` | 按秒级时间戳实时抽帧作缩略图（磁盘+HTTP 缓存） | 结果卡 `<img>` | `media.py::extract_video_frame`, `runtime/frame_cache` |
 | `GET` | `/` | `main.py::root` | 返回前端入口 | 浏览器 | frontend build |
 | `GET` | `/{path:path}` | `main.py::frontend` | 返回前端路由/静态资源 | 浏览器 | frontend build |

@@ -32,6 +32,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     if [ -n "$PIP_EXTRA_INDEX_URL" ]; then pip_args="$pip_args --extra-index-url $PIP_EXTRA_INDEX_URL"; fi; \
     pip install $pip_args -r requirements-cuda.txt
 COPY backend/ ./
+COPY deploy/orchestration/ ./deploy/orchestration/
 COPY --from=frontend-build /src/frontend/dist ./app/static
 RUN mkdir -p /app/runtime /app/models
 EXPOSE 8000

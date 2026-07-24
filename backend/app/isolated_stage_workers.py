@@ -64,9 +64,10 @@ def isolated_stage_worker_main(stage: str, connection: Connection) -> None:
                     "stage": stage,
                     "pid": os.getpid(),
                     "elapsed_seconds": round(time.perf_counter() - started, 3),
+                    "warm": pool.keys(),
                     "result": result,
                 })
-            except Exception as exc:
+            except BaseException as exc:
                 message = str(exc)
                 connection.send({
                     "type": "error",

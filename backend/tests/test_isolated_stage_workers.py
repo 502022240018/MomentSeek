@@ -65,6 +65,7 @@ def test_isolated_worker_serves_one_stage_and_keeps_its_pool(monkeypatch):
 
     assert [item["type"] for item in connection.sent] == ["ready", "result"]
     assert connection.sent[1]["result"] == {"frames": 3}
+    assert connection.sent[1]["warm"] == ["warm-model"]
     assert calls[0][:3] == ("visual", {"id": "video-1"}, {"visual_model": "siglip2"})
     assert _FakeModelPool.instances[0].closed is True
     assert connection.closed is True

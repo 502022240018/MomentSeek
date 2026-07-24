@@ -18,6 +18,7 @@ from app import __version__
 from app.api import entity_routes, job_routes, search_routes, speaker_routes, system_routes, video_routes
 from app import media, worker
 from app.db import Catalog
+from app.retrieval_orchestration import SearchOrchestrator
 from app.search import SearchEngine
 from app.settings import get_settings
 
@@ -32,6 +33,7 @@ subprocess_environment = worker.subprocess_environment
 settings = get_settings()
 catalog = Catalog(settings.db_path)
 search_engine = SearchEngine(settings, catalog)
+search_orchestrator = SearchOrchestrator(settings, catalog, search_engine)
 _indexer_daemon_process: subprocess.Popen | None = None
 _indexer_daemon_lock = threading.RLock()
 

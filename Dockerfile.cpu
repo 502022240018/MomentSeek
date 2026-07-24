@@ -15,6 +15,7 @@ WORKDIR /app/backend
 COPY backend/requirements*.txt ./
 RUN pip install -r requirements-cpu.txt
 COPY backend/ ./
+COPY deploy/orchestration/ ./deploy/orchestration/
 COPY --from=frontend-build /src/frontend/dist ./app/static
 RUN mkdir -p /app/runtime /app/models
 EXPOSE 8000
