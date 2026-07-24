@@ -11,6 +11,13 @@ from app.retrieval_orchestration import OrchestrationError
 router = APIRouter()
 
 
+@router.get("/api/orchestration/profiles")
+def orchestration_profiles() -> dict:
+    from app import main as runtime
+
+    return runtime.search_orchestrator.profiles()
+
+
 @router.post("/api/search")
 async def search(
     query_text: str | None = Form(default=None),
