@@ -2,7 +2,6 @@ from pathlib import Path
 
 from app.settings import Settings
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -180,6 +179,10 @@ def test_shared_ascend_deploy_honors_port_milvus_and_required_models():
     assert 'CMD ["sh", "-c"' in dockerfile
     assert '--port \\"${APP_PORT:-8000}\\"' in dockerfile
     assert 'CMD ["uvicorn"' not in dockerfile
+    assert (
+        "COPY deploy/models/ascend-prod.models.json "
+        "/app/deploy/models/ascend-prod.models.json"
+    ) in dockerfile
 
     for variable in (
         "MILVUS_ENABLED",
