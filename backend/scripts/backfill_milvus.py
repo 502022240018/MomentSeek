@@ -19,11 +19,12 @@ Completed video+modality pairs are tracked in a sidecar file
 (backfill_milvus_progress.jsonl) so the script can be safely interrupted and
 restarted.
 
-Version safety
---------------
-Pass --asset-version to stamp all backfilled records with a specific version
-(default "1").  If you later rebuild video X with version "2", the old "1"
-records remain untouched until you call client.delete_video_version(vid, "1").
+Idempotency and verification
+----------------------------
+Each video+modality is replaced as one recovery unit: old rows are deleted,
+the retained NPZ is inserted, the collection is flushed, and the persisted
+row count is verified.  Re-running the command therefore does not accumulate
+duplicate asset versions.
 """
 from __future__ import annotations
 
@@ -33,6 +34,8 @@ import logging
 import sys
 import time
 from pathlib import Path
+
+import numpy as np
 
 # Allow running as  python -m scripts.backfill_milvus  from backend/
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -52,8 +55,28 @@ MODALITY_TO_NPZ = {
 }
 
 
+def _progress_key(video_id: str, modality: str, asset_version: str) -> str:
+    return f"{video_id}:{modality}:{asset_version}"
+
+
+def _expected_count(npz_path: Path, modality: str) -> int:
+    """Derive the exact number of rows the modality indexer will write."""
+    count_fields = {
+        "visual": "frame_embeddings",
+        "asr": "chunk_times_ms",
+        "ocr": "frame_times_ms",
+        "face": "embeddings",
+        "speaker": "utterance_embeddings",
+    }
+    with np.load(npz_path, allow_pickle=False) as data:
+        field = count_fields[modality]
+        if field not in data.files:
+            raise ValueError(f"{npz_path.name} missing required field: {field}")
+        return len(data[field])
+
+
 def _load_progress(path: Path) -> set[str]:
-    """Return set of 'video_id:modality' keys already done."""
+    """Return version-scoped keys already completed successfully."""
     done: set[str] = set()
     if not path.exists():
         return done
@@ -62,18 +85,31 @@ def _load_progress(path: Path) -> set[str]:
         if line:
             try:
                 rec = json.loads(line)
-                if rec.get("status") == "done":
-                    done.add(f"{rec['video_id']}:{rec['modality']}")
-            except json.JSONDecodeError:
+                if rec.get("status") == "done" and rec.get("asset_version") is not None:
+                    done.add(_progress_key(
+                        str(rec["video_id"]),
+                        str(rec["modality"]),
+                        str(rec["asset_version"]),
+                    ))
+            except (json.JSONDecodeError, KeyError):
                 pass
     return done
 
 
-def _record_progress(path: Path, video_id: str, modality: str, status: str, detail: str = "") -> None:
+def _record_progress(
+    path: Path,
+    video_id: str,
+    modality: str,
+    asset_version: str,
+    status: str,
+    detail: str = "",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({
             "video_id": video_id,
             "modality": modality,
+            "asset_version": asset_version,
             "status":   status,
             "detail":   detail,
             "ts":       time.time(),
@@ -82,8 +118,8 @@ def _record_progress(path: Path, video_id: str, modality: str, status: str, deta
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill existing NPZ indexes into Milvus")
-    parser.add_argument("--index-dir",    default="runtime/indexes",
-                        help="Root directory containing per-video index subdirectories")
+    parser.add_argument("--index-dir",
+                        help="Root directory containing per-video indexes (default: app setting)")
     parser.add_argument("--asset-version", default="1",
                         help="Asset version to stamp on all backfilled records")
     parser.add_argument("--modalities",    default="visual,asr,ocr,face,speaker",
@@ -92,14 +128,24 @@ def main() -> None:
                         help="Discover what would be done but do not write to Milvus")
     parser.add_argument("--resume",   action="store_true",
                         help="Skip video+modality pairs already marked done in the progress file")
-    parser.add_argument("--progress-file", default="runtime/backfill_milvus_progress.jsonl",
-                        help="Path to resume/progress sidecar file")
+    parser.add_argument("--progress-file",
+                        help="Resume sidecar (default: <app-data>/backfill_milvus_progress.jsonl)")
     args = parser.parse_args()
 
-    index_dir     = Path(args.index_dir)
+    from app.settings import get_settings
+
+    settings = get_settings()
+    index_dir     = Path(args.index_dir) if args.index_dir else settings.index_dir
     asset_version = args.asset_version
     modalities    = [m.strip() for m in args.modalities.split(",") if m.strip()]
-    progress_path = Path(args.progress_file)
+    unknown_modalities = sorted(set(modalities) - set(MODALITY_TO_NPZ))
+    if unknown_modalities:
+        parser.error(f"unknown modalities: {', '.join(unknown_modalities)}")
+    progress_path = (
+        Path(args.progress_file)
+        if args.progress_file
+        else settings.app_data_dir / "backfill_milvus_progress.jsonl"
+    )
     done_keys     = _load_progress(progress_path) if args.resume else set()
 
     if not index_dir.is_dir():
@@ -126,18 +172,28 @@ def main() -> None:
     for video_dir in video_dirs:
         video_id = video_dir.name
         for modality in modalities:
-            key = f"{video_id}:{modality}"
+            key = _progress_key(video_id, modality, asset_version)
             npz_name = MODALITY_TO_NPZ[modality]
             npz_path = video_dir / npz_name
-
-            if args.resume and key in done_keys:
-                total_skip += 1
-                continue
 
             if not npz_path.exists():
                 total_missing += 1
                 logger.debug("MISSING %s/%s", video_id, npz_name)
                 continue
+
+            if args.resume and key in done_keys:
+                if args.dry_run:
+                    total_skip += 1
+                    continue
+                expected = _expected_count(npz_path, modality)
+                persisted = client.count_video_modality(video_id, modality)
+                if persisted == expected:
+                    total_skip += 1
+                    continue
+                logger.warning(
+                    "Resume marker is stale for %s/%s: expected=%d persisted=%d; rewriting",
+                    video_id, modality, expected, persisted,
+                )
 
             if args.dry_run:
                 logger.info("DRY-RUN would upsert %s/%s", video_id, npz_name)
@@ -150,13 +206,37 @@ def main() -> None:
                 client=client,
             )
             try:
+                # Validate the primary row axis before deleting a possibly
+                # healthy existing generation.
+                expected = _expected_count(npz_path, modality)
+                deleted = client.delete_video_modality(video_id, modality)
+                if deleted < 0:
+                    raise RuntimeError("failed to delete existing Milvus rows")
                 count = _INDEXERS[modality].upsert_from_npz(ctx, npz_path)
-                logger.info("OK %s/%s  count=%d", video_id, modality, count)
-                _record_progress(progress_path, video_id, modality, "done", f"count={count}")
+                if count != expected:
+                    raise RuntimeError(
+                        f"indexer count mismatch: expected={expected}, wrote={count}"
+                    )
+                client.collection_for(modality).flush()
+                persisted = client.count_video_modality(video_id, modality)
+                if persisted != count:
+                    raise RuntimeError(
+                        f"row count mismatch: wrote={count}, persisted={persisted}"
+                    )
+                logger.info(
+                    "OK %s/%s deleted=%d count=%d",
+                    video_id, modality, deleted, count,
+                )
+                _record_progress(
+                    progress_path, video_id, modality, asset_version,
+                    "done", f"deleted={deleted},count={count}",
+                )
                 total_ok += 1
             except Exception as exc:
                 logger.error("FAIL %s/%s: %s", video_id, modality, exc)
-                _record_progress(progress_path, video_id, modality, "fail", str(exc))
+                _record_progress(
+                    progress_path, video_id, modality, asset_version, "fail", str(exc)
+                )
                 total_fail += 1
 
     logger.info(

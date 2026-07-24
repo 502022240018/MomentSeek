@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS voice_samples (
   voice_embedding BLOB,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS milvus_cleanup_queue (
+  video_id TEXT PRIMARY KEY,
+  last_error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -157,6 +164,32 @@ class Catalog:
             connection.execute("DELETE FROM jobs WHERE video_id=?", (video_id,))
             cursor = connection.execute("DELETE FROM videos WHERE id=?", (video_id,))
             return cursor.rowcount > 0
+
+    def enqueue_milvus_cleanup(self, video_id: str, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO milvus_cleanup_queue(video_id,last_error,attempts)
+                   VALUES(?,?,1)
+                   ON CONFLICT(video_id) DO UPDATE SET
+                     last_error=excluded.last_error,
+                     attempts=milvus_cleanup_queue.attempts+1,
+                     updated_at=CURRENT_TIMESTAMP""",
+                (video_id, error),
+            )
+
+    def list_milvus_cleanup_queue(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM milvus_cleanup_queue ORDER BY created_at"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def complete_milvus_cleanup(self, video_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM milvus_cleanup_queue WHERE video_id=?",
+                (video_id,),
+            )
 
     def create_job(self, record: dict) -> dict:
         payload = dict(record)

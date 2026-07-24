@@ -1,0 +1,6 @@
+# Explicit no-deps install for the ARM64 Ascend image. The remote-server
+# client does not need the optional x86-only milvus-lite package.
+setuptools==80.9.0
+python-dotenv==1.1.1
+ujson==5.10.0
+pymilvus==2.4.15

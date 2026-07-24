@@ -97,12 +97,21 @@ def delete_video(video_id: str) -> dict:
             from app.indexing.milvus_client import get_milvus_client
 
             milvus_cleanup = get_milvus_client().delete_video(video_id)
+            failed_collections = [
+                name for name, count in milvus_cleanup.items() if count < 0
+            ]
+            if failed_collections:
+                raise RuntimeError(
+                    "failed collections: " + ", ".join(sorted(failed_collections))
+                )
+            runtime.catalog.complete_milvus_cleanup(video_id)
         except Exception as exc:
             logger.warning(
                 "Milvus cleanup failed for video=%s; local deletion continues: %s",
                 video_id,
                 exc,
             )
+            runtime.catalog.enqueue_milvus_cleanup(video_id, str(exc))
             milvus_cleanup = {"status": "deferred", "error": str(exc)}
     runtime._remove_video_files(video, video_id)
     for job in jobs:

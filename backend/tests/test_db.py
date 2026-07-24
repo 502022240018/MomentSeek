@@ -67,6 +67,21 @@ def test_rename_and_delete_video_removes_jobs(tmp_path):
     assert catalog.delete_video("video-1") is False
 
 
+def test_milvus_cleanup_queue_is_durable_and_deduplicated(tmp_path):
+    catalog = Catalog(tmp_path / "catalog.sqlite3")
+    catalog.enqueue_milvus_cleanup("video-1", "connection refused")
+    catalog.enqueue_milvus_cleanup("video-1", "timeout")
+
+    pending = catalog.list_milvus_cleanup_queue()
+    assert len(pending) == 1
+    assert pending[0]["video_id"] == "video-1"
+    assert pending[0]["last_error"] == "timeout"
+    assert pending[0]["attempts"] == 2
+
+    catalog.complete_milvus_cleanup("video-1")
+    assert catalog.list_milvus_cleanup_queue() == []
+
+
 def test_next_queued_job_queries_oldest_queued_record(tmp_path):
     catalog = Catalog(tmp_path / "catalog.sqlite3")
     catalog.create_video({

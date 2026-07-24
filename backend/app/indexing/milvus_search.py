@@ -637,9 +637,10 @@ def milvus_face_candidates(
     for hit in hits:
         raw_emb = hit.get("embedding")
         if raw_emb is None:
-            # Fallback: derive cosine from L2 distance for unit vectors.
-            l2 = float(hit["_distance"])
-            cosine = max(-1.0, min(1.0, 1.0 - (l2 ** 2) / 2.0))
+            # Milvus reports squared L2 distance.  For unit vectors:
+            # squared_l2 = 2 - 2*cosine.
+            squared_l2 = float(hit["_distance"])
+            cosine = max(-1.0, min(1.0, 1.0 - squared_l2 / 2.0))
         else:
             track_vec = normalize(np.asarray(raw_emb, dtype=np.float32))
             cosine = float(np.dot(query_norm, track_vec))

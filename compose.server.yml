@@ -15,8 +15,8 @@ services:
       dockerfile: Dockerfile.ascend
       args:
         ASCEND_RUNTIME_IMAGE: "${ASCEND_RUNTIME_IMAGE:-0a8e7788f0d1}"
-    image: momentseek-mvp:ascend
-    container_name: momentseek-mvp-app-server
+    image: ${APP_IMAGE:-momentseek-mvp:ascend}
+    container_name: ${COMPOSE_PROJECT_NAME:-momentseek-mvp}-app-server
     environment:
       ENV_PROFILE: "${ENV_PROFILE:-prod.server}"
       APP_DATA_DIR: /app/runtime
@@ -43,4 +43,4 @@ services:
 
 networks:
   momentseek:
-    name: momentseek-mvp-net
+    name: ${MOMENTSEEK_NETWORK_NAME:-momentseek-mvp-net}

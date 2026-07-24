@@ -164,6 +164,7 @@ class MilvusClient:
             col = Collection(name)
             try:
                 result = col.delete(expr)
+                col.flush()
                 counts[name] = getattr(result, "delete_count", 0)
             except Exception as exc:
                 logger.warning("delete_video %s from %s failed: %s", video_id, name, exc)
@@ -182,6 +183,7 @@ class MilvusClient:
             col = Collection(name)
             try:
                 result = col.delete(expr)
+                col.flush()
                 counts[name] = getattr(result, "delete_count", 0)
             except Exception as exc:
                 logger.warning(
@@ -212,6 +214,7 @@ class MilvusClient:
         expr = f'video_id == "{video_id}"'
         try:
             result = col.delete(expr)
+            col.flush()
             count = getattr(result, "delete_count", 0)
             logger.info(
                 "delete_video_modality video=%s modality=%s deleted=%d",
@@ -223,6 +226,17 @@ class MilvusClient:
                 "delete_video_modality %s/%s failed: %s", video_id, modality, exc
             )
             return -1
+
+    def count_video_modality(self, video_id: str, modality: str) -> int:
+        """Return the persisted row count for one video and modality."""
+        name = _COLLECTION_FOR_MODALITY[modality]
+        rows = Collection(name).query(
+            expr=f'video_id == "{video_id}"',
+            output_fields=["count(*)"],
+        )
+        if not rows:
+            return 0
+        return int(rows[0].get("count(*)", 0))
 
 
 # ---------------------------------------------------------------------------
