@@ -14,6 +14,7 @@ export COMPOSE_PROJECT_NAME=momentseek-29154-milvus
 export MOMENTSEEK_NETWORK_NAME=momentseek-29154-milvus-net
 export HOST_RUNTIME_DIR=/absolute/path/to/29154/runtime
 export HOST_MODEL_DIR=/absolute/path/to/shared/read-only/models
+export ASCEND_RUNTIME_IMAGE=your-local-ascend-runtime:tag
 export APP_PORT=18001
 export MINIO_CONSOLE_PORT=19001
 export MILVUS_GRPC_PORT=19531

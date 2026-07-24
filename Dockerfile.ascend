@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG ASCEND_RUNTIME_IMAGE=0a8e7788f0d1
+ARG ASCEND_RUNTIME_IMAGE=momentseek-mvp:ascend-runtime
 FROM node:20-alpine AS frontend-build
 WORKDIR /src/frontend
 COPY frontend/package*.json ./
@@ -19,9 +19,19 @@ ENV PYTHONUNBUFFERED=1 \
     NUMEXPR_NUM_THREADS=8 \
     BLIS_NUM_THREADS=8 \
     TOKENIZERS_PARALLELISM=false
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+RUN if command -v ffmpeg >/dev/null 2>&1; then \
+        echo "ffmpeg already present in Ascend runtime"; \
+    elif command -v apt-get >/dev/null 2>&1; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 \
+        && rm -rf /var/lib/apt/lists/*; \
+    elif command -v dnf >/dev/null 2>&1; then \
+        dnf install -y ffmpeg mesa-libGL glib2 \
+        && dnf clean all; \
+    else \
+        echo "No supported package manager found for ffmpeg installation" >&2; \
+        exit 1; \
+    fi
 WORKDIR /app/backend
 COPY vendor-wheels/ /tmp/vendor-wheels/
 COPY backend/requirements-ascend.txt ./
