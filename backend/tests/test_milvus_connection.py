@@ -12,8 +12,14 @@ docker exec momentseek-mvp-app-cuda bash -c "PYTHONPATH=/app/backend python -u /
 
 import sys
 import logging
+import os
 from pathlib import Path
 import uuid
+
+try:
+    import pytest
+except ImportError:  # Keep the documented `python test_milvus_connection.py` path.
+    pytest = None
 
 # Add backend to path so `app.*` imports resolve correctly
 sys.path.insert(0, str(Path(__file__).parent.parent))  # /app/backend
@@ -32,6 +38,16 @@ _ALL_COLLECTIONS = [
     "ocr_embeddings",
     "speaker_embeddings",
 ]
+
+_RUN_LIVE_MILVUS = os.getenv("RUN_MILVUS_INTEGRATION_TESTS") == "1"
+if pytest is not None:
+    pytestmark = [
+        pytest.mark.integration,
+        pytest.mark.skipif(
+            not _RUN_LIVE_MILVUS,
+            reason="set RUN_MILVUS_INTEGRATION_TESTS=1 to run live Milvus tests",
+        ),
+    ]
 
 
 def _check_milvus_connection() -> bool:
