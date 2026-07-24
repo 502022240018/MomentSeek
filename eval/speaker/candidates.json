@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "diarization": [
+    {
+      "key": "pyannote-community-1",
+      "model_id": "pyannote/speaker-diarization-community-1",
+      "role": "mature_pipeline_and_transcript_alignment",
+      "notes": "Use exclusive_speaker_diarization when available; gated download, offline runtime."
+    },
+    {
+      "key": "nemo-sortformer-offline",
+      "model_id": "nvidia/diar_sortformer_4spk-v1",
+      "role": "end_to_end_throughput_candidate",
+      "notes": "Evaluate the four-speaker limit on variety shows and long-form video."
+    },
+    {
+      "key": "3dspeaker-diarization",
+      "model_id": "modelscope/3D-Speaker",
+      "role": "modular_chinese_candidate",
+      "notes": "Evaluate the official audio diarization recipe with fixed local model paths."
+    }
+  ],
+  "voice_embedding": [
+    {
+      "key": "wespeaker-resnet34-lm",
+      "model_id": "Wespeaker/wespeaker-voxceleb-resnet34-LM",
+      "role": "small_multilingual_baseline"
+    },
+    {
+      "key": "3dspeaker-campplus",
+      "model_id": "iic/speech_campplus_sv_zh-cn_16k-common",
+      "role": "fast_chinese_candidate"
+    },
+    {
+      "key": "3dspeaker-eres2netv2",
+      "model_id": "iic/speech_eres2netv2_sv_zh-cn_16k-common",
+      "role": "quality_chinese_candidate"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "item_id": "worldcup_ad_720p_t000012_000",
+  "item_type": "image",
+  "group_id": "worldcup_ad",
+  "variant_id": "worldcup_ad_720p",
+  "resolution_label": "720p",
+  "source_path": "runtime/eval/visual/frames/worldcup_ad/worldcup_ad_720p/t000012_000.jpg",
+  "time": 12.0,
+  "start": null,
+  "end": null,
+  "caption_en": "A concise English caption of visible content.",
+  "caption_zh": "可选中文描述。",
+  "scene": "stadium / kitchen / street / indoor room / unknown",
+  "query_types": ["global_scene", "main_subject"],
+  "objects": [
+    {
+      "name": "object name",
+      "location": "center / top right / lower left / unknown",
+      "visibility": "clear / small / partial / uncertain"
+    }
+  ],
+  "people": [
+    {
+      "description": "a man in a red shirt",
+      "location": "center",
+      "action": "running",
+      "visibility": "clear"
+    }
+  ],
+  "actions": ["running"],
+  "small_objects": ["football"],
+  "edge_objects": [
+    {
+      "name": "logo",
+      "location": "top right",
+      "visibility": "partial"
+    }
+  ],
+  "text_overlay": [
+    {
+      "text": "visible text if readable",
+      "location": "bottom",
+      "confidence": 0.8
+    }
+  ],
+  "temporal_events": [],
+  "suggested_queries": [
+    {
+      "query": "a useful retrieval query",
+      "query_type": "global_scene",
+      "positive_scope": "image_or_segment"
+    }
+  ],
+  "confidence": 0.8,
+  "review_status": "pending",
+  "review_notes": "",
+  "annotator": {
+    "type": "model",
+    "name": "placeholder",
+    "version": "placeholder"
+  }
+}

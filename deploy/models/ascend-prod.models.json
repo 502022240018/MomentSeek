@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "name": "ascend-prod",
+  "allow_download": false,
+  "models": [
+    {
+      "name": "visual_siglip2_so400m_384",
+      "kind": "huggingface",
+      "id": "google/siglip2-so400m-patch14-384",
+      "target": "/app/models/hf-cache",
+      "required": true
+    },
+    {
+      "name": "face_buffalo_l",
+      "kind": "directory",
+      "id": "buffalo_l",
+      "target": "/app/models/insightface/models/buffalo_l",
+      "required": true
+    },
+    {
+      "name": "funasr_sensevoice_small",
+      "kind": "directory",
+      "id": "iic/SenseVoiceSmall",
+      "target": "/app/models/funasr/models/iic--SenseVoiceSmall/snapshots/master",
+      "required": true
+    },
+    {
+      "name": "funasr_fsmn_vad",
+      "kind": "directory",
+      "id": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+      "target": "/app/models/funasr/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+      "required": false
+    },
+    {
+      "name": "funasr_ct_punc",
+      "kind": "directory",
+      "id": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+      "target": "/app/models/funasr/iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+      "required": false
+    },
+    {
+      "name": "faster_whisper_turbo",
+      "kind": "directory",
+      "id": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+      "target": "/app/models/faster-whisper/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo",
+      "required": false
+    },
+    {
+      "name": "text_semantic_minilm",
+      "kind": "huggingface",
+      "id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+      "target": "/app/models/text-embeddings",
+      "required": true
+    },
+    {
+      "name": "rapidocr_ppocrv6",
+      "kind": "directory",
+      "id": "PP-OCRv6",
+      "target": "/app/models/rapidocr",
+      "required": true
+    },
+    {
+      "name": "rapidocr_ppocrv6_acl_om",
+      "kind": "directory",
+      "id": "PP-OCRv6-Ascend910B4-CANN8.5.1",
+      "target": "/app/models/rapidocr/ascend/910b4-cann9-profile",
+      "required": true
+    },
+    {
+      "name": "speaker_3dspeaker_source",
+      "kind": "source",
+      "id": "065629c313ea",
+      "target": "/app/models/3D-Speaker",
+      "required": true
+    },
+    {
+      "name": "speaker_campplus_zh_en",
+      "kind": "directory",
+      "id": "iic/speech_campplus_sv_zh_en_16k-common_advanced@v1.0.0",
+      "target": "/app/models/3dspeaker-cache/models/iic--speech_campplus_sv_zh_en_16k-common_advanced/snapshots/v1.0.0",
+      "required": true
+    },
+    {
+      "name": "speaker_fsmn_vad",
+      "kind": "directory",
+      "id": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch@v2.0.4",
+      "target": "/app/models/3dspeaker-cache/models/iic--speech_fsmn_vad_zh-cn-16k-common-pytorch/snapshots/v2.0.4",
+      "required": true
+    }
+  ]
+}

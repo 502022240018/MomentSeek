@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "created_for": "MomentSeek image-level visual retrieval evaluation",
+  "frames": [
+    {
+      "image_id": "example_worldcup_ad_720p_t000012_000",
+      "group_id": "worldcup_ad",
+      "variant_id": "worldcup_ad_720p",
+      "path": "runtime/eval/visual/frames/worldcup_ad/worldcup_ad_720p/t000012_000.jpg",
+      "time": 12.0,
+      "width": 1280,
+      "height": 720,
+      "resolution_label": "720p",
+      "view_type": "original_frame",
+      "source_video_path": "runtime/uploads/example.mp4"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+Judge whether the candidate video segment satisfies the user query as a whole.
+
+Query:
+{{query}}
+
+Candidate metadata and first-stage evidence:
+{{candidate}}
+
+Check every constraint, including actors, objects, actions, scene, visible text,
+spoken content, and temporal relationships. Treat first-stage scores only as
+weak prior evidence. Base the decision on the supplied frames and evidence.
+
+Answer exactly Yes if the candidate is relevant, otherwise answer exactly No.

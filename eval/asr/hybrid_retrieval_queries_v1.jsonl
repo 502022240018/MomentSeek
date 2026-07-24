@@ -1,0 +1,42 @@
+{"id":"t01","split":"tune","category":"semantic_paraphrase","query":"参加吃饭速度挑战，输掉的人不能离开还要继续吃","targets":[{"video_id":"196c6422395241e8bb508ecf84b99289","text_contains":"只要赢过三位就可以离开了,不然要一直吃"}]}
+{"id":"t02","split":"tune","category":"lexical_rewrite","query":"快乐水喝六斤，比赛比速度不比总量","targets":[{"video_id":"196c6422395241e8bb508ecf84b99289","text_contains":"但是这个是比速度,不是比量"}]}
+{"id":"t03","split":"tune","category":"cross_lingual","query":"这些球员完全不听导演指挥","targets":[{"video_id":"8c6d9d47f1a74e4497a4654162c1ce2d","text_contains":"None of these players listen to me"}]}
+{"id":"t04","split":"tune","category":"cross_lingual","query":"姆巴佩应该多传球","targets":[{"video_id":"8c6d9d47f1a74e4497a4654162c1ce2d","text_contains":"Mbappé needs to pass the ball"}]}
+{"id":"t05","split":"tune","category":"lexical_exact","query":"preparación para el Mundial","targets":[{"video_id":"8e43cd0b84b74077b7f652b09374da9e","text_contains":"preparación para el Mundial"}]}
+{"id":"t06","split":"tune","category":"semantic_paraphrase","query":"quiero gozar del fútbol","targets":[{"video_id":"8e43cd0b84b74077b7f652b09374da9e","text_contains":"disfrutar del fútbol"}]}
+{"id":"t07","split":"tune","category":"lexical_rewrite","query":"Messi and Mbappe chase the Golden Boot","targets":[{"video_id":"0c780e39155245379ba287f2fbae1630","text_contains":"Messi and Mbappe in the chase for Golden Boots"}]}
+{"id":"t08","split":"tune","category":"cross_lingual","query":"姆巴佩射门，赫尔南德斯跟进","targets":[{"video_id":"0c780e39155245379ba287f2fbae1630","text_contains":"Mbappe does get his shot away and Hernandez coming in"}]}
+{"id":"t09","split":"tune","category":"semantic_paraphrase","query":"草原上的帐篷学校来了七十多个学生","targets":[{"video_id":"b09c33148400467e856802ef59e8e479","text_contains":"草原上搭起了一个帐篷学校"},{"video_id":"b09c33148400467e856802ef59e8e479","text_contains":"吸引了70多个学生前来"}]}
+{"id":"t10","split":"tune","category":"lexical_extension","query":"纳朗玛图书馆","targets":[{"video_id":"b09c33148400467e856802ef59e8e479","text_contains":"纳朗玛社区图书馆"}]}
+{"id":"t11","split":"tune","category":"semantic_paraphrase","query":"天堂就应该像一座图书馆","targets":[{"video_id":"b09c33148400467e856802ef59e8e479","text_contains":"天堂应该是图书馆的模样"}]}
+{"id":"t12","split":"tune","category":"semantic_paraphrase","query":"有人冒充死者住进他的房子并拿走手机","targets":[{"video_id":"e96d218007fe43d4a1d39973ba55de93","text_contains":"还能冒充他住进他的别墅,拿到他的手机"}]}
+{"id":"t13","split":"tune","category":"semantic_paraphrase","query":"银行卡密码连续输错三次会被锁住","targets":[{"video_id":"e96d218007fe43d4a1d39973ba55de93","text_contains":"只要输错三次密码,卡就会被锁"}]}
+{"id":"t14","split":"tune","category":"lexical_rewrite","query":"昌衡集团地下车库持刀袭击","targets":[{"video_id":"a293b5981126444182208da7ba6274f5","text_contains":"昌衡集团地下车库持刀具"}]}
+{"id":"t15","split":"tune","category":"lexical_rewrite","query":"生日聚会的蛋糕晚上七点去取","targets":[{"video_id":"a293b5981126444182208da7ba6274f5","text_contains":"我在你家附近订了蛋糕,晚上7点记得去取一下"}]}
+{"id":"t16","split":"tune","category":"semantic_paraphrase","query":"缆车上升得太快，让人害怕","targets":[{"video_id":"e8f92255e704482883da3beaea986000","text_contains":"我有点害怕我有点害怕"}]}
+{"id":"t17","split":"tune","category":"lexical_rewrite","query":"不会滑雪还在得瑟什么","targets":[{"video_id":"e8f92255e704482883da3beaea986000","text_contains":"你不会滑雪,你在嘚瑟什么"}]}
+{"id":"t18","split":"tune","category":"lexical_extension","query":"来自天山剑派的女侠","targets":[{"video_id":"e8f92255e704482883da3beaea986000","text_contains":"来自天山派的剑人人"}]}
+{"id":"t19","split":"tune","category":"semantic_paraphrase","query":"很久没有见到你，我特别想你","targets":[{"video_id":"b5d17b3d0c904626893bd9043008959c","text_contains":"我想死你了"}]}
+{"id":"t20","split":"tune","category":"semantic_paraphrase","query":"图书管理员掌握十几门外语","targets":[{"video_id":"b09c33148400467e856802ef59e8e479","text_contains":"掌握法语、意大利语、希腊语、拉丁语、波斯语等十几种语言"}]}
+{"id":"t21","split":"tune","category":"cross_lingual","query":"站在顶峰会感到孤独","targets":[{"video_id":"8c6d9d47f1a74e4497a4654162c1ce2d","text_contains":"it gets lonely at the top"}]}
+{"id":"h01","split":"holdout","category":"lexical_extension","query":"昆仑山","targets":[{"video_id":"e8f92255e704482883da3beaea986000","text_contains":"一般都去昆仑"}]}
+{"id":"h02","split":"holdout","category":"semantic_paraphrase","query":"打败三位大哥才能离开饭桌","targets":[{"video_id":"196c6422395241e8bb508ecf84b99289","text_contains":"只要赢过三位就可以离开"}]}
+{"id":"h03","split":"holdout","category":"semantic_paraphrase","query":"喝饮料比的是速度，不是谁喝得更多","targets":[{"video_id":"196c6422395241e8bb508ecf84b99289","text_contains":"这个是比速度,不是比量"}]}
+{"id":"h04","split":"holdout","category":"cross_lingual","query":"导演让大家再给他两分钟","targets":[{"video_id":"8c6d9d47f1a74e4497a4654162c1ce2d","text_contains":"Just give us two minutes"}]}
+{"id":"h05","split":"holdout","category":"cross_lingual","query":"伊布会回来的","targets":[{"video_id":"8c6d9d47f1a74e4497a4654162c1ce2d","text_contains":"Zlatan will be back"}]}
+{"id":"h06","split":"holdout","category":"semantic_paraphrase","query":"the football players keep doing whatever they like","targets":[{"video_id":"8c6d9d47f1a74e4497a4654162c1ce2d","text_contains":"players are doing whatever they want"}]}
+{"id":"h07","split":"holdout","category":"cross_lingual","query":"世界杯准备得怎么样了","targets":[{"video_id":"8e43cd0b84b74077b7f652b09374da9e","text_contains":"preparación para el Mundial"}]}
+{"id":"h08","split":"holdout","category":"cross_lingual","query":"我们足球场上见","targets":[{"video_id":"8e43cd0b84b74077b7f652b09374da9e","text_contains":"Nos vemos en el campo"}]}
+{"id":"h09","split":"holdout","category":"semantic_paraphrase","query":"法国球员已经在世界杯打进四个球","targets":[{"video_id":"0c780e39155245379ba287f2fbae1630","text_contains":"has scored four World Cup goals for France"}]}
+{"id":"h10","split":"holdout","category":"semantic_paraphrase","query":"世界杯半决赛第一次触球就锁定胜局","targets":[{"video_id":"0c780e39155245379ba287f2fbae1630","text_contains":"first touch in a World Cup semi-final is the clinching goal"}]}
+{"id":"h11","split":"holdout","category":"semantic_paraphrase","query":"为了孩子们盖一座真正的图书馆","targets":[{"video_id":"b09c33148400467e856802ef59e8e479","text_contains":"为了给孩子们提供一个更舒适的学习环境"}]}
+{"id":"h12","split":"holdout","category":"lexical_rewrite","query":"图书馆收到朋友捐赠的八千多本书","targets":[{"video_id":"b09c33148400467e856802ef59e8e479","text_contains":"共收入了8000多本书"}]}
+{"id":"h13","split":"holdout","category":"lexical_rewrite","query":"每天坐公交去南京图书馆","targets":[{"video_id":"b09c33148400467e856802ef59e8e479","text_contains":"通往南京图书馆的公交车上"}]}
+{"id":"h14","split":"holdout","category":"semantic_paraphrase","query":"第一次见到替身是在一个下雨天","targets":[{"video_id":"e96d218007fe43d4a1d39973ba55de93","text_contains":"我第一次见到那个替身是在陈伦家,那天下着雨"}]}
+{"id":"h15","split":"holdout","category":"lexical_rewrite","query":"他在高中时就找过一个替身","targets":[{"video_id":"e96d218007fe43d4a1d39973ba55de93","text_contains":"在高中他就找过一个替身"}]}
+{"id":"h16","split":"holdout","category":"semantic_paraphrase","query":"嫌疑人在正当防卫时被打伤","targets":[{"video_id":"a293b5981126444182208da7ba6274f5","text_contains":"在正当防卫过程中呢,将嫌疑人打伤"}]}
+{"id":"h17","split":"holdout","category":"semantic_paraphrase","query":"二十年前的事情让我一直很内疚","targets":[{"video_id":"a293b5981126444182208da7ba6274f5","text_contains":"20年前的那件事儿,我心里有愧疚"}]}
+{"id":"h18","split":"holdout","category":"lexical_rewrite","query":"准备让大家骑马拍照","targets":[{"video_id":"e8f92255e704482883da3beaea986000","text_contains":"大家可以上马拍照的机会"}]}
+{"id":"h19","split":"holdout","category":"lexical_rewrite","query":"我会滑雪又能怎么样","targets":[{"video_id":"e8f92255e704482883da3beaea986000","text_contains":"我会滑雪能咋的"}]}
+{"id":"h20","split":"holdout","category":"lexical_exact","query":"我想死你了","targets":[{"video_id":"b5d17b3d0c904626893bd9043008959c","text_contains":"我想死你了"}]}
+{"id":"h21","split":"holdout","category":"lexical_exact","query":"disfrutar del fútbol","targets":[{"video_id":"8e43cd0b84b74077b7f652b09374da9e","text_contains":"disfrutar del fútbol"}]}

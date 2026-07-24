@@ -1,0 +1,50 @@
+# Server bootstrap — build the Ascend-compatible image and connect to Milvus,
+# but expose no NPU device. Run this first to verify Milvus connectivity and
+# basic app health before requesting NPU card approval.
+#
+# Usage:
+#   docker compose -f compose.yml -f compose.milvus.yml -f compose.server.yml up -d
+#
+# To promote to NPU once a card is approved, append compose.ascend.yml:
+#   docker compose -f compose.yml -f compose.milvus.yml -f compose.server.yml \
+#                  -f compose.ascend.yml up -d
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.ascend
+      args:
+        ASCEND_RUNTIME_IMAGE: "${ASCEND_RUNTIME_IMAGE:-momentseek-mvp:ascend-runtime}"
+    image: ${APP_IMAGE:-momentseek-mvp:ascend}
+    container_name: ${COMPOSE_PROJECT_NAME:-momentseek-mvp}-app-server
+    environment:
+      ENV_PROFILE: "${ENV_PROFILE:-prod.server}"
+      APP_DATA_DIR: /app/runtime
+      APP_MODEL_DIR: /app/models
+      APP_PUBLIC_URL: "${APP_PUBLIC_URL:-http://127.0.0.1:8000}"
+      NPU_ENABLED: "false"
+      CUDA_ENABLED: "false"
+      MODEL_IDLE_POLICY: "${MODEL_IDLE_POLICY:-process_exit}"
+      FACE_PROVIDER: "${FACE_PROVIDER:-cpu}"
+      # OCR falls back to CPU (onnxruntime) when NPU_ENABLED=false.
+      OCR_DEVICE: "${OCR_DEVICE:-cpu}"
+      ASR_SEMANTIC_DEVICE: "${ASR_SEMANTIC_DEVICE:-cpu}"
+      SPEAKER_DEVICE: "${SPEAKER_DEVICE:-cpu}"
+      SPEAKER_MODEL_REPO: "${SPEAKER_MODEL_REPO:-/app/models/3D-Speaker}"
+      SPEAKER_MODEL_CACHE_DIR: "${SPEAKER_MODEL_CACHE_DIR:-/app/models/3dspeaker-cache}"
+      # Milvus connection (resolved via Docker network DNS)
+      MILVUS_HOST: "${MILVUS_HOST:-milvus}"
+      MILVUS_PORT: "${MILVUS_PORT:-19530}"
+      MILVUS_QUERY_TIMEOUT_SECONDS: "${MILVUS_QUERY_TIMEOUT_SECONDS:-3}"
+      MILVUS_ENABLED: "${MILVUS_ENABLED:-true}"
+      MILVUS_READ_ENABLED: "${MILVUS_READ_ENABLED:-true}"
+      MILVUS_WRITE_ENABLED: "${MILVUS_WRITE_ENABLED:-true}"
+      MILVUS_FALLBACK_ENABLED: "${MILVUS_FALLBACK_ENABLED:-true}"
+      MILVUS_ROLLOUT_PERCENT: "${MILVUS_ROLLOUT_PERCENT:-100}"
+      MILVUS_WRITE_FAIL_POLICY: "${MILVUS_WRITE_FAIL_POLICY:-warn}"
+    networks:
+      - momentseek
+
+networks:
+  momentseek:
+    name: ${MOMENTSEEK_NETWORK_NAME:-momentseek-mvp-net}
