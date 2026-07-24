@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.db import Catalog
 from app.media import extract_video_frame
 from app.search import SearchEngine
+from app.retrieval_metrics import RetrievalProfiler
 from app.settings import Settings
 
 
@@ -767,6 +768,7 @@ class SearchOrchestrator:
                     raise
 
         retrieval_started = time.perf_counter()
+        retrieval_profiler = RetrievalProfiler()
         results = self.search_engine.search(
             text,
             image_path,
@@ -779,11 +781,15 @@ class SearchOrchestrator:
             plan.visual_profile,
             plan.channel_limits,
             plan.visual_subqueries,
+            retrieval_profiler,
         )
+        retrieval_profile = retrieval_profiler.snapshot()
         trace["retrieval"] = {
             "status": "ok",
             "elapsed_seconds": round(time.perf_counter() - retrieval_started, 6),
             "result_count": len(results),
+            "timing": retrieval_profile["timing"],
+            "counters": retrieval_profile["counters"],
             "parameters": {
                 "modalities": plan.modalities,
                 "alpha": plan.alpha,

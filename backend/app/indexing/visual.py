@@ -443,26 +443,41 @@ class OpenClipEncoder:
             output = torch.nn.functional.normalize(output, dim=-1)
         return output.float().cpu().numpy()
 
-    def encode_query(self, text: str | None, image_path: str | None, alpha: float = 0.5) -> np.ndarray:
+    def encode_queries(
+        self,
+        texts: list[str] | None,
+        image_path: str | None,
+        alpha: float = 0.5,
+    ) -> np.ndarray:
         torch = self.torch
-        parts = []
+        normalized_texts = [text for text in (texts or []) if text]
         with torch.inference_mode():
-            if text:
-                tokens = self.tokenizer([text]).to(self.device)
-                encoded = torch.nn.functional.normalize(self.model.encode_text(tokens), dim=-1)
-                parts.append((alpha if image_path else 1.0, encoded))
+            text_features = None
+            if normalized_texts:
+                tokens = self.tokenizer(normalized_texts).to(self.device)
+                text_features = torch.nn.functional.normalize(
+                    self.model.encode_text(tokens), dim=-1
+                )
+            image_features = None
             if image_path:
                 tensor = self.preprocess(Image.open(image_path).convert("RGB")).unsqueeze(0).to(self.device)
-                encoded = self.model.encode_image(tensor)
-                if isinstance(encoded, (tuple, list)):
-                    encoded = encoded[0]
-                encoded = torch.nn.functional.normalize(encoded, dim=-1)
-                parts.append(((1 - alpha) if text else 1.0, encoded))
-            if not parts:
+                image_features = self.model.encode_image(tensor)
+                if isinstance(image_features, (tuple, list)):
+                    image_features = image_features[0]
+                image_features = torch.nn.functional.normalize(image_features, dim=-1)
+            if text_features is None and image_features is None:
                 raise ValueError("视觉查询需要文本或参考图")
-            vector = sum(weight * value for weight, value in parts)
-            vector = torch.nn.functional.normalize(vector, dim=-1)
-        return vector.float().cpu().numpy()[0]
+            if text_features is None:
+                vectors = image_features
+            elif image_features is None:
+                vectors = text_features
+            else:
+                vectors = alpha * text_features + (1 - alpha) * image_features
+                vectors = torch.nn.functional.normalize(vectors, dim=-1)
+        return vectors.float().cpu().numpy()
+
+    def encode_query(self, text: str | None, image_path: str | None, alpha: float = 0.5) -> np.ndarray:
+        return self.encode_queries([text] if text else [], image_path, alpha=alpha)[0]
 
 
 class HfVisualEncoder:
@@ -574,22 +589,33 @@ class HfVisualEncoder:
         output = self._image_features(images)
         return output.float().cpu().numpy()
 
-    def encode_query(self, text: str | None, image_path: str | None, alpha: float = 0.5) -> np.ndarray:
+    def encode_queries(
+        self,
+        texts: list[str] | None,
+        image_path: str | None,
+        alpha: float = 0.5,
+    ) -> np.ndarray:
         torch = self.torch
-        parts = []
-        if text:
-            encoded = self._text_features([text])
-            parts.append((alpha if image_path else 1.0, encoded))
+        normalized_texts = [text for text in (texts or []) if text]
+        text_features = self._text_features(normalized_texts) if normalized_texts else None
+        image_features = None
         if image_path:
             image = Image.open(image_path).convert("RGB")
-            encoded = self._image_features([image])
-            parts.append(((1 - alpha) if text else 1.0, encoded))
-        if not parts:
-            raise ValueError("瑙嗚鏌ヨ闇€瑕佹枃鏈垨鍙傝€冨浘")
+            image_features = self._image_features([image])
+        if text_features is None and image_features is None:
+            raise ValueError("视觉查询需要文本或参考图")
         with torch.inference_mode():
-            vector = sum(weight * value for weight, value in parts)
-            vector = torch.nn.functional.normalize(vector, dim=-1)
-        return vector.float().cpu().numpy()[0]
+            if text_features is None:
+                vectors = image_features
+            elif image_features is None:
+                vectors = text_features
+            else:
+                vectors = alpha * text_features + (1 - alpha) * image_features
+                vectors = torch.nn.functional.normalize(vectors, dim=-1)
+        return vectors.float().cpu().numpy()
+
+    def encode_query(self, text: str | None, image_path: str | None, alpha: float = 0.5) -> np.ndarray:
+        return self.encode_queries([text] if text else [], image_path, alpha=alpha)[0]
 
 
 class ClipEncoder:
@@ -619,8 +645,16 @@ class ClipEncoder:
     def encode_frames(self, frames_bgr: list[np.ndarray]) -> np.ndarray:
         return self._encoder.encode_frames(frames_bgr)
 
+    def encode_queries(
+        self,
+        texts: list[str] | None,
+        image_path: str | None,
+        alpha: float = 0.5,
+    ) -> np.ndarray:
+        return self._encoder.encode_queries(texts, image_path, alpha=alpha)
+
     def encode_query(self, text: str | None, image_path: str | None, alpha: float = 0.5) -> np.ndarray:
-        return self._encoder.encode_query(text, image_path, alpha=alpha)
+        return self.encode_queries([text] if text else [], image_path, alpha=alpha)[0]
 
 
 def _resolve_visual_segmentation(

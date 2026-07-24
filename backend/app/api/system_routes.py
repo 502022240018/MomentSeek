@@ -33,4 +33,5 @@ def health() -> dict:
             and settings.milvus_rollout_percent == 100
         ),
         "milvus_fallback_enabled": settings.milvus_fallback_enabled,
+        "query_models": runtime.search_engine.query_model_status(),
     }

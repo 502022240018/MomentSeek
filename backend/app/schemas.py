@@ -226,3 +226,4 @@ class HealthResponse(BaseModel):
     milvus_enabled: bool = False
     milvus_primary: bool = False
     milvus_fallback_enabled: bool = True
+    query_models: dict = Field(default_factory=dict)

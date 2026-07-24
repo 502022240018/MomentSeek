@@ -130,6 +130,28 @@ def test_health_endpoint_serializes_release_manifest_metadata(monkeypatch, tmp_p
     assert body["npu_device_id"] == 0
 
 
+def test_orchestration_profiles_endpoint_uses_runtime_orchestrator(monkeypatch):
+    import app.main as main
+
+    expected = {
+        "enabled": True,
+        "default_profile": "qwen35-unified",
+        "profiles": [{"name": "qwen35-unified"}],
+    }
+
+    class FakeOrchestrator:
+        def profiles(self):
+            return expected
+
+    monkeypatch.setattr(main, "search_orchestrator", FakeOrchestrator())
+
+    with TestClient(main.app) as client:
+        response = client.get("/api/orchestration/profiles")
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
 def test_create_index_job_queues_only_requested_modalities(monkeypatch, tmp_path):
     import app.main as main
 
