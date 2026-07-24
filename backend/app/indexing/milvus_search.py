@@ -23,13 +23,16 @@ MilvusServiceError, controlled by MILVUS_FALLBACK_ENABLED.
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from app.settings import get_settings
+from app.retrieval_metrics import RetrievalProfiler
 from app.search import (
     Candidate,
     _asr_candidates,
@@ -72,6 +75,36 @@ _MODALITY_INDEX_TYPE: dict[str, str] = {
 # sweet-spot that keeps per-page latency low while amortising round-trip cost.
 _QUERY_BATCH = 2_000
 
+BULK_QUERY_FIELDS: dict[str, list[str]] = {
+    "visual": [
+        "frame_idx",
+        "timestamp_ms",
+        "segment_id",
+        "segment_start_ms",
+        "segment_end_ms",
+        "embedding",
+    ],
+    "asr": [
+        "segment_idx",
+        "start_ms",
+        "end_ms",
+        "text",
+        "has_embedding",
+        "embedding",
+    ],
+    "ocr": [
+        "frame_idx",
+        "region_idx",
+        "frame_ms",
+        "start_ms",
+        "end_ms",
+        "text",
+        "avg_box_score",
+        "has_embedding",
+        "embedding",
+    ],
+}
+
 
 class MilvusServiceError(RuntimeError):
     """Raised on connection / timeout failures; NOT on empty result sets."""
@@ -112,6 +145,7 @@ def _query_all(
     modality: str,
     video_id: str,
     output_fields: list[str],
+    profiler: RetrievalProfiler | None = None,
 ) -> list[dict]:
     """Return ALL rows for *video_id* from the given modality collection.
 
@@ -135,39 +169,43 @@ def _query_all(
     timeout = get_settings().milvus_query_timeout_seconds
 
     try:
-        # --- QueryIterator path (pymilvus ≥ 2.3) ----------------------------
-        if hasattr(col, "query_iterator"):
-            iterator = col.query_iterator(
-                batch_size=_QUERY_BATCH,
-                expr=expr,
-                output_fields=output_fields,
-                timeout=timeout,
-            )
-            try:
-                while True:
-                    page = iterator.next()
-                    if not page:
-                        break
-                    rows.extend(page)
-            finally:
-                iterator.close()
-        else:
-            # --- Offset-pagination fallback (pymilvus < 2.3) -----------------
-            # Each page hits a different QueryNode shard; this is less
-            # efficient than the iterator but functionally correct.
-            offset = 0
-            while True:
-                page = col.query(
+        span = profiler.span("milvus_rpc", modality) if profiler else nullcontext()
+        with span:
+            # --- QueryIterator path (pymilvus ≥ 2.3) ------------------------
+            if hasattr(col, "query_iterator"):
+                iterator = col.query_iterator(
+                    batch_size=_QUERY_BATCH,
                     expr=expr,
                     output_fields=output_fields,
-                    limit=_QUERY_BATCH,
-                    offset=offset,
                     timeout=timeout,
                 )
-                rows.extend(page)
-                if len(page) < _QUERY_BATCH:
-                    break
-                offset += _QUERY_BATCH
+                try:
+                    while True:
+                        page = iterator.next()
+                        if not page:
+                            break
+                        rows.extend(page)
+                        if profiler:
+                            profiler.increment("milvus", f"{modality}_pages")
+                finally:
+                    iterator.close()
+            else:
+                # --- Offset-pagination fallback (pymilvus < 2.3) ------------
+                offset = 0
+                while True:
+                    page = col.query(
+                        expr=expr,
+                        output_fields=output_fields,
+                        limit=_QUERY_BATCH,
+                        offset=offset,
+                        timeout=timeout,
+                    )
+                    rows.extend(page)
+                    if profiler:
+                        profiler.increment("milvus", f"{modality}_pages")
+                    if len(page) < _QUERY_BATCH:
+                        break
+                    offset += _QUERY_BATCH
 
     except MilvusServiceError:
         raise
@@ -176,7 +214,91 @@ def _query_all(
             f"Milvus query failed for modality={modality} video={video_id}: {exc}"
         ) from exc
 
+    if profiler:
+        profiler.increment("milvus", f"{modality}_rows", len(rows))
+        profiler.increment("milvus", f"{modality}_requests")
     return rows
+
+
+def query_rows_for_videos(
+    client: "MilvusClient",
+    modality: str,
+    video_ids: list[str],
+    output_fields: list[str],
+    profiler: RetrievalProfiler | None = None,
+) -> dict[str, list[dict]]:
+    """Traverse one collection once and group rows for a batch of videos."""
+    unique_ids = list(dict.fromkeys(str(value) for value in video_ids if value))
+    grouped = {video_id: [] for video_id in unique_ids}
+    if not unique_ids:
+        return grouped
+
+    col = client.collection_for(modality)
+    requested_fields = list(dict.fromkeys(["video_id", *output_fields]))
+    available_fields = _schema_available_fields(col, requested_fields)
+    if "video_id" not in available_fields:
+        raise MilvusServiceError(
+            f"Milvus collection for modality={modality} has no video_id field"
+        )
+    expr = f"video_id in {json.dumps(unique_ids, ensure_ascii=False)}"
+    timeout = get_settings().milvus_query_timeout_seconds
+    row_count = 0
+    try:
+        span = profiler.span("milvus_rpc", modality) if profiler else nullcontext()
+        with span:
+            if hasattr(col, "query_iterator"):
+                iterator = col.query_iterator(
+                    batch_size=_QUERY_BATCH,
+                    expr=expr,
+                    output_fields=available_fields,
+                    timeout=timeout,
+                )
+                try:
+                    while True:
+                        page = iterator.next()
+                        if not page:
+                            break
+                        for row in page:
+                            video_id = str(row.get("video_id") or "")
+                            if video_id in grouped:
+                                grouped[video_id].append(row)
+                                row_count += 1
+                        if profiler:
+                            profiler.increment("milvus", f"{modality}_pages")
+                finally:
+                    iterator.close()
+            else:
+                offset = 0
+                while True:
+                    page = col.query(
+                        expr=expr,
+                        output_fields=available_fields,
+                        limit=_QUERY_BATCH,
+                        offset=offset,
+                        timeout=timeout,
+                    )
+                    for row in page:
+                        video_id = str(row.get("video_id") or "")
+                        if video_id in grouped:
+                            grouped[video_id].append(row)
+                            row_count += 1
+                    if profiler:
+                        profiler.increment("milvus", f"{modality}_pages")
+                    if len(page) < _QUERY_BATCH:
+                        break
+                    offset += _QUERY_BATCH
+    except MilvusServiceError:
+        raise
+    except Exception as exc:
+        raise MilvusServiceError(
+            f"Milvus batch query failed for modality={modality}: {exc}"
+        ) from exc
+
+    if profiler:
+        profiler.increment("milvus", f"{modality}_rows", row_count)
+        profiler.increment("milvus", f"{modality}_requests")
+        profiler.increment("milvus", f"{modality}_video_batches")
+    return grouped
 
 
 def _ann_search(
@@ -186,6 +308,7 @@ def _ann_search(
     query: list[float],
     limit: int,
     output_fields: list[str],
+    profiler: RetrievalProfiler | None = None,
 ) -> list[dict]:
     """Execute a per-video ANN search; used only by face and speaker."""
     col = client.collection_for(modality)
@@ -197,15 +320,17 @@ def _ann_search(
         else {"metric_type": metric, "params": {"nprobe": _IVF_NPROBE}}
     )
     try:
-        results = col.search(
-            data=[query],
-            anns_field="embedding",
-            param=sp,
-            limit=limit,
-            expr=f'video_id == "{video_id}"',
-            output_fields=output_fields,
-            timeout=get_settings().milvus_query_timeout_seconds,
-        )
+        span = profiler.span("milvus_rpc", modality) if profiler else nullcontext()
+        with span:
+            results = col.search(
+                data=[query],
+                anns_field="embedding",
+                param=sp,
+                limit=limit,
+                expr=f'video_id == "{video_id}"',
+                output_fields=output_fields,
+                timeout=get_settings().milvus_query_timeout_seconds,
+            )
     except Exception as exc:
         raise MilvusServiceError(
             f"Milvus ANN search failed for modality={modality}: {exc}"
@@ -216,6 +341,9 @@ def _ann_search(
         for f in output_fields:
             row[f] = hit.entity.get(f)
         hits.append(row)
+    if profiler:
+        profiler.increment("milvus", f"{modality}_rows", len(hits))
+        profiler.increment("milvus", f"{modality}_requests")
     return hits
 
 
@@ -231,6 +359,8 @@ def milvus_visual_candidates(
     segment_ms: int | None = None,
     profile: str = "balanced",
     limit: int = 72,
+    profiler: RetrievalProfiler | None = None,
+    rows: list[dict] | None = None,
 ) -> list[Candidate]:
     """Full-video visual recall via Milvus; functionally equivalent to _visual_candidates().
 
@@ -244,10 +374,12 @@ def milvus_visual_candidates(
     they are inferred from the Milvus data itself. They are kept as parameters
     for backward compatibility and as fallback values when Milvus data is incomplete.
     """
-    rows = _query_all(
-        client, "visual", video_id,
-        ["frame_idx", "timestamp_ms", "segment_id", "segment_start_ms", "segment_end_ms", "embedding"],
-    )
+    if rows is None:
+        rows = _query_all(
+            client, "visual", video_id,
+            ["frame_idx", "timestamp_ms", "segment_id", "segment_start_ms", "segment_end_ms", "embedding"],
+            profiler,
+        )
     if not rows:
         return []
 
@@ -462,6 +594,8 @@ def milvus_asr_candidates(
     query_text: str,
     query_embedding: np.ndarray,
     limit: int,
+    profiler: RetrievalProfiler | None = None,
+    rows: list[dict] | None = None,
 ) -> list[Candidate]:
     """Full-video ASR recall via Milvus; functionally equivalent to the NPZ path.
 
@@ -476,10 +610,12 @@ def milvus_asr_candidates(
 
     The downstream _asr_candidates() call is therefore identical in both paths.
     """
-    rows = _query_all(
-        client, "asr", video_id,
-        ["segment_idx", "start_ms", "end_ms", "text", "has_embedding", "embedding"],
-    )
+    if rows is None:
+        rows = _query_all(
+            client, "asr", video_id,
+            ["segment_idx", "start_ms", "end_ms", "text", "has_embedding", "embedding"],
+            profiler,
+        )
     if not rows:
         return []
 
@@ -534,6 +670,8 @@ def milvus_ocr_candidates(
     query_text: str,
     query_embedding: np.ndarray,
     limit: int,
+    profiler: RetrievalProfiler | None = None,
+    rows: list[dict] | None = None,
 ) -> list[Candidate]:
     """Full-video OCR recall via Milvus; functionally equivalent to the NPZ path.
 
@@ -549,11 +687,13 @@ def milvus_ocr_candidates(
 
     The downstream _asr_candidates(modality="ocr") call is identical in both paths.
     """
-    rows = _query_all(
-        client, "ocr", video_id,
-        ["frame_idx", "region_idx", "frame_ms", "start_ms", "end_ms",
-         "text", "avg_box_score", "has_embedding", "embedding"],
-    )
+    if rows is None:
+        rows = _query_all(
+            client, "ocr", video_id,
+            ["frame_idx", "region_idx", "frame_ms", "start_ms", "end_ms",
+             "text", "avg_box_score", "has_embedding", "embedding"],
+            profiler,
+        )
     if not rows:
         return []
 
@@ -615,6 +755,7 @@ def milvus_face_candidates(
     query: np.ndarray,
     limit: int,
     threshold: float = 0.35,
+    profiler: RetrievalProfiler | None = None,
 ) -> list[Candidate]:
     """Face track recall: ANN candidate expansion → exact cosine re-score → threshold.
 
@@ -637,6 +778,7 @@ def milvus_face_candidates(
         client, "face", video_id, query_norm.tolist(),
         ann_limit,
         ["track_idx", "start_ms", "end_ms", "best_ms", "embedding"],
+        profiler,
     )
     scored: list[tuple[float, dict]] = []
     for hit in hits:
@@ -690,6 +832,7 @@ def milvus_speaker_candidates(
     query: np.ndarray,
     limit: int,
     threshold: float = 0.50,
+    profiler: RetrievalProfiler | None = None,
 ) -> list[Candidate]:
     """Speaker utterance recall: ANN expansion → exact cosine re-score → threshold.
 
@@ -708,6 +851,7 @@ def milvus_speaker_candidates(
         client, "speaker", video_id, query_norm.tolist(),
         ann_limit,
         ["utterance_idx", "start_ms", "end_ms", "track_id", "asr_chunk_idx", "embedding"],
+        profiler,
     )
     scored: list[tuple[float, dict]] = []
     for hit in hits:

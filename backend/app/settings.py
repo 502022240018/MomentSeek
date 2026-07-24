@@ -128,6 +128,12 @@ class Settings(BaseSettings):
     orchestration_trace_enabled: bool = True
     orchestration_trace_path: Path = Path("runtime/orchestration-traces.jsonl")
 
+    # Query encoders live in the API process, independently from indexing
+    # workers. Production can pay model load/kernel compilation during startup
+    # so the first user request sees warm latency.
+    search_prewarm_enabled: bool = False
+    search_prewarm_required: bool = False
+
     # Milvus is the primary vector store. SQLite remains the metadata/catalog
     # database and NPZ files are retained as a local recovery/search fallback.
     milvus_enabled: bool = True
@@ -141,6 +147,7 @@ class Settings(BaseSettings):
     milvus_fallback_enabled: bool = True
     milvus_shadow_compare_enabled: bool = False
     milvus_rollout_percent: int = 100
+    milvus_search_video_batch_size: int = 8
     # Local NPZ is written before Milvus, so "warn" preserves service
     # availability and leaves a recoverable artifact for later backfill.
     milvus_write_fail_policy: Literal["raise", "warn"] = "warn"
@@ -170,6 +177,13 @@ class Settings(BaseSettings):
     def validate_milvus_query_timeout_seconds(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("milvus_query_timeout_seconds 必须大于 0")
+        return value
+
+    @field_validator("milvus_search_video_batch_size")
+    @classmethod
+    def validate_milvus_search_video_batch_size(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("milvus_search_video_batch_size 必须大于 0")
         return value
 
     @property

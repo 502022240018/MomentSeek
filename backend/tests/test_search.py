@@ -13,6 +13,7 @@ from app.search import (
     _visual_candidates,
     lexical_score,
 )
+from app.retrieval_metrics import RetrievalProfiler
 from app.settings import Settings
 
 
@@ -335,6 +336,103 @@ def test_visual_subquery_fusion_prefers_constraint_coverage():
     assert candidates[0].features["visual_subquery_scores"] == pytest.approx(
         [np.sqrt(0.5), np.sqrt(0.5)]
     )
+
+
+def test_visual_query_subqueries_use_one_batched_encoder_call(tmp_path):
+    settings = _settings(tmp_path)
+    engine = SearchEngine(settings, Catalog(settings.db_path))
+    calls = []
+
+    class StubClip:
+        def encode_queries(self, texts, image_path, alpha):
+            calls.append((texts, image_path, alpha))
+            return np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+    engine._clip = lambda _model=None: StubClip()  # type: ignore[method-assign]
+
+    vectors = engine._encode_visual_queries(
+        "siglip2-so400m-384",
+        ["players holding cartons", "players clinking cartons"],
+        None,
+        0.5,
+        None,
+    )
+
+    assert vectors.shape == (2, 2)
+    assert calls == [(
+        ["players holding cartons", "players clinking cartons"],
+        None,
+        0.5,
+    )]
+
+
+def test_semantic_query_is_encoded_once_per_model_per_request(tmp_path):
+    settings = _settings(tmp_path)
+    engine = SearchEngine(settings, Catalog(settings.db_path))
+    calls = []
+    engine._encode_asr_query = lambda text, model: (  # type: ignore[method-assign]
+        calls.append((text, model)) or np.asarray([1.0, 0.0], dtype=np.float32)
+    )
+    cache = {}
+    manifest = {"semantic_model_key": "semantic-a"}
+    embeddings = np.ones((1, 2), dtype=np.float32)
+
+    first = engine._semantic_query("hello", manifest, embeddings, cache, None)
+    second = engine._semantic_query("hello", manifest, embeddings, cache, None)
+
+    assert np.array_equal(first, second)
+    assert calls == [("hello", "semantic-a")]
+
+
+def test_retrieval_profiler_accumulates_nested_timings_and_counters():
+    profiler = RetrievalProfiler()
+
+    with profiler.span("query_encode", "visual"):
+        pass
+    profiler.increment("milvus", "visual_rows", 12)
+    profiler.increment("milvus", "visual_rows", 3)
+
+    snapshot = profiler.snapshot()
+    assert snapshot["timing"]["query_encode"]["visual"] >= 0
+    assert snapshot["counters"]["milvus"]["visual_rows"] == 15
+
+
+def test_prewarm_loads_and_reports_resident_query_models(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        search_prewarm_enabled=True,
+        asr_semantic_enabled=True,
+    )
+    engine = SearchEngine(settings, Catalog(settings.db_path))
+    visual_calls = []
+    text_calls = []
+
+    class StubVisual:
+        def encode_queries(self, texts, image_path, alpha=0.5):
+            visual_calls.append((texts, image_path, alpha))
+            return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    engine._clip = lambda model=None, profiler=None: (  # type: ignore[method-assign]
+        engine._clip_encoders.setdefault(model, StubVisual())
+    )
+
+    def fake_text(text, model, profiler=None):
+        text_calls.append((text, model))
+        engine._text_encoders[(model, "cpu")] = object()
+        return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    engine._encode_asr_query = fake_text  # type: ignore[method-assign]
+
+    status = engine.prewarm()
+
+    assert status["status"] == "ready"
+    assert status["resident"] is True
+    assert status["visual_models"] == [settings.visual_model]
+    assert status["text_models"] == [settings.asr_semantic_model]
+    assert len(visual_calls) == 1
+    assert len(text_calls) == 1
 
 
 def test_asr_v3_lexical_search_uses_chunk_times_and_texts(tmp_path):

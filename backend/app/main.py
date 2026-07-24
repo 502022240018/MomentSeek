@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import shutil
@@ -102,6 +103,8 @@ def _restart_indexer_daemon() -> None:
 async def lifespan(_: FastAPI):
     global _indexer_daemon_process
     settings.ensure_dirs()
+    if settings.search_prewarm_enabled:
+        await asyncio.to_thread(search_engine.prewarm)
     _indexer_daemon_process = _spawn_indexer_daemon() if settings.indexer_mode == "daemon" else None
     try:
         yield
@@ -110,6 +113,7 @@ async def lifespan(_: FastAPI):
         if daemon is not None and daemon.poll() is None:
             _terminate_process_group(daemon.pid)
         _indexer_daemon_process = None
+        search_engine.close()
 
 
 def _safe_suffix(filename: str | None, fallback: str) -> str:
