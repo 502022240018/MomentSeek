@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from app import model_sources
 from app.model_sources import (
     hf_cached_snapshot_path,
     offline_env,
@@ -82,6 +83,31 @@ def test_resolve_modelscope_model_source_accepts_modelscope_snapshot_layout(tmp_
     (snapshot / "model.pt").write_bytes(b"weights")
 
     assert resolve_modelscope_model_source(tmp_path, "iic/SenseVoiceSmall") == str(snapshot)
+
+
+def test_resolve_modelscope_model_source_skips_inaccessible_cache(tmp_path, monkeypatch):
+    inaccessible = tmp_path / "inaccessible" / "iic" / "SenseVoiceSmall"
+    original_is_dir = Path.is_dir
+
+    monkeypatch.setattr(
+        model_sources,
+        "_modelscope_candidates",
+        lambda *_args: [inaccessible],
+    )
+
+    def guarded_is_dir(path):
+        if path == inaccessible / "snapshots":
+            raise PermissionError(path)
+        return original_is_dir(path)
+
+    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+
+    with pytest.raises(FileNotFoundError, match="本地 ModelScope/FunASR 模型缺失"):
+        resolve_modelscope_model_source(
+            tmp_path,
+            "iic/SenseVoiceSmall",
+            local_files_only=True,
+        )
 
 
 def test_offline_env_restores_previous_values(monkeypatch):

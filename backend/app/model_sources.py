@@ -119,19 +119,25 @@ def _modelscope_candidates(model_root: str | Path | None, model_id: str) -> list
 
 
 def _has_modelscope_assets(path: Path) -> bool:
-    return path.is_dir() and any(
-        item.is_file() and item.suffix.lower() in MODELSCOPE_WEIGHT_SUFFIXES
-        for item in path.rglob("*")
-    )
+    try:
+        return path.is_dir() and any(
+            item.is_file() and item.suffix.lower() in MODELSCOPE_WEIGHT_SUFFIXES
+            for item in path.rglob("*")
+        )
+    except OSError:
+        return False
 
 
 def _modelscope_snapshot_path(repo_dir: Path) -> Path | None:
-    snapshots = repo_dir / "snapshots"
-    if not snapshots.is_dir():
+    try:
+        snapshots = repo_dir / "snapshots"
+        if not snapshots.is_dir():
+            return None
+        for snapshot in sorted(snapshots.iterdir(), key=lambda item: item.name):
+            if _has_modelscope_assets(snapshot):
+                return snapshot
+    except OSError:
         return None
-    for snapshot in sorted(snapshots.iterdir(), key=lambda item: item.name):
-        if _has_modelscope_assets(snapshot):
-            return snapshot
     return None
 
 
