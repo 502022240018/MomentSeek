@@ -1,0 +1,17 @@
+-r requirements-dev.txt
+
+# Lightweight CPU-only dependency set for unit and Milvus integration tests.
+# Keep heavyweight inference stacks (Torch, FunASR, InsightFace, etc.) in the
+# runtime-specific requirement files; CI tests mock those model runtimes.
+fastapi==0.123.10
+httpx==0.28.1
+numpy==1.26.4
+opencc-python-reimplemented==0.1.7
+opencv-python-headless==4.11.0.86
+pillow==10.4.0
+pydantic-settings==2.12.0
+pymilvus==2.6.16
+pypinyin==0.54.0
+python-multipart==0.0.22
+rapidocr==3.9.0
+setuptools<81
