@@ -16,10 +16,10 @@ print("="*70)
 # 检查配置
 settings = get_settings()
 print(f"\n配置检查:")
-print(f"  visual_use_ann_search: {settings.visual_use_ann_search}")
 print(f"  visual_use_diskann: {settings.visual_use_diskann}")
 print(f"  visual_ann_top_k: {settings.visual_ann_top_k}")
 print(f"  visual_sample_size: {settings.visual_sample_size}")
+print(f"  visual_sample_strategy: {settings.visual_sample_strategy}")
 
 # 连接Milvus
 print(f"\n连接Milvus...")
