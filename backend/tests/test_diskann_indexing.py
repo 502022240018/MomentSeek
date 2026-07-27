@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """索引测试数据到DiskANN集合"""
+import pytest
 import sys
 sys.path.insert(0, 'backend')
+
+pytestmark = pytest.mark.integration
 
 import numpy as np
 from app.indexing.milvus_client import get_milvus_client

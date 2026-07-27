@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import pytest
 import sys
 sys.path.insert(0, '/app/backend')
+
+pytestmark = pytest.mark.integration
 
 import numpy as np
 import time

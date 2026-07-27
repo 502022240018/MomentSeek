@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """测试真实查询的得分分布"""
+import pytest
 import sys
 sys.path.insert(0, '/app/backend')
+
+pytestmark = pytest.mark.integration
 
 from app.indexing.milvus_client import get_milvus_client
 from app.indexing.milvus_search import milvus_visual_candidates

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """测试DiskANN模式下的Visual检索功能"""
+import pytest
 import sys
 sys.path.insert(0, 'backend')
+
+pytestmark = pytest.mark.integration
 
 import time
 import numpy as np
