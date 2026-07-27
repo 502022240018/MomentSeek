@@ -1,0 +1,106 @@
+╔═══════════════════════════════════════════════════════════════╗
+║     🎉 MomentSeek 0829 部署成功！                             ║
+╚═══════════════════════════════════════════════════════════════╝
+
+部署时间: 2026-07-27 09:40
+状态: ✅ 成功
+
+【已启动的服务】
+✅ momentseek-0829-platform  - 主应用 (端口8100)
+✅ momentseek-0829-milvus    - 向量数据库 (gRPC端口19531)
+✅ momentseek-0829-minio     - 对象存储 (控制台9002)
+✅ momentseek-0829-etcd      - 元数据存储
+
+【关键配置】
+- 镜像名称: momentseek-0829-platform:e6cdc43
+- NPU设备: NPU 4 (空闲，未被占用)
+- 主应用端口: 8100
+- 环境配置: prod.ascend
+- 模型目录: /home/momentseek-29154/models/platform (共享，只读)
+- Runtime目录: /home/momentseek_0829_develop/workplace/MomentSeek/runtime (独立)
+- 查询预热: 已禁用 (避免启动时NPU冲突)
+
+【遇到并解决的问题】
+1. ❌ docker-compose命令问题
+   ✅ 修复: 使用docker-compose代替docker compose
+
+2. ❌ 模型校验写入只读目录
+   ✅ 修复: models.lock.json写入runtime目录
+
+3. ❌ NPU 6被占用
+   ✅ 修复: 改用空闲的NPU 4
+
+4. ❌ SEARCH_PREWARM导致启动失败
+   ✅ 修复: 在部署脚本中强制禁用prewarm
+
+【访问地址】
+🌐 Web界面:   http://127.0.0.1:8100
+📚 API文档:   http://127.0.0.1:8100/docs
+💚 健康检查:  http://127.0.0.1:8100/api/health
+🔍 Milvus健康: http://127.0.0.1:9092/healthz
+📦 MinIO控制台: http://127.0.0.1:9002
+
+【健康检查结果】
+{
+  "status": "ok",
+  "env_profile": "prod.ascend",
+  "npu_enabled": true,
+  "npu_device_id": 0,
+  "indexer_mode": "daemon",
+  "npu_worker_mode": "isolated",
+  "milvus_enabled": true,
+  "query_models": {
+    "status": "disabled"  ← 查询预热已禁用，首次搜索时才加载模型
+  }
+}
+
+【日常管理命令】
+# 查看所有容器
+docker ps | grep momentseek-0829
+
+# 查看主应用日志
+docker logs -f momentseek-0829-platform
+
+# 重启服务
+docker restart momentseek-0829-platform
+
+# 停止所有服务
+./stop_all_0829.sh
+
+# 检查NPU占用
+npu-smi info -t proc-mem -i 4 -c 0
+
+【注意事项】
+⚠️  查询模型预热已禁用，首次搜索时会加载模型到NPU（约需10-30秒）
+⚠️  后续搜索会使用常驻模型，速度会快很多
+⚠️  NPU 4 必须保持空闲，避免被其他进程占用
+⚠️  模型目录是只读共享，不会影响同事环境
+
+【下一步操作】
+1. 打开 http://127.0.0.1:8100 访问Web界面
+2. 上传测试视频
+3. 选择需要的索引通道（Visual/Face/ASR/OCR）
+4. 构建索引
+5. 执行搜索测试
+
+【获取帮助】
+- 快速命令参考: cat QUICK_REFERENCE_0829.md
+- 详细部署指南: cat DEPLOY_0829_GUIDE.md
+- 故障排查: cat DEPLOY_0829_GUIDE.md | grep -A 20 "故障排查"
+
+【文件清单】
+- .env.0829                 - 环境配置
+- check_env_0829.sh         - 环境检查
+- start_milvus_0829.sh      - 启动Milvus
+- stop_milvus_0829.sh       - 停止Milvus
+- deploy_0829.sh            - 部署主应用
+- start_all_0829.sh         - 一键启动所有服务
+- stop_all_0829.sh          - 停止所有服务
+- DEPLOY_0829_GUIDE.md      - 详细指南
+- QUICK_REFERENCE_0829.md   - 快速参考
+- CHECKLIST_0829.txt        - 检查清单
+- DEPLOY_SUCCESS_0829.txt   - 本文件
+
+祝使用愉快！🚀
+
+

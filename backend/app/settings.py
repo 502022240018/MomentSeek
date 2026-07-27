@@ -152,6 +152,15 @@ class Settings(BaseSettings):
     # availability and leaves a recoverable artifact for later backfill.
     milvus_write_fail_policy: Literal["raise", "warn"] = "warn"
 
+    # Visual模态优化配置
+    visual_use_diskann: bool = False  # 是否使用DiskANN索引（需重建索引）
+    visual_use_ann_search: bool = False  # 是否使用ANN检索策略（vs全量query）
+    visual_ann_top_k: int = 500  # ANN召回候选数量
+    visual_sample_size: int = 500  # 分布估算采样帧数
+    visual_sample_strategy: Literal["random", "stratified", "systematic"] = "stratified"
+    visual_shadow_test_enabled: bool = False  # Shadow测试开关
+    visual_shadow_test_sample_rate: float = 0.1  # Shadow测试采样率
+
     @field_validator("indexer_mode", mode="before")
     @classmethod
     def normalize_indexer_mode(cls, value: object) -> object:

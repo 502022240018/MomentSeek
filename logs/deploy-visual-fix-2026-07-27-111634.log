@@ -1,0 +1,169 @@
+
+[2026-07-27 11:16:34] Step 1: Pre-flight checks
+app_port=8100
+
+[2026-07-27 11:16:34] Checking Milvus connectivity: 127.0.0.1:19531
+milvus_preflight=PASS endpoint=127.0.0.1:19531
+
+[2026-07-27 11:16:34] Step 2: Disk space check
+disk_available=644GB
+
+[2026-07-27 11:16:34] Step 3: NPU availability check
+npu_id=4 status=unknown
+
+[2026-07-27 11:16:35] Step 4: Port availability check
+
+[2026-07-27 11:16:35] Step 5: InsightFace wheel checksum
+insightface_wheel=OK
+
+[2026-07-27 11:16:35] Step 6: Git status check
+git_commit=e6cdc43 branch=main
+
+[2026-07-27 11:16:35] Step 7: Build Docker image
+Building image: momentseek-0829-platform:e6cdc43
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  20.54MB
+Step 1/28 : ARG ASCEND_RUNTIME_IMAGE=momentseek-mvp:ascend-runtime
+Step 2/28 : FROM node:20-alpine AS frontend-build
+ ---> cd266ddf7e80
+Step 3/28 : WORKDIR /src/frontend
+ ---> Using cache
+ ---> ca8d5b9c51f6
+Step 4/28 : COPY frontend/package*.json ./
+ ---> Using cache
+ ---> 870cb8d35b14
+Step 5/28 : RUN npm ci
+ ---> Using cache
+ ---> 82bc52ef260b
+Step 6/28 : COPY frontend/ ./
+ ---> Using cache
+ ---> 5a5462fda4fe
+Step 7/28 : RUN npm run build
+ ---> Using cache
+ ---> b37d3b71d836
+Step 8/28 : FROM ${ASCEND_RUNTIME_IMAGE}
+ ---> 9b6878a631e7
+Step 9/28 : USER root
+ ---> Using cache
+ ---> 594b13953143
+Step 10/28 : ENV PYTHONUNBUFFERED=1     PIP_NO_CACHE_DIR=1     TORCH_DEVICE_BACKEND_AUTOLOAD=0     OPENBLAS_NUM_THREADS=8     OPENBLAS_DEFAULT_NUM_THREADS=8     OMP_NUM_THREADS=8     MKL_NUM_THREADS=8     NUMEXPR_NUM_THREADS=8     BLIS_NUM_THREADS=8     TOKENIZERS_PARALLELISM=false
+ ---> Using cache
+ ---> 9673a3434d57
+Step 11/28 : RUN if command -v ffmpeg >/dev/null 2>&1; then         echo "ffmpeg already present in Ascend runtime";     elif command -v apt-get >/dev/null 2>&1; then         apt-get update         && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0         && rm -rf /var/lib/apt/lists/*;     elif command -v dnf >/dev/null 2>&1; then         dnf install -y ffmpeg mesa-libGL glib2         && dnf clean all;     else         echo "No supported package manager found for ffmpeg installation" >&2;         exit 1;     fi
+ ---> Using cache
+ ---> 0c6280b5e37f
+Step 12/28 : WORKDIR /app/backend
+ ---> Using cache
+ ---> 9d961f89db0b
+Step 13/28 : COPY vendor-wheels/ /tmp/vendor-wheels/
+ ---> Using cache
+ ---> dfde210098d9
+Step 14/28 : COPY backend/requirements-ascend.txt ./
+ ---> Using cache
+ ---> 947cd2b6c0ae
+Step 15/28 : COPY backend/requirements-ascend-preserve.txt ./
+ ---> Using cache
+ ---> fee185b79e75
+Step 16/28 : COPY backend/requirements-milvus-client.txt ./
+ ---> Using cache
+ ---> 95e67a4a510e
+Step 17/28 : COPY backend/requirements-speaker.txt ./
+ ---> Using cache
+ ---> 4603d6cfc263
+Step 18/28 : COPY backend/constraints-ascend.txt ./
+ ---> Using cache
+ ---> afbd54269d99
+Step 19/28 : RUN (cd /tmp/vendor-wheels && sha256sum -c SHA256SUMS)     && pip install --no-index --no-deps --find-links=/tmp/vendor-wheels         -r requirements-milvus-client.txt     && pip install --no-index --no-deps /tmp/vendor-wheels/insightface-1.0.1-py3-none-any.whl     && pip install -c constraints-ascend.txt -r requirements-ascend.txt     && pip install --no-deps -r requirements-ascend-preserve.txt     && python3 -c "from importlib.metadata import version; import cv2; assert version('torch') == '2.9.0'; assert version('torch-npu') == '2.9.0.post1'; assert version('torchaudio') == '2.9.0'; assert cv2.__version__ == '4.11.0'"     && rm -rf /tmp/vendor-wheels
+ ---> Using cache
+ ---> 01408e13810b
+Step 20/28 : COPY backend/ ./
+ ---> ac9fb4ea257f
+Step 21/28 : COPY deploy/orchestration/ ./deploy/orchestration/
+ ---> 29595209c464
+Step 22/28 : COPY deploy/models/ascend-prod.models.json /app/deploy/models/ascend-prod.models.json
+ ---> 48de8364f763
+Step 23/28 : COPY scripts/verify_models.py /app/scripts/verify_models.py
+ ---> 1aa5bab1be67
+Step 24/28 : COPY --from=frontend-build /src/frontend/dist ./app/static
+ ---> 0f7e1c7fae7b
+Step 25/28 : RUN mkdir -p /app/runtime /app/models
+ ---> Running in af99d3a1eb27
+ ---> Removed intermediate container af99d3a1eb27
+ ---> b1df093fda05
+Step 26/28 : EXPOSE 8000
+ ---> Running in c8ae5d7a3ff5
+ ---> Removed intermediate container c8ae5d7a3ff5
+ ---> df9f7db09bac
+Step 27/28 : HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import os, urllib.request; port=os.environ.get('APP_PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health')"
+ ---> Running in 8ccf4bad7d1a
+ ---> Removed intermediate container 8ccf4bad7d1a
+ ---> b6baa7520b84
+Step 28/28 : CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port \"${APP_PORT:-8000}\" --workers 1"]
+ ---> Running in 4fd068ce6bb0
+ ---> Removed intermediate container 4fd068ce6bb0
+ ---> 0fd460c3280f
+Successfully built 0fd460c3280f
+Successfully tagged momentseek-0829-platform:e6cdc43
+Successfully tagged momentseek-0829-platform:current
+image_built=momentseek-0829-platform:e6cdc43
+
+[2026-07-27 11:16:36] Step 8: Verify production models
+{"verified": 12, "lock": "/app/runtime/models.lock.json"}
+models_verified=OK lock_file=/home/momentseek_0829_develop/workplace/MomentSeek/runtime/models.lock.json
+
+[2026-07-27 11:16:37] Step 9: Check for existing container and running jobs
+no_existing_container
+
+[2026-07-27 11:16:37] Step 10: Start new container
+cfd342d4986870ca98d3cd7d36ee988ff57dc8f55af5daccb626ba5dacfd8ba3
+container_started=momentseek-0829-platform
+
+[2026-07-27 11:16:37] Step 11: Health check
+.
+health_check=PASS
+{
+    "status": "ok",
+    "version": "0.1.0",
+    "app_version": "0.1.0",
+    "env_profile": "prod.ascend",
+    "release_id": null,
+    "git_commit": null,
+    "image_tag": null,
+    "model_manifest": "deploy/models/ascend-prod.models.json",
+    "npu_enabled": true,
+    "npu_device_id": 0,
+    "cuda_enabled": false,
+    "model_idle_policy": "resident",
+    "indexer_mode": "daemon",
+    "npu_worker_mode": "isolated",
+    "orchestration_enabled": false,
+    "orchestration_profile": "qwen35-unified",
+    "milvus_enabled": true,
+    "milvus_primary": true,
+    "milvus_fallback_enabled": true,
+    "query_models": {
+        "status": "disabled",
+        "resident": true,
+        "visual_models": [],
+        "text_models": []
+    }
+}
+
+[2026-07-27 11:16:39] Step 12: Cleanup
+
+[2026-07-27 11:16:39] ✅ Deployment successful!
+
+===========================================
+Container: momentseek-0829-platform
+Image: momentseek-0829-platform:e6cdc43
+Port: 8100
+NPU: 4
+Runtime: /home/momentseek_0829_develop/workplace/MomentSeek/runtime
+Models: /home/momentseek-29154/models/platform
+
+Access the service at: http://127.0.0.1:8100
+API docs: http://127.0.0.1:8100/docs
+===========================================

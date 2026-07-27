@@ -1,0 +1,18 @@
+
+[2026-07-27 11:23:33] Step 1: Pre-flight checks
+app_port=8100
+
+[2026-07-27 11:23:33] Checking Milvus connectivity: 127.0.0.1:19531
+milvus_preflight=PASS endpoint=127.0.0.1:19531
+
+[2026-07-27 11:23:33] Step 2: Disk space check
+disk_available=644GB
+
+[2026-07-27 11:23:33] Step 3: NPU availability check
+npu_id=4 status=unknown
+
+[2026-07-27 11:23:34] Step 4: Port availability check
+WARNING: Port 8100 is already in use:
+LISTEN 0      2048                                  0.0.0.0:8100       0.0.0.0:*    users:(("uvicorn",pid=3210999,fd=6))         
+
+DEPLOY_FAILED: Port 8100 is already bound. Stop the service using it first.
