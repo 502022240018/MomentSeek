@@ -153,13 +153,12 @@ class Settings(BaseSettings):
     milvus_write_fail_policy: Literal["raise", "warn"] = "warn"
 
     # Visual模态优化配置
-    visual_use_diskann: bool = False  # 是否使用DiskANN索引（需重建索引）
-    visual_use_ann_search: bool = False  # 是否使用ANN检索策略（vs全量query）
-    visual_ann_top_k: int = 500  # ANN召回候选数量
-    visual_sample_size: int = 500  # 分布估算采样帧数
-    visual_sample_strategy: Literal["random", "stratified", "systematic"] = "stratified"
-    visual_shadow_test_enabled: bool = False  # Shadow测试开关
-    visual_shadow_test_sample_rate: float = 0.1  # Shadow测试采样率
+    visual_use_diskann: bool = False  # 索引类型: True=DiskANN(磁盘), False=HNSW(内存)
+    visual_ann_top_k: int = 500  # ANN召回数量: 每个子查询召回的候选帧数 (推荐300-1000)
+    visual_sample_size: int = 500  # 分布估算采样数: 用于计算z-score的样本帧数 (推荐300-1000)
+    visual_sample_strategy: Literal["random", "stratified", "systematic"] = "systematic"
+    visual_shadow_test_enabled: bool = False  # Shadow测试开关(已废弃)
+    visual_shadow_test_sample_rate: float = 0.1  # Shadow测试采样率(已废弃)
 
     @field_validator("indexer_mode", mode="before")
     @classmethod
