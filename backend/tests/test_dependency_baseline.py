@@ -1,10 +1,11 @@
 import json
+import sys
 from pathlib import Path
 
-from scripts.verify_models import verify_non_hf_target
-
-
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from scripts.verify_models import verify_non_hf_target
 
 
 def _read(path: str) -> str:
