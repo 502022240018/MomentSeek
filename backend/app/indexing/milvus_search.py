@@ -28,7 +28,7 @@ import logging
 import time
 from collections import defaultdict
 from contextlib import nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
@@ -46,6 +46,7 @@ from app.search import (
 
 if TYPE_CHECKING:
     from app.indexing.milvus_client import MilvusClient
+    from app.retrieval_metrics import Profiler
 
 # Visual模态优化: ANN + 混合采样实现
 from .milvus_search_visual_v2 import milvus_visual_candidates_ann

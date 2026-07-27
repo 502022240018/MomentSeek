@@ -170,10 +170,8 @@ def _systematic_sample(
     注意：这是系统采样（systematic sampling），不是分层采样（stratified sampling）。
     采用随机偏移确保在周期性数据中也能获得无偏样本。
     """
-    from app.settings import get_settings
     import random
 
-    settings = get_settings()
     collection = client.collection_for("visual")
 
     try:
