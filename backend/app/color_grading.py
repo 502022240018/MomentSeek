@@ -428,6 +428,8 @@ class ColorGradingManager:
                             "copy",
                             "-c:a",
                             "aac",
+                            "-af",
+                            "apad",
                             "-movflags",
                             "+faststart",
                             "-shortest",
