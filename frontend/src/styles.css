@@ -172,9 +172,9 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .stage-times { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 7px; }
 .stage-times span { padding: 3px 6px; border-radius: 6px; color: #64635d; background: #f0f0ec; font-size: 9px; }
 .status { padding: 5px 9px; border-radius: 20px; color: #74736d; background: #eeeeeb; font-size: 9px; font-weight: 650; }
-.status.ready, .status.completed { color: #4d743d; background: #eaf3e5; }
-.status.indexing, .status.running { color: #725194; background: #f0e8f6; }
-.status.failed { color: #9b4c45; background: #f8e8e5; }
+.status.ready, .status.completed, .status.succeeded { color: #4d743d; background: #eaf3e5; }
+.status.indexing, .status.running, .status.finalizing, .status.submitting { color: #725194; background: #f0e8f6; }
+.status.failed, .status.submission_unknown { color: #9b4c45; background: #f8e8e5; }
 .status.cancelled { color: #66635d; background: #e8e7e3; }
 .outline { padding: 8px 11px; border: 1px solid #cdccc7; border-radius: 9px; background: white; cursor: pointer; font-size: 10px; }
 .outline:disabled { opacity: .45; cursor: not-allowed; }
@@ -248,6 +248,35 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .voice-hit { display: grid; padding: 13px 0; grid-template-columns: 180px 130px 70px 1fr 260px; gap: 12px; align-items: center; border-top: 1px solid #ecece8; font-size: 10px; }
 .voice-hit strong { color: #774ca2; }
 .voice-hit p { margin: 0; }
+.grading-page { display: grid; max-width: 1380px; margin: auto; gap: 20px; }
+.grading-health { display: flex; padding: 20px 24px; align-items: center; justify-content: space-between; }
+.grading-health h2 { margin: 4px 0; font-size: 18px; }
+.grading-health p { margin: 0; color: #85847d; font-size: 10px; }
+.grading-health.available { border-color: #cfe1c5; background: #fbfef9; }
+.grading-health.unavailable { border-color: #edc6bd; background: #fffafa; }
+.grading-workspace { display: grid; grid-template-columns: minmax(350px, 430px) 1fr; gap: 28px; align-items: start; }
+.grading-form { position: sticky; top: 22px; padding: 25px 27px; }
+.grading-form h2 { margin: 5px 0 18px; font-size: 24px; }
+.grading-form > label:not(.image-drop) { display: flex; margin-top: 15px; flex-direction: column; gap: 7px; color: #6f6e68; font-size: 11px; font-weight: 650; }
+.grading-form select { width: 100%; padding: 11px; border: 1px solid #d9d8d3; border-radius: 10px; outline: none; background: white; }
+.grading-preview { display: grid; min-height: 145px; margin-top: 10px; overflow: hidden; place-items: center; border-radius: 13px; color: #8f8e88; background: #202020; font-size: 10px; }
+.grading-preview video { display: block; width: 100%; max-height: 230px; background: black; }
+.reference-tabs { display: grid; margin: 20px 0 10px; grid-template-columns: 1fr 1fr; padding: 4px; border-radius: 11px; background: #efefeb; }
+.reference-tabs button { padding: 9px; border: 0; border-radius: 8px; background: transparent; cursor: pointer; font-size: 11px; }
+.reference-tabs button.selected { background: white; box-shadow: 0 2px 8px #00000010; font-weight: 700; }
+.grading-reference { min-height: 145px !important; }
+.grading-history { min-width: 0; }
+.grading-task-list { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 16px; }
+.grading-task { padding: 19px; overflow: hidden; }
+.grading-task-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.grading-task-head > div { display: flex; min-width: 0; flex-direction: column; }
+.grading-task-head b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.grading-task-head small { margin-top: 4px; color: #92918a; font-size: 9px; }
+.grading-task > p { margin: 13px 0 0; color: #77766f; font-size: 10px; }
+.grading-task .grading-error { color: #a14f45; }
+.grading-result { display: block; width: calc(100% + 38px); max-height: 260px; margin: 16px -19px 0; background: black; }
+.grading-actions { display: flex; gap: 8px; margin-top: 15px; flex-wrap: wrap; }
+.grading-actions a { color: inherit; text-decoration: none; }
 
 @media (max-width: 1250px) {
   .page-content { padding-left: 28px; padding-right: 28px; }
@@ -256,4 +285,5 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
   .upload-panel { grid-template-columns: 1fr 1fr; }
   .upload-panel > div:first-child { grid-column: 1 / -1; }
   .speaker-grid { grid-template-columns: 1fr; }
+  .grading-task-list { grid-template-columns: 1fr; }
 }

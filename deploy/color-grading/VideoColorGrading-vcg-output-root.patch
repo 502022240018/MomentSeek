@@ -1,0 +1,14 @@
+diff --git a/core/settings.py b/core/settings.py
+index e6ce8c8..c5508f4 100644
+--- a/core/settings.py
++++ b/core/settings.py
+@@ -34,6 +34,9 @@ class Settings:
+                     project_root / "configs/prompts/video_demo.yaml",
+                 )
+             ).resolve(),
++            output_root=Path(
++                os.getenv("VCG_OUTPUT_ROOT", "/VideoColorGrading/output")
++            ).resolve(),
+             database_url=os.getenv(
+                 "VCG_DATABASE_URL",
+                 (

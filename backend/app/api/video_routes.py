@@ -7,7 +7,6 @@ from fastapi.responses import FileResponse
 
 from app.schemas import IndexRequest, VideoRenameRequest
 
-
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -91,6 +90,8 @@ def delete_video(video_id: str) -> dict:
     jobs = runtime.catalog.list_jobs(video_id)
     if any(job["status"] in {"queued", "running"} for job in jobs):
         raise HTTPException(status_code=409, detail="该视频有索引任务进行中，请等任务结束后再删除")
+    if runtime.catalog.has_active_color_grading_tasks(video_id):
+        raise HTTPException(status_code=409, detail="该视频有仿色任务进行中，请等任务结束后再删除")
     milvus_cleanup = None
     if runtime.settings.milvus_enabled:
         try:

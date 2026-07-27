@@ -27,6 +27,37 @@ export type Job = {
   error?: string;
 };
 
+export type ColorGradingCapability = {
+  enabled: boolean;
+  available: boolean;
+  reason?: string | null;
+  model_loaded: boolean;
+  database_connected: boolean;
+  device?: string | null;
+};
+
+export type ColorGradingTask = {
+  id: string;
+  external_task_id?: string | null;
+  input_video_id: string;
+  input_video_name: string;
+  reference_type: "image" | "video";
+  reference_video_id?: string | null;
+  reference_video_name?: string | null;
+  reference_url?: string | null;
+  status: string;
+  stage: string;
+  upstream_status?: string | null;
+  queue_position?: number | null;
+  media_url?: string | null;
+  lut_url?: string | null;
+  imported_video_id?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type IndexOptions = {
   visualModel?: string;
   visualSampleFps?: number;
@@ -145,6 +176,25 @@ async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
 export const api = {
   videos: () => json<Video[]>("/api/videos"),
   jobs: () => json<Job[]>("/api/jobs"),
+  colorGradingStatus: () =>
+    json<ColorGradingCapability>("/api/color-grading/status"),
+  colorGradingTasks: () =>
+    json<ColorGradingTask[]>("/api/color-grading/tasks"),
+  createColorGradingTask: (params: {
+    inputVideoId: string;
+    referenceType: "image" | "video";
+    referenceImage?: File;
+    referenceVideoId?: string;
+  }) => {
+    const form = new FormData();
+    form.append("input_video_id", params.inputVideoId);
+    form.append("reference_type", params.referenceType);
+    if (params.referenceImage) form.append("ref_image", params.referenceImage);
+    if (params.referenceVideoId) form.append("ref_video_id", params.referenceVideoId);
+    return json<ColorGradingTask>("/api/color-grading/tasks", { method: "POST", body: form });
+  },
+  importColorGradingResult: (taskId: string) =>
+    json<Video>(`/api/color-grading/tasks/${taskId}/import`, { method: "POST" }),
   cancelJob: (jobId: string) =>
     json<Job>(`/api/jobs/${jobId}/cancel`, { method: "POST" }),
   entities: () => json<Entity[]>("/api/entities"),
