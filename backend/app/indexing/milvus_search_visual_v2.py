@@ -12,8 +12,9 @@ NOTE: No distribution sampling/z-score normalization - results go to VLM reranki
 from __future__ import annotations
 
 import logging
+import threading
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -21,14 +22,30 @@ from app.search import Candidate, _seconds, visual_confidence
 
 if TYPE_CHECKING:
     from app.retrieval_metrics import RetrievalProfiler
+
     from .milvus_client import MilvusClient
 
 logger = logging.getLogger(__name__)
 
+# Index verification cache: stores the last `expect_diskann` value that was verified.
+# None means "not yet verified". Avoids one extra Milvus RPC per search call.
+_verified_for_diskann: bool | None = None
+_verify_lock = threading.Lock()
+
 
 class MilvusVisualSearchError(RuntimeError):
     """Raised on Milvus query failures; NOT on empty result sets."""
-    pass
+
+
+def _reset_index_verification() -> None:
+    """Reset the cached index-type verification result.
+
+    Call this in tests or after a live configuration change (e.g. switching
+    visual_use_diskann) so the next search re-verifies against the real index.
+    """
+    global _verified_for_diskann
+    with _verify_lock:
+        _verified_for_diskann = None
 
 
 def milvus_visual_candidates_ann(
@@ -37,7 +54,7 @@ def milvus_visual_candidates_ann(
     query_texts: list[np.ndarray],
     limit: int = 20,
     profile: str = "balanced",
-    profiler: Optional[RetrievalProfiler] = None,
+    profiler: RetrievalProfiler | None = None,
 ) -> list[Candidate]:
     """Visual retrieval using ANN recall with multi-query aggregation.
 
@@ -63,8 +80,8 @@ def milvus_visual_candidates_ann(
     if profiler:
         profiler.mark("visual_ann_start")
 
-    # Verify index type matches configuration
-    _verify_index_type(client, settings.visual_use_diskann)
+    # Verify index type matches configuration (cached to avoid extra RPC per search)
+    _verify_index_type_once(client, settings.visual_use_diskann)
 
     # Normalize query vectors
     query_values = np.stack([_normalize(q) for q in query_texts])
@@ -97,6 +114,22 @@ def milvus_visual_candidates_ann(
     )
 
     return candidates
+
+
+def _verify_index_type_once(client: MilvusClient, expect_diskann: bool) -> None:
+    """Cached wrapper for _verify_index_type.
+
+    Skips the Milvus RPC if the index has already been verified for the current
+    configuration. Acquires a lock so concurrent first-calls are safe.
+    """
+    global _verified_for_diskann
+    if _verified_for_diskann == expect_diskann:
+        return  # Fast path: already verified, no RPC needed
+    with _verify_lock:
+        if _verified_for_diskann == expect_diskann:
+            return  # Another thread already verified while we waited
+        _verify_index_type(client, expect_diskann)
+        _verified_for_diskann = expect_diskann
 
 
 def _verify_index_type(client: MilvusClient, expect_diskann: bool) -> None:
@@ -144,7 +177,7 @@ def _ann_recall_multi_query(
     query_values: np.ndarray,
     top_k: int,
     use_diskann: bool,
-    profiler: Optional[RetrievalProfiler],
+    profiler: RetrievalProfiler | None,
 ) -> list[dict[str, Any]]:
     """ANN recall with batch multi-query support.
 
@@ -230,7 +263,7 @@ def _aggregate_by_segment(
     - Profile affects selection cap (recall=500, others=limit)
     """
     # Group frames by (segment_id, frame_idx, query_idx)
-    frame_scores: dict[tuple[int, int], dict[int, float]] = defaultdict(lambda: {})
+    frame_scores: dict[tuple[int, int], dict[int, float]] = defaultdict(dict)
     frame_meta: dict[tuple[int, int], dict] = {}
 
     for result in ann_results:

@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import logging
 import socket
-from typing import Optional
+import threading
 
 from pymilvus import Collection, CollectionSchema, connections, utility
 
 from app.settings import get_settings
+
 from .milvus_schema import (
     create_asr_schema,
     create_face_schema,
@@ -150,12 +151,15 @@ class MilvusClient:
     inside indexing workers or search handlers.
     """
 
-    _instance: Optional["MilvusClient"] = None
+    _instance: MilvusClient | None = None
+    _instance_lock: threading.Lock = threading.Lock()
 
-    def __new__(cls) -> "MilvusClient":
+    def __new__(cls) -> MilvusClient:
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._ready = False
+            with cls._instance_lock:
+                if cls._instance is None:  # double-checked locking
+                    cls._instance = super().__new__(cls)
+                    cls._instance._ready = False
         return cls._instance
 
     def __init__(self) -> None:
@@ -318,14 +322,21 @@ class MilvusClient:
 # Module-level singleton accessor
 # ---------------------------------------------------------------------------
 
-_client: Optional[MilvusClient] = None
+_client: MilvusClient | None = None
+_client_lock = threading.Lock()
 
 
 def get_milvus_client() -> MilvusClient:
-    """Return the process-wide MilvusClient, initialising it on first call."""
+    """Return the process-wide MilvusClient, initialising it on first call.
+
+    Thread-safe: uses double-checked locking so concurrent callers do not
+    race to create duplicate connections.
+    """
     global _client
     if _client is None:
-        _client = MilvusClient()
+        with _client_lock:
+            if _client is None:  # double-checked locking
+                _client = MilvusClient()
     return _client
 
 

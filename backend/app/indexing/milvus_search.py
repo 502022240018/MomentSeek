@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from app.settings import get_settings
 from app.retrieval_metrics import RetrievalProfiler
 from app.search import (
     Candidate,
@@ -40,6 +39,7 @@ from app.search import (
     face_confidence,
     normalize,
 )
+from app.settings import get_settings
 
 if TYPE_CHECKING:
     from app.indexing.milvus_client import MilvusClient
@@ -166,7 +166,7 @@ def _schema_available_fields(col, requested: list[str]) -> list[str]:
 
 
 def _query_all(
-    client: "MilvusClient",
+    client: MilvusClient,
     modality: str,
     video_id: str,
     output_fields: list[str],
@@ -246,7 +246,7 @@ def _query_all(
 
 
 def query_rows_for_videos(
-    client: "MilvusClient",
+    client: MilvusClient,
     modality: str,
     video_ids: list[str],
     output_fields: list[str],
@@ -327,7 +327,7 @@ def query_rows_for_videos(
 
 
 def _ann_search(
-    client: "MilvusClient",
+    client: MilvusClient,
     modality: str,
     video_id: str,
     query: list[float],
@@ -339,11 +339,16 @@ def _ann_search(
     col = client.collection_for(modality)
     metric     = _MODALITY_METRIC[modality]
     index_type = get_modality_index_type(modality)
-    sp = (
-        {"metric_type": metric, "params": {"ef": _HNSW_EF}}
-        if index_type == "HNSW"
-        else {"metric_type": metric, "params": {"nprobe": _IVF_NPROBE}}
-    )
+    if index_type == "HNSW":
+        sp = {"metric_type": metric, "params": {"ef": _HNSW_EF}}
+    elif index_type == "IVF_FLAT":
+        sp = {"metric_type": metric, "params": {"nprobe": _IVF_NPROBE}}
+    else:
+        # DiskANN and other types are not supported in _ann_search (face/speaker only)
+        raise MilvusServiceError(
+            f"_ann_search does not support index_type={index_type!r} "
+            f"for modality={modality!r}; only HNSW and IVF_FLAT are supported."
+        )
     try:
         span = profiler.span("milvus_rpc", modality) if profiler else nullcontext()
         with span:
@@ -377,7 +382,7 @@ def _ann_search(
 # ---------------------------------------------------------------------------
 
 def milvus_visual_candidates(
-    client: "MilvusClient",
+    client: MilvusClient,
     video_id: str,
     query: np.ndarray,
     duration_ms: int | None = None,
@@ -396,7 +401,17 @@ def milvus_visual_candidates(
         query: Query embedding(s), shape [D] or [N_queries, D]
         profile: "precision", "balanced", or "recall"
         limit: Number of candidates to return
+        duration_ms: Deprecated – no longer used by the ANN implementation.
+        segment_ms: Deprecated – no longer used by the ANN implementation.
+        rows: Deprecated – no longer used by the ANN implementation.
     """
+    if rows is not None or duration_ms is not None or segment_ms is not None:
+        logger.warning(
+            "milvus_visual_candidates: parameters 'rows', 'duration_ms', and "
+            "'segment_ms' are not used by the ANN-based v2 implementation. "
+            "These arguments are silently ignored; remove them from the call site."
+        )
+
     # Convert query format to list (support multi-query)
     query_texts = [query] if query.ndim == 1 else list(query)
 
@@ -410,7 +425,7 @@ def milvus_visual_candidates(
 # ---------------------------------------------------------------------------
 
 def milvus_asr_candidates(
-    client: "MilvusClient",
+    client: MilvusClient,
     video_id: str,
     query_text: str,
     query_embedding: np.ndarray,
@@ -486,7 +501,7 @@ def milvus_asr_candidates(
 # ---------------------------------------------------------------------------
 
 def milvus_ocr_candidates(
-    client: "MilvusClient",
+    client: MilvusClient,
     video_id: str,
     query_text: str,
     query_embedding: np.ndarray,
@@ -571,7 +586,7 @@ def milvus_ocr_candidates(
 # ---------------------------------------------------------------------------
 
 def milvus_face_candidates(
-    client: "MilvusClient",
+    client: MilvusClient,
     video_id: str,
     query: np.ndarray,
     limit: int,
@@ -655,7 +670,7 @@ def milvus_face_candidates(
 # ---------------------------------------------------------------------------
 
 def milvus_speaker_candidates(
-    client: "MilvusClient",
+    client: MilvusClient,
     video_id: str,
     query: np.ndarray,
     limit: int,
