@@ -44,7 +44,8 @@ jobs:
         run: python -m ruff check backend/app
 
       - name: Run offline backend tests
-        run: python -m pytest backend/tests -m "not integration" -q
+        working-directory: backend
+        run: python -m pytest tests -m "not integration" -q
 
   frontend:
     name: Frontend build

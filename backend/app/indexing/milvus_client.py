@@ -23,15 +23,35 @@ from .milvus_schema import (
 
 logger = logging.getLogger(__name__)
 
+
+def _get_visual_index_config() -> dict:
+    """根据配置动态选择Visual索引类型（HNSW或DiskANN）"""
+    settings = get_settings()
+    if settings.visual_use_diskann:
+        return {
+            "index_type": "DISKANN",
+            "metric_type": "COSINE",
+            "params": {
+                "max_degree": 56,              # 图的最大度数（必需）
+                "search_list_size": 128,       # 构建时搜索列表大小（必需）
+                "pq_code_budget_gb": 0.125,    # PQ压缩预算（可选）
+                "build_dram_budget_gb": 32.0,  # 构建时内存预算（可选）
+            },
+        }
+    else:
+        # 默认使用HNSW
+        return {
+            "index_type": "HNSW",
+            "metric_type": "COSINE",
+            "params": {"M": 16, "efConstruction": 200},
+        }
+
+
 # Collection name → (schema_factory, index_params)
 _COLLECTION_CONFIGS: dict[str, dict] = {
     "visual_embeddings": {
         "schema": create_visual_schema,
-        "index": {
-            "index_type": "HNSW",
-            "metric_type": "COSINE",
-            "params": {"M": 16, "efConstruction": 200},
-        },
+        "index": _get_visual_index_config(),  # 动态配置
     },
     "asr_embeddings": {
         "schema": create_asr_schema,

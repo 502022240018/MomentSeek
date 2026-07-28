@@ -28,7 +28,7 @@ import logging
 import time
 from collections import defaultdict
 from contextlib import nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
@@ -46,6 +46,13 @@ from app.search import (
 
 if TYPE_CHECKING:
     from app.indexing.milvus_client import MilvusClient
+    from app.retrieval_metrics import Profiler
+
+# Visual modality optimization: ANN + sampling implementation (v2)
+from .milvus_search_visual_v2 import (
+    milvus_visual_candidates_ann,
+    MilvusVisualSearchError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -363,226 +370,22 @@ def milvus_visual_candidates(
     profiler: RetrievalProfiler | None = None,
     rows: list[dict] | None = None,
 ) -> list[Candidate]:
-    """Full-video visual recall via Milvus; functionally equivalent to _visual_candidates().
+    """Visual recall via Milvus ANN search.
 
-    Fetches every frame embedding for the video, computes dot-products in Python,
-    then applies the identical segment-aggregation and robust-distribution logic
-    used by the NPZ path.  This is the only way to get a correct per-video score
-    distribution — a top-k ANN search would distort the z-score and percentile
-    normalization.
+    Uses ANN (HNSW or DiskANN) to recall top-K candidate frames, then aggregates
+    by segment with multi-query support. Results go directly to VLM reranking.
 
-    Parameters duration_ms and segment_ms are now optional — when not provided,
-    they are inferred from the Milvus data itself. They are kept as parameters
-    for backward compatibility and as fallback values when Milvus data is incomplete.
+    Args:
+        query: Query embedding(s), shape [D] or [N_queries, D]
+        profile: "precision", "balanced", or "recall"
+        limit: Number of candidates to return
     """
-    if rows is None:
-        rows = _query_all(
-            client, "visual", video_id,
-            ["frame_idx", "timestamp_ms", "segment_id", "segment_start_ms", "segment_end_ms", "embedding"],
-            profiler,
-        )
-    if not rows:
-        return []
+    # Convert query format to list (support multi-query)
+    query_texts = [query] if query.ndim == 1 else list(query)
 
-    # Sort by frame_idx for deterministic ordering (query() order is undefined).
-    rows.sort(key=lambda r: int(r.get("frame_idx") or 0))
-
-    query_values = np.asarray(query, dtype=np.float32)
-    if query_values.ndim == 1:
-        query_values = query_values.reshape(1, -1)
-    frame_embeddings = np.array([r["embedding"] for r in rows], dtype=np.float32)
-    if query_values.ndim != 2 or query_values.shape[1] != frame_embeddings.shape[1]:
-        raise ValueError("visual query embedding shape does not match the Milvus index")
-    query_values = np.stack([normalize(value) for value in query_values])
-    frame_scores = frame_embeddings @ query_values.T  # shape [frames, subqueries]
-    frame_times      = [int(r.get("timestamp_ms") or 0) for r in rows]
-
-    # Infer segment_ms from Milvus data if not provided
-    if segment_ms is None:
-        # Try to infer from explicit segment boundaries
-        inferred_segment_ms = None
-        for row in rows:
-            start_value = row.get("segment_start_ms")
-            end_value = row.get("segment_end_ms")
-            ss = int(start_value) if start_value is not None else -1
-            se = int(end_value) if end_value is not None else -1
-            if ss >= 0 and se > ss:
-                inferred_segment_ms = se - ss
-                break
-        segment_ms = inferred_segment_ms if inferred_segment_ms else 5000  # fallback: 5s default
-
-    # Infer duration_ms from Milvus data if not provided
-    if duration_ms is None:
-        # Use the maximum timestamp_ms as duration estimate
-        duration_ms = max(frame_times) if frame_times else 0
-
-    # Group frames into segments.
-    # segment_id == -1 means the field wasn't present in older index entries;
-    # fall back to fixed-window bucketing via timestamp_ms // segment_ms.
-    seg_to_frames: dict[int, list[tuple[np.ndarray, int, int, int]]] = defaultdict(list)
-    for idx, row in enumerate(rows):
-        seg_id_raw = row.get("segment_id")
-        if seg_id_raw is None or int(seg_id_raw) < 0:
-            seg_id = int(frame_times[idx]) // max(1, segment_ms)
-        else:
-            seg_id = int(seg_id_raw)
-        seg_to_frames[seg_id].append((
-            frame_scores[idx],
-            frame_times[idx],
-            (
-                int(row["segment_start_ms"])
-                if row.get("segment_start_ms") is not None
-                else -1
-            ),
-            (
-                int(row["segment_end_ms"])
-                if row.get("segment_end_ms") is not None
-                else -1
-            ),
-        ))
-
-    # Aggregate per-segment statistics.
-    segment_ids_list: list[int]   = []
-    raw_scores:       list[float] = []
-    top3_scores:      list[float] = []
-    mean_scores:      list[float] = []
-    subquery_scores:  list[list[float]] = []
-    best_times_ms:    list[int]   = []
-    seg_time_map:     dict[int, tuple[int, int]] = {}
-
-    for seg_id in sorted(seg_to_frames):
-        frames = seg_to_frames[seg_id]
-        bucket = np.stack([s for s, _, _, _ in frames]).astype(np.float32)
-        per_query_top = np.max(bucket, axis=0)
-        if bucket.shape[1] == 1:
-            aggregate_score = float(per_query_top[0])
-            frame_aggregate = bucket[:, 0]
-        else:
-            aggregate_score = float(
-                0.65 * np.mean(per_query_top) + 0.35 * np.min(per_query_top)
-            )
-            frame_aggregate = (
-                0.65 * np.mean(bucket, axis=1) + 0.35 * np.min(bucket, axis=1)
-            )
-        order = np.argsort(frame_aggregate)[::-1]
-
-        best_score_idx = int(order[0])
-        best_ts = frames[best_score_idx][1]
-
-        segment_ids_list.append(seg_id)
-        raw_scores.append(aggregate_score)
-        top3_scores.append(float(np.mean(frame_aggregate[order[:min(3, len(order))]])))
-        mean_scores.append(float(np.mean(frame_aggregate)))
-        subquery_scores.append([float(value) for value in per_query_top])
-        best_times_ms.append(best_ts)
-
-        # Segment time bounds: prefer explicit shot boundaries; fall back to fixed.
-        ss = frames[0][2]
-        se = frames[0][3]
-        if ss >= 0 and se >= 0:
-            seg_time_map[seg_id] = (ss, se)
-        else:
-            seg_time_map[seg_id] = (
-                seg_id * segment_ms,
-                min((seg_id + 1) * segment_ms, duration_ms or (seg_id + 1) * segment_ms),
-            )
-
-    if not raw_scores:
-        return []
-
-    raw_values  = np.asarray(raw_scores, dtype=np.float32)
-    dist        = robust_distribution(raw_values)
-    z_scores    = dist["z_scores"]
-    percentiles = dist["percentiles"]
-    reliable    = dist["reliable"]
-
-    raw_order  = np.argsort(raw_values)[::-1]
-    fb_counts  = {"recall": 3, "balanced": 2, "precision": 1}
-    fb_indices = {int(i) for i in raw_order[:min(len(raw_order), fb_counts.get(profile, 2))]}
-
-    candidates: list[Candidate] = []
-    cap = 500 if profile == "recall" else limit
-    for local_idx in raw_order[:cap]:
-        local_idx   = int(local_idx)
-        seg_id      = segment_ids_list[local_idx]
-        raw         = float(raw_values[local_idx])
-        z           = float(z_scores[local_idx])
-        pct         = float(percentiles[local_idx])
-        rank_score  = visual_confidence(raw)
-        top3        = float(top3_scores[local_idx])
-        mean        = float(mean_scores[local_idx])
-        best_ms_val = int(best_times_ms[local_idx])
-
-        if reliable:
-            if z >= 2.0 or pct >= 0.975:
-                decision, above = "strong", True
-            elif pct >= 0.80:
-                qualifies = not (
-                    (profile == "balanced" and not (z >= 1.0 or pct >= 0.90))
-                    or profile == "precision"
-                )
-                decision, above = ("fuzzy", True) if qualifies else ("weak", False)
-            else:
-                decision, above = "weak", False
-            detail = (
-                f"[milvus] visual score={raw:.3f} · rank_score={rank_score:.3f}"
-                f" · percentile={pct * 100:.1f}% · robust_z={z:.2f}"
-            )
-        else:
-            decision, above = ("fallback", True) if local_idx in fb_indices else ("weak", False)
-            detail = (
-                f"[milvus] visual score={raw:.3f} · rank_score={rank_score:.3f}"
-                f" · distribution fallback (n={len(raw_values)})"
-            )
-
-        start_ms, end_ms = seg_time_map[seg_id]
-        detail += f" · best_frame={best_ms_val / 1000:.2f}s · top1={raw:.3f} · top3={top3:.3f} · mean={mean:.3f}"
-        if query_values.shape[0] > 1:
-            detail += " · subqueries=" + ",".join(
-                f"{value:.3f}" for value in subquery_scores[local_idx]
-            )
-
-        candidates.append(Candidate(
-            video_id=video_id,
-            start_time=_seconds(start_ms),
-            end_time=_seconds(end_ms),
-            score=rank_score,
-            modality="visual",
-            evidence=detail if above else detail + " · 低于阈值",
-            raw_score=raw,
-            robust_z=z,
-            percentile=pct,
-            decision=decision,
-            above_threshold=above,
-            distribution_reliable=reliable,
-            distribution_median=dist["median"],
-            distribution_mad=dist["mad"],
-            best_time=_seconds(best_ms_val),
-            visual_top1=raw,
-            visual_top3=top3,
-            visual_mean=mean,
-            unit_type="segment",
-            unit_id=seg_id,
-            best_ms=best_ms_val,
-            features={
-                "visual_top1":           raw,
-                "visual_top3":           top3,
-                "visual_mean":           mean,
-                "visual_rank_score":     rank_score,
-                "visual_subquery_scores": subquery_scores[local_idx],
-                "visual_subquery_count": int(query_values.shape[0]),
-                "percentile":            pct,
-                "robust_z":              z,
-                "source":                "milvus",
-                # Provide defaults so downstream code that reads these keys
-                # (e.g. logs, analytics) works the same as the NPZ path.
-                "segment_strategy":      "fixed",
-                "segment_time_source":   "fixed",
-            },
-        ))
-        if len(candidates) >= limit and profile != "recall":
-            break
-    return candidates
+    return milvus_visual_candidates_ann(
+        client, video_id, query_texts, limit, profile, profiler
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -943,3 +746,6 @@ def shadow_compare_log(
         sorted(npz_top - milvus_top),
         sorted(milvus_top - npz_top),
     )
+
+
+

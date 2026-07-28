@@ -144,13 +144,18 @@ class Settings(BaseSettings):
     milvus_query_timeout_seconds: float = 3.0
     milvus_read_enabled: bool = True
     milvus_write_enabled: bool = True
-    milvus_fallback_enabled: bool = True
     milvus_shadow_compare_enabled: bool = False
     milvus_rollout_percent: int = 100
     milvus_search_video_batch_size: int = 8
     # Local NPZ is written before Milvus, so "warn" preserves service
     # availability and leaves a recoverable artifact for later backfill.
     milvus_write_fail_policy: Literal["raise", "warn"] = "warn"
+    # Deprecated: Visual search no longer uses fallback (ANN is always used)
+    milvus_fallback_enabled: bool = False
+
+    # Visual ANN search configuration
+    visual_use_diskann: bool = True  # Index type: True=DiskANN (disk), False=HNSW (memory)
+    visual_ann_top_k: int = 500  # ANN recall size per subquery (recommended: 300-1000)
 
     @field_validator("indexer_mode", mode="before")
     @classmethod
