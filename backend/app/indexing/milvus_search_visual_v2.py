@@ -122,12 +122,12 @@ def _verify_index_type(client: MilvusClient, expect_diskann: bool) -> None:
         if expect_diskann and actual_type != "DISKANN":
             raise MilvusVisualSearchError(
                 f"Index type mismatch: config expects DISKANN but collection has {actual_type}. "
-                f"Run backend/scripts/rebuild_visual_index.py to rebuild."
+                "Run backend/scripts/rebuild_visual_index.py to rebuild."
             )
         elif not expect_diskann and actual_type == "DISKANN":
             raise MilvusVisualSearchError(
-                f"Index type mismatch: config expects HNSW but collection has DISKANN. "
-                f"Run backend/scripts/rebuild_visual_index.py to rebuild."
+                "Index type mismatch: config expects HNSW but collection has DISKANN. "
+                "Run backend/scripts/rebuild_visual_index.py to rebuild."
             )
 
         logger.debug(f"Visual index type verified: {actual_type}")

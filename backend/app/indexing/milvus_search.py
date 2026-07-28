@@ -26,9 +26,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections import defaultdict
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -40,19 +39,13 @@ from app.search import (
     _seconds,
     face_confidence,
     normalize,
-    robust_distribution,
-    visual_confidence,
 )
 
 if TYPE_CHECKING:
     from app.indexing.milvus_client import MilvusClient
-    from app.retrieval_metrics import Profiler
 
 # Visual modality optimization: ANN + sampling implementation (v2)
-from .milvus_search_visual_v2 import (
-    milvus_visual_candidates_ann,
-    MilvusVisualSearchError,
-)
+from .milvus_search_visual_v2 import milvus_visual_candidates_ann
 
 logger = logging.getLogger(__name__)
 
