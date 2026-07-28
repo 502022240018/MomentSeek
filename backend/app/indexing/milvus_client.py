@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 
 
 def _get_visual_index_config() -> dict:
-    """根据配置动态选择Visual索引类型（HNSW或DiskANN）"""
+    """Get visual index config dynamically (HNSW or DiskANN based on settings).
+
+    Called at runtime to support dynamic configuration changes.
+    """
     settings = get_settings()
     if settings.visual_use_diskann:
         return {
@@ -47,43 +50,70 @@ def _get_visual_index_config() -> dict:
         }
 
 
+# Static index configs for non-visual modalities
+_STATIC_INDEX_CONFIGS: dict[str, dict] = {
+    "asr_embeddings": {
+        "index_type": "HNSW",
+        "metric_type": "IP",
+        "params": {"M": 16, "efConstruction": 200},
+    },
+    "ocr_embeddings": {
+        "index_type": "HNSW",
+        "metric_type": "IP",
+        "params": {"M": 16, "efConstruction": 200},
+    },
+    "face_embeddings": {
+        "index_type": "IVF_FLAT",
+        "metric_type": "L2",
+        "params": {"nlist": 1024},
+    },
+    "speaker_embeddings": {
+        "index_type": "HNSW",
+        "metric_type": "COSINE",
+        "params": {"M": 16, "efConstruction": 200},
+    },
+}
+
+
+def get_collection_index_config(collection_name: str) -> dict:
+    """Get index config for a collection (dynamic for visual, static for others).
+
+    This function is called at runtime to support dynamic configuration changes,
+    particularly for visual_embeddings which can switch between DISKANN and HNSW.
+
+    Args:
+        collection_name: Collection name (e.g., "visual_embeddings")
+
+    Returns:
+        Index configuration dict with index_type, metric_type, and params
+    """
+    if collection_name == "visual_embeddings":
+        return _get_visual_index_config()
+    return _STATIC_INDEX_CONFIGS[collection_name]
+
+
 # Collection name → (schema_factory, index_params)
+# Note: For visual_embeddings, use get_collection_index_config() at runtime
 _COLLECTION_CONFIGS: dict[str, dict] = {
     "visual_embeddings": {
         "schema": create_visual_schema,
-        "index": _get_visual_index_config(),  # 动态配置
+        "index": None,  # Placeholder - use get_collection_index_config() at runtime
     },
     "asr_embeddings": {
         "schema": create_asr_schema,
-        "index": {
-            "index_type": "HNSW",
-            "metric_type": "IP",
-            "params": {"M": 16, "efConstruction": 200},
-        },
+        "index": _STATIC_INDEX_CONFIGS["asr_embeddings"],
     },
     "ocr_embeddings": {
         "schema": create_ocr_schema,
-        "index": {
-            "index_type": "HNSW",
-            "metric_type": "IP",
-            "params": {"M": 16, "efConstruction": 200},
-        },
+        "index": _STATIC_INDEX_CONFIGS["ocr_embeddings"],
     },
     "face_embeddings": {
         "schema": create_face_schema,
-        "index": {
-            "index_type": "IVF_FLAT",
-            "metric_type": "L2",
-            "params": {"nlist": 1024},
-        },
+        "index": _STATIC_INDEX_CONFIGS["face_embeddings"],
     },
     "speaker_embeddings": {
         "schema": create_speaker_schema,
-        "index": {
-            "index_type": "HNSW",
-            "metric_type": "COSINE",
-            "params": {"M": 16, "efConstruction": 200},
-        },
+        "index": _STATIC_INDEX_CONFIGS["speaker_embeddings"],
     },
 }
 
@@ -155,7 +185,9 @@ class MilvusClient:
                 logger.info("Creating collection: %s", name)
                 schema: CollectionSchema = config["schema"]()
                 col = Collection(name=name, schema=schema, consistency_level="Strong")
-                col.create_index(field_name="embedding", index_params=config["index"])
+                # Get index config dynamically for runtime support
+                index_config = get_collection_index_config(name) if name == "visual_embeddings" else config["index"]
+                col.create_index(field_name="embedding", index_params=index_config)
                 col.load()
                 logger.info("Collection %s created and loaded", name)
             else:

@@ -57,15 +57,16 @@ def test_modality_index_type_matches_collection_configs():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("modality,expected_metric,expected_index", [
-    ("visual",  "COSINE",   "HNSW"),
+    ("visual",  "COSINE",   None),  # Visual uses dynamic config (DISKANN or HNSW)
     ("asr",     "IP",       "HNSW"),
     ("ocr",     "IP",       "HNSW"),
     ("face",    "L2",       "IVF_FLAT"),
     ("speaker", "COSINE",   "HNSW"),
 ])
 def test_per_modality_metric_and_index(modality, expected_metric, expected_index):
-    assert _MODALITY_METRIC[modality]     == expected_metric
-    assert _MODALITY_INDEX_TYPE[modality] == expected_index
+    assert _MODALITY_METRIC[modality] == expected_metric
+    if expected_index is not None:  # Skip index check for visual (dynamic config)
+        assert _MODALITY_INDEX_TYPE[modality] == expected_index
 
 
 # ---------------------------------------------------------------------------

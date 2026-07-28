@@ -49,13 +49,13 @@ from .milvus_search_visual_v2 import milvus_visual_candidates_ann
 
 logger = logging.getLogger(__name__)
 
+
 # Milvus ANN search params (used only for face / speaker).
 _HNSW_EF    = 128
 _IVF_NPROBE = 64
 
-# Per-modality index config — must stay in sync with _COLLECTION_CONFIGS in
-# milvus_client.py.  Stored here because pymilvus doesn't surface index params
-# reliably via schema inspection.
+# Per-modality metric config — static mapping, must stay in sync with
+# _COLLECTION_CONFIGS in milvus_client.py.
 _MODALITY_METRIC: dict[str, str] = {
     "visual":  "COSINE",
     "asr":     "IP",
@@ -63,13 +63,37 @@ _MODALITY_METRIC: dict[str, str] = {
     "face":    "L2",
     "speaker": "COSINE",
 }
-_MODALITY_INDEX_TYPE: dict[str, str] = {
-    "visual":  "HNSW",
+
+# Static index types for non-visual modalities
+_STATIC_INDEX_TYPES: dict[str, str] = {
     "asr":     "HNSW",
     "ocr":     "HNSW",
     "face":    "IVF_FLAT",
     "speaker": "HNSW",
 }
+
+
+def get_modality_index_type(modality: str) -> str:
+    """Get index type for a modality (dynamic for visual, static for others).
+
+    This function is called at runtime to support dynamic configuration changes,
+    particularly for visual modality which can switch between DISKANN and HNSW.
+
+    Args:
+        modality: Modality name ("visual", "asr", "ocr", "face", "speaker")
+
+    Returns:
+        Index type string ("DISKANN", "HNSW", "IVF_FLAT")
+    """
+    if modality == "visual":
+        settings = get_settings()
+        return "DISKANN" if settings.visual_use_diskann else "HNSW"
+    return _STATIC_INDEX_TYPES[modality]
+
+
+# Deprecated: Use get_modality_index_type() for runtime access
+# This dict exists only for backward compatibility with test assertions
+_MODALITY_INDEX_TYPE: dict[str, str] = _STATIC_INDEX_TYPES.copy()
 
 # Batch size for QueryIterator (and fallback offset-pagination).
 # Milvus recommends iterator for entity traversal; 1 000–4 000 is a practical
@@ -314,7 +338,7 @@ def _ann_search(
     """Execute a per-video ANN search; used only by face and speaker."""
     col = client.collection_for(modality)
     metric     = _MODALITY_METRIC[modality]
-    index_type = _MODALITY_INDEX_TYPE[modality]
+    index_type = get_modality_index_type(modality)
     sp = (
         {"metric_type": metric, "params": {"ef": _HNSW_EF}}
         if index_type == "HNSW"

@@ -1,5 +1,6 @@
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+import re
 
 import numpy as np
 import pytest
@@ -97,10 +98,79 @@ def test_voice_search_matches_individual_utterances(tmp_path):
     def _mock_speaker(video_id: str, **_kwargs):
         return {"a": data_a, "b": data_b}[video_id]
 
+    # Mock Milvus connection and search results
+    mock_client = Mock()
+    mock_collection = Mock()
+    mock_client.collection_for.return_value = mock_collection
+
+    # Mock search() to return per-video results
+    # When querying video "a", return 2 hits (both utterances from video "a")
+    # When querying video "b", return 1 hit (best match from video "b")
+    def mock_search_side_effect(data, anns_field, param, limit, expr, output_fields, timeout=None):
+        # Extract video_id from expr using regex for robustness
+        match = re.search(r'video_id\s*==\s*["\']([^"\']+)["\']', expr)
+        if not match:
+            return [[]]  # Return empty if expr format unexpected
+
+        video_id = match.group(1)
+
+        if video_id == "a":
+            # Video "a" has 2 utterances
+            mock_hit_a0 = Mock()
+            mock_hit_a0.distance = 1.0  # Perfect self-match
+            mock_hit_a0.entity = Mock()
+            mock_hit_a0.entity.get = lambda field, default=None: {
+                "utterance_idx": 0,
+                "start_ms": 0,
+                "end_ms": 1000,
+                "track_id": 0,
+                "asr_chunk_idx": 0,
+                "embedding": [1.0, 0.0],
+                "_distance": 1.0,
+            }.get(field, default)
+
+            mock_hit_a1 = Mock()
+            mock_hit_a1.distance = 0.0  # Low similarity to second utterance
+            mock_hit_a1.entity = Mock()
+            mock_hit_a1.entity.get = lambda field, default=None: {
+                "utterance_idx": 1,
+                "start_ms": 2000,
+                "end_ms": 3000,
+                "track_id": 1,
+                "asr_chunk_idx": 1,
+                "embedding": [0.0, 1.0],
+                "_distance": 0.0,
+            }.get(field, default)
+
+            return [[mock_hit_a0, mock_hit_a1]]
+
+        elif video_id == "b":
+            # Video "b" has 2 utterances, return best match
+            mock_hit_b = Mock()
+            mock_hit_b.distance = 0.99  # High match to video "a"'s query
+            mock_hit_b.entity = Mock()
+            mock_hit_b.entity.get = lambda field, default=None: {
+                "utterance_idx": 0,
+                "start_ms": 0,
+                "end_ms": 1000,
+                "track_id": 0,
+                "asr_chunk_idx": 0,
+                "embedding": [0.99, 0.01],
+                "_distance": 0.99,
+            }.get(field, default)
+
+            return [[mock_hit_b]]
+
+        return [[]]
+
+    mock_collection.search.side_effect = mock_search_side_effect
+
     with (
         patch("app.speaker_service.milvus_read_enabled", return_value=True),
         patch("app.speaker_service._speaker_data_from_milvus", side_effect=_mock_speaker),
         patch("app.speaker_service._texts_from_milvus", return_value=_ASR_TEXTS),
+        patch("app.indexing.milvus_client.ensure_milvus_reachable", return_value=None),
+        patch("app.indexing.milvus_client.get_milvus_client", return_value=mock_client),
     ):
         hits = voice_search(
             tmp_path / "indexes", catalog, query_video_id="a", query_utterance_index=0, limit=3
