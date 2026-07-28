@@ -102,30 +102,63 @@ def test_voice_search_matches_individual_utterances(tmp_path):
     mock_collection = Mock()
     mock_client.collection_for.return_value = mock_collection
 
-    # Mock search() to return iterable results
-    mock_hit_a = Mock()
-    mock_hit_a.distance = 1.0  # Perfect match for cosine
-    mock_hit_a.entity.get = lambda field, default=None: {
-        "utterance_idx": 0,
-        "start_ms": 0,
-        "end_ms": 1000,
-        "track_id": 0,
-        "asr_chunk_idx": 0,
-        "embedding": [1.0, 0.0],
-    }.get(field, default)
+    # Mock search() to return per-video results
+    # When querying video "a", return 2 hits (both utterances from video "a")
+    # When querying video "b", return 1 hit (best match from video "b")
+    def mock_search_side_effect(data, anns_field, param, limit, expr, output_fields, timeout=None):
+        # Extract video_id from expr: 'video_id == "a"'
+        video_id = expr.split('"')[1]
 
-    mock_hit_b = Mock()
-    mock_hit_b.distance = 0.99  # High match
-    mock_hit_b.entity.get = lambda field, default=None: {
-        "utterance_idx": 0,
-        "start_ms": 0,
-        "end_ms": 1000,
-        "track_id": 0,
-        "asr_chunk_idx": 0,
-        "embedding": [0.99, 0.01],
-    }.get(field, default)
+        if video_id == "a":
+            # Video "a" has 2 utterances
+            mock_hit_a0 = Mock()
+            mock_hit_a0.distance = 1.0  # Perfect self-match
+            mock_hit_a0.entity = Mock()
+            mock_hit_a0.entity.get = lambda field, default=None: {
+                "utterance_idx": 0,
+                "start_ms": 0,
+                "end_ms": 1000,
+                "track_id": 0,
+                "asr_chunk_idx": 0,
+                "embedding": [1.0, 0.0],
+                "_distance": 1.0,
+            }.get(field, default)
 
-    mock_collection.search.return_value = [[mock_hit_a, mock_hit_b]]
+            mock_hit_a1 = Mock()
+            mock_hit_a1.distance = 0.0  # Low similarity to second utterance
+            mock_hit_a1.entity = Mock()
+            mock_hit_a1.entity.get = lambda field, default=None: {
+                "utterance_idx": 1,
+                "start_ms": 2000,
+                "end_ms": 3000,
+                "track_id": 1,
+                "asr_chunk_idx": 1,
+                "embedding": [0.0, 1.0],
+                "_distance": 0.0,
+            }.get(field, default)
+
+            return [[mock_hit_a0, mock_hit_a1]]
+
+        elif video_id == "b":
+            # Video "b" has 2 utterances, return best match
+            mock_hit_b = Mock()
+            mock_hit_b.distance = 0.99  # High match to video "a"'s query
+            mock_hit_b.entity = Mock()
+            mock_hit_b.entity.get = lambda field, default=None: {
+                "utterance_idx": 0,
+                "start_ms": 0,
+                "end_ms": 1000,
+                "track_id": 0,
+                "asr_chunk_idx": 0,
+                "embedding": [0.99, 0.01],
+                "_distance": 0.99,
+            }.get(field, default)
+
+            return [[mock_hit_b]]
+
+        return [[]]
+
+    mock_collection.search.side_effect = mock_search_side_effect
 
     with (
         patch("app.speaker_service.milvus_read_enabled", return_value=True),
