@@ -1,4 +1,5 @@
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,7 +89,62 @@ def test_submit_translates_catalog_ids_to_shared_runtime_paths(tmp_path):
     assert manager.client.submitted == {
         "input_video": source["file_path"],
         "ref_video": reference["file_path"],
+        "ncc": False,
     }
+
+
+def test_submit_forwards_enabled_ncc_to_upstream(tmp_path):
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    source = _video(catalog, settings, "source", "source.mp4")
+    reference = _video(catalog, settings, "reference", "reference.mp4")
+    catalog.create_color_grading_task(
+        {
+            "id": "local-task",
+            "input_video_id": source["id"],
+            "reference_type": "video",
+            "reference_video_id": reference["id"],
+            "ncc": True,
+        }
+    )
+    manager = ColorGradingManager(settings, catalog)
+    manager.client = FakeClient(
+        submit_response={
+            "task_id": "26905f42-555c-43a5-ae28-a09bfe5fb792",
+            "status": "queued",
+            "created_at": "2026-07-27T08:00:00Z",
+        }
+    )
+
+    task = manager.submit("local-task")
+
+    assert task["ncc"] is True
+    assert manager.client.submitted["ncc"] is True
+
+
+def test_catalog_migrates_color_grading_option_and_runtime_columns(tmp_path):
+    database = tmp_path / "catalog.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """CREATE TABLE color_grading_tasks (
+               id TEXT PRIMARY KEY,
+               input_video_id TEXT NOT NULL,
+               reference_video_id TEXT,
+               status TEXT NOT NULL,
+               created_at TEXT NOT NULL
+            )"""
+        )
+
+    catalog = Catalog(database)
+
+    with catalog.connect() as connection:
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(color_grading_tasks)"
+            ).fetchall()
+        }
+    assert {"ncc", "started_at", "completed_at"} <= columns
 
 
 def test_successful_upstream_task_is_finalized_into_platform_result(
@@ -128,6 +184,8 @@ def test_successful_upstream_task_is_finalized_into_platform_result(
             "output_lut": str(upstream_lut.resolve()),
             "error_code": None,
             "error_message": None,
+            "started_at": "2026-07-27T08:01:00Z",
+            "completed_at": "2026-07-27T08:04:30Z",
         }
     )
     monkeypatch.setattr(manager, "_has_audio", lambda path: False)
@@ -149,6 +207,8 @@ def test_successful_upstream_task_is_finalized_into_platform_result(
     assert final_path.read_bytes() == b"graded-video"
     assert task["media_url"].endswith("/media")
     assert task["lut_url"].endswith("/lut")
+    assert task["started_at"] == "2026-07-27T08:01:00Z"
+    assert task["completed_at"] == "2026-07-27T08:04:30Z"
     assert "final_video_path" not in task
     assert "upstream_output_video" not in task
 
@@ -371,6 +431,7 @@ def test_video_reference_task_endpoint_persists_platform_mapping(
                 "input_video_id": "source",
                 "reference_type": "video",
                 "ref_video_id": "reference",
+                "ncc": "true",
             },
         )
 
@@ -380,3 +441,4 @@ def test_video_reference_task_endpoint_persists_platform_mapping(
     stored = catalog.get_color_grading_task(task["id"])
     assert stored["input_video_id"] == "source"
     assert stored["reference_video_id"] == "reference"
+    assert stored["ncc"] == 1

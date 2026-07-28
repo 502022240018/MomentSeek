@@ -303,6 +303,19 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .grading-reference.has-image > span { display: flex; min-width: 0; flex-direction: column; }
 .grading-reference.has-image > span b { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .grading-reference .upload-glyph { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid #d5d0c9; border-radius: 50%; color: #705783; background: white; font-size: 19px; }
+.grading-ncc-toggle { display: grid; margin-top: 20px; padding: 13px 14px; grid-template-columns: auto minmax(0, 1fr) auto; gap: 11px; align-items: center; border: 1px solid #dfddd8; border-radius: 13px; background: #fafaf8; cursor: pointer; transition: .2s; }
+.grading-ncc-toggle:hover { border-color: #bba9c8; }
+.grading-ncc-toggle.selected { border-color: #a67fc0; background: #faf6fc; box-shadow: inset 0 0 0 1px #a67fc033; }
+.grading-ncc-mark { display: grid; width: 38px; height: 32px; place-items: center; border-radius: 9px; color: #6f6874; background: #ece9ee; font-size: 9px; font-weight: 800; letter-spacing: .08em; }
+.grading-ncc-toggle.selected .grading-ncc-mark { color: white; background: linear-gradient(135deg, #74528c, #9c76b5); }
+.grading-ncc-copy { display: flex; min-width: 0; flex-direction: column; }
+.grading-ncc-copy b { font-size: 10px; }
+.grading-ncc-copy small { margin-top: 3px; color: #918e94; font-size: 8px; line-height: 1.4; }
+.grading-ncc-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.grading-switch { position: relative; width: 34px; height: 20px; border-radius: 12px; background: #cfcdc8; transition: .2s; }
+.grading-switch i { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: white; box-shadow: 0 1px 5px #0003; transition: .2s; }
+.grading-ncc-toggle.selected .grading-switch { background: #855fa0; }
+.grading-ncc-toggle.selected .grading-switch i { transform: translateX(14px); }
 .grading-submit-summary { display: flex; margin-top: 22px; padding: 10px 12px; align-items: center; justify-content: space-between; gap: 12px; border-radius: 10px; color: #8b8982; background: #f3f2ef; font-size: 9px; }
 .grading-submit-summary.ready { color: #4d733d; background: #eef5e9; }
 .grading-submit-summary i { font-style: normal; white-space: nowrap; }
@@ -325,6 +338,11 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .grading-task-title b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .grading-task-title small { margin-top: 4px; color: #92918a; font-size: 8px; }
 .grading-task-icon { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 10px; color: white; background: linear-gradient(145deg, #383733, #1c1c1b); font-size: 15px; }
+.grading-task-meta { display: flex; margin-top: 13px; gap: 7px; flex-wrap: wrap; }
+.grading-task-meta > span { display: flex; min-height: 25px; padding: 5px 8px; align-items: center; gap: 5px; border-radius: 7px; color: #77746f; background: #f0efec; font-size: 8px; }
+.grading-task-meta > span.ncc-enabled { color: #704d89; background: #f0e8f5; font-weight: 700; }
+.grading-task-meta > span.runtime-exact { color: #4e6f42; background: #edf4e9; }
+.grading-task-meta b { font-size: 8px; }
 .grading-task-progress { margin-top: 16px; }
 .grading-task-progress > div:first-child { display: flex; justify-content: space-between; gap: 15px; color: #7c7a74; font-size: 9px; }
 .grading-task-progress b { color: #67645f; font-size: 8px; }

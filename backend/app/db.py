@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS color_grading_tasks (
   reference_type TEXT NOT NULL,
   reference_video_id TEXT,
   reference_image_path TEXT,
+  ncc INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'submitting',
   stage TEXT NOT NULL DEFAULT 'submitting',
   upstream_status TEXT,
@@ -94,6 +95,8 @@ CREATE TABLE IF NOT EXISTS color_grading_tasks (
   imported_video_id TEXT,
   error_code TEXT,
   error_message TEXT,
+  started_at TEXT,
+  completed_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -137,6 +140,26 @@ class Catalog:
         voice_columns = {row["name"] for row in connection.execute("PRAGMA table_info(voice_samples)").fetchall()}
         if "voice_embedding" not in voice_columns:
             connection.execute("ALTER TABLE voice_samples ADD COLUMN voice_embedding BLOB")
+
+        grading_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(color_grading_tasks)"
+            ).fetchall()
+        }
+        if "ncc" not in grading_columns:
+            connection.execute(
+                "ALTER TABLE color_grading_tasks "
+                "ADD COLUMN ncc INTEGER NOT NULL DEFAULT 0"
+            )
+        if "started_at" not in grading_columns:
+            connection.execute(
+                "ALTER TABLE color_grading_tasks ADD COLUMN started_at TEXT"
+            )
+        if "completed_at" not in grading_columns:
+            connection.execute(
+                "ALTER TABLE color_grading_tasks ADD COLUMN completed_at TEXT"
+            )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -198,17 +221,22 @@ class Catalog:
             "reference_type": record["reference_type"],
             "reference_video_id": record.get("reference_video_id"),
             "reference_image_path": record.get("reference_image_path"),
+            "ncc": int(bool(record.get("ncc", False))),
             "status": record.get("status", "submitting"),
             "stage": record.get("stage", "submitting"),
+            "started_at": record.get("started_at"),
+            "completed_at": record.get("completed_at"),
         }
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO color_grading_tasks(
                    id,external_task_id,input_video_id,reference_type,
-                   reference_video_id,reference_image_path,status,stage
+                   reference_video_id,reference_image_path,ncc,status,stage,
+                   started_at,completed_at
                    ) VALUES(
                    :id,:external_task_id,:input_video_id,:reference_type,
-                   :reference_video_id,:reference_image_path,:status,:stage
+                   :reference_video_id,:reference_image_path,:ncc,:status,:stage,
+                   :started_at,:completed_at
                    )""",
                 payload,
             )
@@ -242,6 +270,8 @@ class Catalog:
             "imported_video_id",
             "error_code",
             "error_message",
+            "started_at",
+            "completed_at",
         }
         values = {key: value for key, value in values.items() if key in allowed}
         if not values:

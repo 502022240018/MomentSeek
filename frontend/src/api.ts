@@ -45,6 +45,7 @@ export type ColorGradingTask = {
   reference_video_id?: string | null;
   reference_video_name?: string | null;
   reference_url?: string | null;
+  ncc: boolean;
   status: string;
   stage: string;
   upstream_status?: string | null;
@@ -54,6 +55,8 @@ export type ColorGradingTask = {
   imported_video_id?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -185,10 +188,12 @@ export const api = {
     referenceType: "image" | "video";
     referenceImage?: File;
     referenceVideoId?: string;
+    ncc?: boolean;
   }) => {
     const form = new FormData();
     form.append("input_video_id", params.inputVideoId);
     form.append("reference_type", params.referenceType);
+    form.append("ncc", String(params.ncc ?? false));
     if (params.referenceImage) form.append("ref_image", params.referenceImage);
     if (params.referenceVideoId) form.append("ref_video_id", params.referenceVideoId);
     return json<ColorGradingTask>("/api/color-grading/tasks", { method: "POST", body: form });

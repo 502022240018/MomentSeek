@@ -23,6 +23,7 @@ async def color_grading_status() -> dict:
 async def create_color_grading_task(
     input_video_id: str = Form(...),
     reference_type: str = Form(...),
+    ncc: bool = Form(default=False),
     ref_video_id: str | None = Form(default=None),
     ref_image: UploadFile | None = File(default=None),  # noqa: B008
 ) -> dict:
@@ -99,6 +100,7 @@ async def create_color_grading_task(
             "reference_type": reference_type,
             "reference_video_id": reference_video_id,
             "reference_image_path": reference_image_path,
+            "ncc": ncc,
             "status": "submitting",
             "stage": "submitting",
         }

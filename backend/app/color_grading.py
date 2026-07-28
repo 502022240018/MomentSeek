@@ -162,6 +162,7 @@ class ColorGradingManager:
         input_video = self._require_video(task["input_video_id"])
         payload: dict[str, Any] = {
             "input_video": str(self._allowed_runtime_file(input_video["file_path"])),
+            "ncc": bool(task.get("ncc", False)),
         }
         if task["reference_type"] == "image":
             payload["ref_image"] = str(
@@ -248,6 +249,8 @@ class ColorGradingManager:
             "queue_position": response.get("queue_position"),
             "error_code": response.get("error_code"),
             "error_message": response.get("error_message"),
+            "started_at": response.get("started_at"),
+            "completed_at": response.get("completed_at"),
         }
         if upstream_status == "failed":
             self.catalog.update_color_grading_task(
@@ -354,6 +357,7 @@ class ColorGradingManager:
 
     def decorate(self, task: dict) -> dict:
         item = dict(task)
+        item["ncc"] = bool(task.get("ncc", False))
         for internal_path in (
             "reference_image_path",
             "upstream_output_video",

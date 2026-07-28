@@ -52,8 +52,8 @@ function taskHint(task: ColorGradingTask) {
 }
 
 function formatDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
+  const date = parseTimestamp(value);
+  if (!date) return "";
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
@@ -63,6 +63,55 @@ function formatDate(value: string) {
   }).format(date);
 }
 
+function parseTimestamp(value?: string | null) {
+  if (!value) return undefined;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function formatDuration(seconds: number) {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = total % 60;
+  if (hours) return `${hours}小时 ${minutes}分 ${rest}秒`;
+  if (minutes) return `${minutes}分 ${rest}秒`;
+  return `${rest}秒`;
+}
+
+function taskRuntime(task: ColorGradingTask, now: number) {
+  const started = parseTimestamp(task.started_at);
+  const terminal = ["succeeded", "failed", "submission_unknown"].includes(task.status);
+  if (started) {
+    const completed = parseTimestamp(task.completed_at);
+    const end = completed?.getTime()
+      ?? (terminal ? parseTimestamp(task.updated_at)?.getTime() : now)
+      ?? now;
+    return {
+      label: terminal ? "运行用时" : "已运行",
+      value: formatDuration((end - started.getTime()) / 1000),
+      exact: true,
+    };
+  }
+  if (!terminal) {
+    return {
+      label: task.status === "queued" ? "排队中" : "等待计时",
+      value: task.status === "queued" ? "尚未开始运行" : "等待上游返回开始时间",
+      exact: false,
+    };
+  }
+  const created = parseTimestamp(task.created_at);
+  const updated = parseTimestamp(task.updated_at);
+  if (!created || !updated) return undefined;
+  return {
+    label: "总用时",
+    value: formatDuration((updated.getTime() - created.getTime()) / 1000),
+    exact: false,
+  };
+}
 
 export function ColorGradingPage({ status, tasks, videos, refresh, setNotice }: {
   status: ColorGradingCapability;
@@ -75,8 +124,10 @@ export function ColorGradingPage({ status, tasks, videos, refresh, setNotice }: 
   const [referenceType, setReferenceType] = useState<"image" | "video">("image");
   const [referenceVideoId, setReferenceVideoId] = useState("");
   const [referenceImage, setReferenceImage] = useState<File>();
+  const [ncc, setNcc] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
+  const [clock, setClock] = useState(() => Date.now());
   const referenceImageUrl = useMemo(
     () => referenceImage ? URL.createObjectURL(referenceImage) : "",
     [referenceImage],
@@ -90,6 +141,11 @@ export function ColorGradingPage({ status, tasks, videos, refresh, setNotice }: 
   useEffect(() => {
     if (referenceVideoId === inputVideoId) setReferenceVideoId("");
   }, [inputVideoId, referenceVideoId]);
+  useEffect(() => {
+    if (!tasks.some(task => activeStatuses.has(task.status))) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [tasks]);
   const inputVideo = videos.find(video => video.id === inputVideoId);
   const referenceVideo = videos.find(video => video.id === referenceVideoId);
   const activeTaskCount = tasks.filter(task => activeStatuses.has(task.status)).length;
@@ -115,6 +171,7 @@ export function ColorGradingPage({ status, tasks, videos, refresh, setNotice }: 
         referenceType,
         referenceImage,
         referenceVideoId: referenceType === "video" ? referenceVideoId : undefined,
+        ncc,
       });
       setReferenceImage(undefined);
       await refresh();
@@ -205,9 +262,18 @@ export function ColorGradingPage({ status, tasks, videos, refresh, setNotice }: 
                 </div>
               </>}
         </div>
+        <label className={`grading-ncc-toggle ${ncc ? "selected" : ""}`}>
+          <span className="grading-ncc-mark">NCC</span>
+          <span className="grading-ncc-copy">
+            <b>启用 NCC 模式</b>
+            <small>开启后跳过颜色迁移预处理，直接进入后续 LUT 生成流程</small>
+          </span>
+          <input type="checkbox" checked={ncc} onChange={event => setNcc(event.target.checked)} />
+          <span className="grading-switch" aria-hidden="true"><i /></span>
+        </label>
         <div className={`grading-submit-summary ${canSubmit ? "ready" : ""}`}>
           <span>{!status.available ? "服务离线" : !inputVideoId ? "请选择原视频" : !referenceReady ? "还差一个参考素材" : "素材已就绪，可以开始仿色"}</span>
-          <i>{referenceType === "image" ? "图片参考" : "视频参考"}</i>
+          <i>{referenceType === "image" ? "图片参考" : "视频参考"} · {ncc ? "NCC 开启" : "标准模式"}</i>
         </div>
         <button className="primary grading-submit" disabled={!canSubmit} onClick={submit}>
           <span>{submitting ? "正在提交任务…" : "开始生成仿色视频"}</span>
@@ -230,13 +296,19 @@ export function ColorGradingPage({ status, tasks, videos, refresh, setNotice }: 
           )}
         </div>
         <div className="grading-task-list">
-          {filteredTasks.map(task => <article className={`panel grading-task ${activeStatuses.has(task.status) ? "is-active" : ""}`} key={task.id}>
+          {filteredTasks.map(task => {
+            const runtime = taskRuntime(task, clock);
+            return <article className={`panel grading-task ${activeStatuses.has(task.status) ? "is-active" : ""}`} key={task.id}>
             <div className="grading-task-head">
               <div className="grading-task-title">
                 <span className="grading-task-icon">◐</span>
                 <div><b title={task.input_video_name}>{task.input_video_name}</b><small>{formatDate(task.created_at)} · {task.reference_type === "image" ? "图片参考" : `视频参考：${task.reference_video_name || "—"}`}</small></div>
               </div>
               <span className={`status ${task.status}`}>{statusText(task.status)}</span>
+            </div>
+            <div className="grading-task-meta">
+              <span className={task.ncc ? "ncc-enabled" : ""}>{task.ncc ? "NCC 模式" : "标准模式"}</span>
+              {runtime && <span className={runtime.exact ? "runtime-exact" : ""}><b>{runtime.label}</b>{runtime.value}</span>}
             </div>
             <div className="grading-task-progress">
               <div><span>{taskHint(task)}</span><b>{taskProgress(task.status)}%</b></div>
@@ -252,7 +324,8 @@ export function ColorGradingPage({ status, tasks, videos, refresh, setNotice }: 
               {task.lut_url && <a className="outline" href={task.lut_url} download>下载 LUT</a>}
               <button className="outline" disabled={!!task.imported_video_id} onClick={() => importResult(task)}>{task.imported_video_id ? "✓ 已加入素材库" : "＋ 加入素材库"}</button>
             </div>}
-          </article>)}
+          </article>;
+          })}
           {!filteredTasks.length && <div className="panel grading-empty">
             <span>◌</span>
             <b>{tasks.length ? "这个筛选下还没有任务" : "还没有仿色任务"}</b>
