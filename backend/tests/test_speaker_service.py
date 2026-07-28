@@ -97,8 +97,35 @@ def test_voice_search_matches_individual_utterances(tmp_path):
     def _mock_speaker(video_id: str, **_kwargs):
         return {"a": data_a, "b": data_b}[video_id]
 
-    # Mock Milvus connection to avoid real connection attempt
+    # Mock Milvus connection and search results
     mock_client = Mock()
+    mock_collection = Mock()
+    mock_client.collection_for.return_value = mock_collection
+
+    # Mock search() to return iterable results
+    mock_hit_a = Mock()
+    mock_hit_a.distance = 1.0  # Perfect match for cosine
+    mock_hit_a.entity.get = lambda field, default=None: {
+        "utterance_idx": 0,
+        "start_ms": 0,
+        "end_ms": 1000,
+        "track_id": 0,
+        "asr_chunk_idx": 0,
+        "embedding": [1.0, 0.0],
+    }.get(field, default)
+
+    mock_hit_b = Mock()
+    mock_hit_b.distance = 0.99  # High match
+    mock_hit_b.entity.get = lambda field, default=None: {
+        "utterance_idx": 0,
+        "start_ms": 0,
+        "end_ms": 1000,
+        "track_id": 0,
+        "asr_chunk_idx": 0,
+        "embedding": [0.99, 0.01],
+    }.get(field, default)
+
+    mock_collection.search.return_value = [[mock_hit_a, mock_hit_b]]
 
     with (
         patch("app.speaker_service.milvus_read_enabled", return_value=True),

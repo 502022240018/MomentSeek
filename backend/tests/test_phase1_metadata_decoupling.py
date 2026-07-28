@@ -21,30 +21,19 @@ def test_milvus_visual_infers_segment_ms_from_bounds():
     mock_index.params = {"index_type": "DISKANN"}  # Match config expectation
     mock_collection.index.return_value = mock_index
 
-    # Simulate 3 frames in one segment (0-5000ms)
-    mock_rows = [
-        {
-            "frame_idx": 0, "timestamp_ms": 0, "segment_id": 0,
-            "segment_start_ms": 0, "segment_end_ms": 5000,
-            "embedding": [0.1] * 1152
-        },
-        {
-            "frame_idx": 1, "timestamp_ms": 200, "segment_id": 0,
-            "segment_start_ms": 0, "segment_end_ms": 5000,
-            "embedding": [0.2] * 1152
-        },
-        {
-            "frame_idx": 2, "timestamp_ms": 400, "segment_id": 0,
-            "segment_start_ms": 0, "segment_end_ms": 5000,
-            "embedding": [0.3] * 1152
-        },
-    ]
+    # Mock search results (ANN path uses collection.search(), not query_iterator)
+    mock_hit = Mock()
+    mock_hit.distance = 0.85
+    mock_hit.entity = Mock()
+    mock_hit.entity.get = lambda field, default=None: {
+        "frame_idx": 0,
+        "timestamp_ms": 200,
+        "segment_id": 0,
+        "segment_start_ms": 0,
+        "segment_end_ms": 5000,
+    }.get(field, default)
 
-    # Mock query_iterator
-    mock_iter = Mock()
-    mock_iter.next.side_effect = [mock_rows, []]
-    mock_iter.close = Mock()
-    mock_collection.query_iterator.return_value = mock_iter
+    mock_collection.search.return_value = [[mock_hit]]
 
     query = np.random.randn(1152).astype(np.float32)
 
@@ -57,11 +46,10 @@ def test_milvus_visual_infers_segment_ms_from_bounds():
 
     # Should successfully return candidates
     assert isinstance(results, list)
+    assert len(results) >= 1
     # Verify it computed segment boundaries (start=0, end=5000)
-    if results:
-        assert results[0].start_time == 0.0
-        assert results[0].end_time == 5.0
-    assert mock_collection.query_iterator.call_args.kwargs["timeout"] > 0
+    assert results[0].start_time == 0.0
+    assert results[0].end_time == 5.0
 
 
 def test_milvus_visual_infers_duration_from_max_timestamp():
@@ -77,24 +65,19 @@ def test_milvus_visual_infers_duration_from_max_timestamp():
     mock_index.params = {"index_type": "DISKANN"}
     mock_collection.index.return_value = mock_index
 
-    # Simulate frames up to 10000ms
-    mock_rows = [
-        {
-            "frame_idx": 0, "timestamp_ms": 0, "segment_id": 0,
-            "segment_start_ms": 0, "segment_end_ms": 5000,
-            "embedding": [0.1] * 1152
-        },
-        {
-            "frame_idx": 1, "timestamp_ms": 10000, "segment_id": 1,
-            "segment_start_ms": 5000, "segment_end_ms": 10000,
-            "embedding": [0.2] * 1152
-        },
-    ]
+    # Mock search results
+    mock_hit = Mock()
+    mock_hit.distance = 0.82
+    mock_hit.entity = Mock()
+    mock_hit.entity.get = lambda field, default=None: {
+        "frame_idx": 1,
+        "timestamp_ms": 10000,
+        "segment_id": 1,
+        "segment_start_ms": 5000,
+        "segment_end_ms": 10000,
+    }.get(field, default)
 
-    mock_iter = Mock()
-    mock_iter.next.side_effect = [mock_rows, []]
-    mock_iter.close = Mock()
-    mock_collection.query_iterator.return_value = mock_iter
+    mock_collection.search.return_value = [[mock_hit]]
 
     query = np.random.randn(1152).astype(np.float32)
 
@@ -122,24 +105,19 @@ def test_milvus_visual_fallback_to_provided_params():
     mock_index.params = {"index_type": "DISKANN"}
     mock_collection.index.return_value = mock_index
 
-    # Simulate OLD data without segment bounds (segment_start_ms = -1)
-    mock_rows = [
-        {
-            "frame_idx": 0, "timestamp_ms": 0, "segment_id": -1,
-            "segment_start_ms": -1, "segment_end_ms": -1,
-            "embedding": [0.1] * 1152
-        },
-        {
-            "frame_idx": 1, "timestamp_ms": 3000, "segment_id": -1,
-            "segment_start_ms": -1, "segment_end_ms": -1,
-            "embedding": [0.2] * 1152
-        },
-    ]
+    # Mock search results with OLD data (segment_start_ms = -1)
+    mock_hit = Mock()
+    mock_hit.distance = 0.78
+    mock_hit.entity = Mock()
+    mock_hit.entity.get = lambda field, default=None: {
+        "frame_idx": 0,
+        "timestamp_ms": 0,
+        "segment_id": -1,
+        "segment_start_ms": -1,
+        "segment_end_ms": -1,
+    }.get(field, default)
 
-    mock_iter = Mock()
-    mock_iter.next.side_effect = [mock_rows, []]
-    mock_iter.close = Mock()
-    mock_collection.query_iterator.return_value = mock_iter
+    mock_collection.search.return_value = [[mock_hit]]
 
     query = np.random.randn(1152).astype(np.float32)
 
@@ -167,11 +145,8 @@ def test_empty_milvus_data_returns_empty_list():
     mock_index.params = {"index_type": "DISKANN"}
     mock_collection.index.return_value = mock_index
 
-    # Empty result
-    mock_iter = Mock()
-    mock_iter.next.return_value = []
-    mock_iter.close = Mock()
-    mock_collection.query_iterator.return_value = mock_iter
+    # Empty search result
+    mock_collection.search.return_value = [[]]
 
     query = np.random.randn(1152).astype(np.float32)
 
