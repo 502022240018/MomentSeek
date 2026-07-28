@@ -49,6 +49,13 @@ from .milvus_search_visual_v2 import milvus_visual_candidates_ann
 
 logger = logging.getLogger(__name__)
 
+
+def _get_visual_index_type() -> str:
+    """Get visual modality index type (supports dynamic DISKANN/HNSW config)."""
+    settings = get_settings()
+    return "DISKANN" if settings.visual_use_diskann else "HNSW"
+
+
 # Milvus ANN search params (used only for face / speaker).
 _HNSW_EF    = 128
 _IVF_NPROBE = 64
@@ -64,7 +71,7 @@ _MODALITY_METRIC: dict[str, str] = {
     "speaker": "COSINE",
 }
 _MODALITY_INDEX_TYPE: dict[str, str] = {
-    "visual":  "HNSW",
+    "visual":  _get_visual_index_type(),  # Dynamic: DISKANN or HNSW based on config
     "asr":     "HNSW",
     "ocr":     "HNSW",
     "face":    "IVF_FLAT",

@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import numpy as np
 import pytest
@@ -97,10 +97,15 @@ def test_voice_search_matches_individual_utterances(tmp_path):
     def _mock_speaker(video_id: str, **_kwargs):
         return {"a": data_a, "b": data_b}[video_id]
 
+    # Mock Milvus connection to avoid real connection attempt
+    mock_client = Mock()
+
     with (
         patch("app.speaker_service.milvus_read_enabled", return_value=True),
         patch("app.speaker_service._speaker_data_from_milvus", side_effect=_mock_speaker),
         patch("app.speaker_service._texts_from_milvus", return_value=_ASR_TEXTS),
+        patch("app.indexing.milvus_client.ensure_milvus_reachable", return_value=None),
+        patch("app.indexing.milvus_client.get_milvus_client", return_value=mock_client),
     ):
         hits = voice_search(
             tmp_path / "indexes", catalog, query_video_id="a", query_utterance_index=0, limit=3

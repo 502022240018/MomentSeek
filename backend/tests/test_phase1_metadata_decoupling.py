@@ -16,6 +16,11 @@ def test_milvus_visual_infers_segment_ms_from_bounds():
     mock_collection = Mock()
     mock_client.collection_for.return_value = mock_collection
 
+    # Mock index information for DiskANN/HNSW verification
+    mock_index = Mock()
+    mock_index.params = {"index_type": "DISKANN"}  # Match config expectation
+    mock_collection.index.return_value = mock_index
+
     # Simulate 3 frames in one segment (0-5000ms)
     mock_rows = [
         {
@@ -67,6 +72,11 @@ def test_milvus_visual_infers_duration_from_max_timestamp():
     mock_collection = Mock()
     mock_client.collection_for.return_value = mock_collection
 
+    # Mock index information for DiskANN/HNSW verification
+    mock_index = Mock()
+    mock_index.params = {"index_type": "DISKANN"}
+    mock_collection.index.return_value = mock_index
+
     # Simulate frames up to 10000ms
     mock_rows = [
         {
@@ -107,6 +117,11 @@ def test_milvus_visual_fallback_to_provided_params():
     mock_collection = Mock()
     mock_client.collection_for.return_value = mock_collection
 
+    # Mock index information for DiskANN/HNSW verification
+    mock_index = Mock()
+    mock_index.params = {"index_type": "DISKANN"}
+    mock_collection.index.return_value = mock_index
+
     # Simulate OLD data without segment bounds (segment_start_ms = -1)
     mock_rows = [
         {
@@ -146,6 +161,11 @@ def test_empty_milvus_data_returns_empty_list():
     mock_client = MagicMock()
     mock_collection = Mock()
     mock_client.collection_for.return_value = mock_collection
+
+    # Mock index information for DiskANN/HNSW verification
+    mock_index = Mock()
+    mock_index.params = {"index_type": "DISKANN"}
+    mock_collection.index.return_value = mock_index
 
     # Empty result
     mock_iter = Mock()
