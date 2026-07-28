@@ -12,9 +12,11 @@ def test_milvus_visual_infers_segment_ms_from_bounds():
     from app.indexing.milvus_search import milvus_visual_candidates
 
     # Mock settings to ensure test isolation
-    with patch("app.indexing.milvus_search_visual_v2.get_settings") as mock_settings:
-        mock_settings.return_value.visual_use_diskann = True
-        mock_settings.return_value.visual_ann_top_k = 500
+    with patch("app.settings.get_settings") as mock_get_settings:
+        mock_settings_obj = Mock()
+        mock_settings_obj.visual_use_diskann = True
+        mock_settings_obj.visual_ann_top_k = 500
+        mock_get_settings.return_value = mock_settings_obj
 
         # Mock client that returns rows with explicit segment boundaries
         mock_client = MagicMock()
@@ -61,9 +63,11 @@ def test_milvus_visual_infers_duration_from_max_timestamp():
     """Test that duration_ms is inferred from max(timestamp_ms)."""
     from app.indexing.milvus_search import milvus_visual_candidates
 
-    with patch("app.indexing.milvus_search_visual_v2.get_settings") as mock_settings:
-        mock_settings.return_value.visual_use_diskann = True
-        mock_settings.return_value.visual_ann_top_k = 500
+    with patch("app.settings.get_settings") as mock_get_settings:
+        mock_settings_obj = Mock()
+        mock_settings_obj.visual_use_diskann = True
+        mock_settings_obj.visual_ann_top_k = 500
+        mock_get_settings.return_value = mock_settings_obj
 
         mock_client = MagicMock()
         mock_collection = Mock()
@@ -100,14 +104,30 @@ def test_milvus_visual_infers_duration_from_max_timestamp():
         # Should infer duration from max timestamp (10000ms = 10s)
         assert isinstance(results, list)
 
+        mock_collection.search.return_value = [[mock_hit]]
+
+        query = np.random.randn(1152).astype(np.float32)
+
+        # Call WITHOUT providing duration_ms
+        results = milvus_visual_candidates(
+            mock_client, "test_video", query,
+            duration_ms=None, segment_ms=None,
+            profile="balanced", limit=10
+        )
+
+        # Should infer duration from max timestamp (10000ms = 10s)
+        assert isinstance(results, list)
+
 
 def test_milvus_visual_fallback_to_provided_params():
     """Test backward compatibility: provided params are used as fallback."""
     from app.indexing.milvus_search import milvus_visual_candidates
 
-    with patch("app.indexing.milvus_search_visual_v2.get_settings") as mock_settings:
-        mock_settings.return_value.visual_use_diskann = True
-        mock_settings.return_value.visual_ann_top_k = 500
+    with patch("app.settings.get_settings") as mock_get_settings:
+        mock_settings_obj = Mock()
+        mock_settings_obj.visual_use_diskann = True
+        mock_settings_obj.visual_ann_top_k = 500
+        mock_get_settings.return_value = mock_settings_obj
 
         mock_client = MagicMock()
         mock_collection = Mock()
@@ -149,9 +169,11 @@ def test_empty_milvus_data_returns_empty_list():
     """Test that empty Milvus result returns empty candidate list."""
     from app.indexing.milvus_search import milvus_visual_candidates
 
-    with patch("app.indexing.milvus_search_visual_v2.get_settings") as mock_settings:
-        mock_settings.return_value.visual_use_diskann = True
-        mock_settings.return_value.visual_ann_top_k = 500
+    with patch("app.settings.get_settings") as mock_get_settings:
+        mock_settings_obj = Mock()
+        mock_settings_obj.visual_use_diskann = True
+        mock_settings_obj.visual_ann_top_k = 500
+        mock_get_settings.return_value = mock_settings_obj
 
         mock_client = MagicMock()
         mock_collection = Mock()

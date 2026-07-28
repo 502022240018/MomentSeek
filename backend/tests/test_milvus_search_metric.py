@@ -26,29 +26,45 @@ def test_modality_metric_covers_all_modalities():
 
 
 def test_modality_index_type_covers_all_modalities():
-    """Every modality known to the client has an entry in _MODALITY_INDEX_TYPE."""
-    assert set(_MODALITY_INDEX_TYPE) == set(_COLLECTION_FOR_MODALITY)
+    """Every modality known to the client has an entry accessible via get_modality_index_type()."""
+    from app.indexing.milvus_search import get_modality_index_type
+
+    # Verify all modalities can be queried
+    for modality in _COLLECTION_FOR_MODALITY:
+        index_type = get_modality_index_type(modality)
+        assert index_type in ["DISKANN", "HNSW", "IVF_FLAT"], (
+            f"modality '{modality}' returned unexpected index type: {index_type}"
+        )
 
 
 def test_modality_metric_matches_collection_configs():
     """_MODALITY_METRIC must be in sync with _COLLECTION_CONFIGS (the index definition)."""
+    from app.indexing.milvus_client import get_collection_index_config
+
     for modality, collection_name in _COLLECTION_FOR_MODALITY.items():
-        expected = _COLLECTION_CONFIGS[collection_name]["index"]["metric_type"]
+        # Get index config dynamically for visual, statically for others
+        index_config = get_collection_index_config(collection_name)
+        expected = index_config["metric_type"]
         actual   = _MODALITY_METRIC[modality]
         assert actual == expected, (
             f"modality '{modality}': _MODALITY_METRIC={actual!r} "
-            f"but _COLLECTION_CONFIGS says {expected!r}"
+            f"but collection config says {expected!r}"
         )
 
 
 def test_modality_index_type_matches_collection_configs():
-    """_MODALITY_INDEX_TYPE must be in sync with _COLLECTION_CONFIGS."""
+    """get_modality_index_type() must return values matching collection configs."""
+    from app.indexing.milvus_search import get_modality_index_type
+    from app.indexing.milvus_client import get_collection_index_config
+
     for modality, collection_name in _COLLECTION_FOR_MODALITY.items():
-        expected = _COLLECTION_CONFIGS[collection_name]["index"]["index_type"]
-        actual   = _MODALITY_INDEX_TYPE[modality]
+        # Get index config dynamically
+        index_config = get_collection_index_config(collection_name)
+        expected = index_config["index_type"]
+        actual = get_modality_index_type(modality)
         assert actual == expected, (
-            f"modality '{modality}': _MODALITY_INDEX_TYPE={actual!r} "
-            f"but _COLLECTION_CONFIGS says {expected!r}"
+            f"modality '{modality}': get_modality_index_type()={actual!r} "
+            f"but collection config says {expected!r}"
         )
 
 
