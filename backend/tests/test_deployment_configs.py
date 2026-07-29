@@ -217,6 +217,17 @@ def test_shared_ascend_deploy_supports_git_worktrees():
     assert '$SOURCE_DIR/.git/info/exclude' not in deploy_script
 
 
+def test_shared_ascend_deploy_passes_visual_ann_configuration():
+    deploy_script = _read("scripts/deploy_ascend_shared_server.sh")
+
+    assert 'VISUAL_USE_DISKANN="${VISUAL_USE_DISKANN:-true}"' in deploy_script
+    assert 'VISUAL_ANN_TOP_K="${VISUAL_ANN_TOP_K:-500}"' in deploy_script
+    assert 'VISUAL_ANN_SEGMENT_TOP_N="${VISUAL_ANN_SEGMENT_TOP_N:-3}"' in deploy_script
+    assert '-e VISUAL_USE_DISKANN="$VISUAL_USE_DISKANN"' in deploy_script
+    assert '-e VISUAL_ANN_TOP_K="$VISUAL_ANN_TOP_K"' in deploy_script
+    assert '-e VISUAL_ANN_SEGMENT_TOP_N="$VISUAL_ANN_SEGMENT_TOP_N"' in deploy_script
+
+
 def test_production_ascend_uses_isolated_resident_workers():
     prod = _parse_env("deploy/env/prod.ascend.example")
     staging = _parse_env("deploy/env/staging.ascend.example")
