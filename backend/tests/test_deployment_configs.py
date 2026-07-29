@@ -209,6 +209,14 @@ def test_shared_ascend_deploy_honors_port_milvus_and_required_models():
     assert "verify_models.py \\\n  --manifest /app/deploy/models/ascend-prod.models.json || true" not in deploy_script
 
 
+def test_shared_ascend_deploy_supports_git_worktrees():
+    deploy_script = _read("scripts/deploy_ascend_shared_server.sh")
+
+    assert '[[ -e "$SOURCE_DIR/.git" ]]' in deploy_script
+    assert "rev-parse --path-format=absolute --git-common-dir" in deploy_script
+    assert '$SOURCE_DIR/.git/info/exclude' not in deploy_script
+
+
 def test_production_ascend_uses_isolated_resident_workers():
     prod = _parse_env("deploy/env/prod.ascend.example")
     staging = _parse_env("deploy/env/staging.ascend.example")

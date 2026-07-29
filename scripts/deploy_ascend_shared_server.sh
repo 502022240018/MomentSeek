@@ -30,6 +30,7 @@ SEARCH_PREWARM_REQUIRED="${SEARCH_PREWARM_REQUIRED:-true}"
 COLOR_GRADING_ENABLED="${COLOR_GRADING_ENABLED:-false}"
 COLOR_GRADING_BASE_URL="${COLOR_GRADING_BASE_URL:-http://127.0.0.1:21098}"
 COLOR_GRADING_REQUEST_TIMEOUT_SECONDS="${COLOR_GRADING_REQUEST_TIMEOUT_SECONDS:-10}"
+SEARCH_VISUAL_PRIORITY_ENABLED="${SEARCH_VISUAL_PRIORITY_ENABLED:-false}"
 BUILD_DIR="${SOURCE_DIR}/.server-build"
 INSIGHTFACE_WHEEL="${INSIGHTFACE_WHEEL:-${SOURCE_DIR}/vendor-wheels/insightface-1.0.1-py3-none-any.whl}"
 INSIGHTFACE_SHA256="5f373f6fedbdda5cbc59a34ca386a75a2995cdaf6899402590ae9eb4308fc2e8"
@@ -51,7 +52,7 @@ rollback_on_error() {
 }
 trap 'rollback_on_error "$LINENO"' ERR
 
-[[ -d "$SOURCE_DIR/.git" ]] || fail "Git source not found: $SOURCE_DIR"
+[[ -e "$SOURCE_DIR/.git" ]] || fail "Git source not found: $SOURCE_DIR"
 [[ -f "$SOURCE_DIR/backend/requirements-ascend.txt" ]] || fail "Missing Ascend requirements"
 [[ -f "$SOURCE_DIR/frontend/package-lock.json" ]] || fail "Missing frontend package-lock.json"
 [[ "$CPU_THREAD_LIMIT" =~ ^[1-9][0-9]*$ ]] || fail "CPU_THREAD_LIMIT must be a positive integer"
@@ -81,7 +82,7 @@ printf 'app_port=%s source=%s\n' "$APP_PORT" "$APP_PORT_SOURCE"
   || fail "Invalid MILVUS_PORT: $MILVUS_PORT"
 for boolean_name in \
   MILVUS_ENABLED MILVUS_READ_ENABLED MILVUS_WRITE_ENABLED MILVUS_FALLBACK_ENABLED \
-  COLOR_GRADING_ENABLED; do
+  COLOR_GRADING_ENABLED SEARCH_VISUAL_PRIORITY_ENABLED; do
   boolean_value="${!boolean_name}"
   boolean_value="${boolean_value,,}"
   case "$boolean_value" in
@@ -135,8 +136,12 @@ if ss -lnt 2>/dev/null | grep -Eq ":${APP_PORT}[[:space:]]"; then
 fi
 git -C "$SOURCE_DIR" status -sb
 git -C "$SOURCE_DIR" log -1 --oneline
-printf '.server-build/\n' >>"$SOURCE_DIR/.git/info/exclude"
-sort -u "$SOURCE_DIR/.git/info/exclude" -o "$SOURCE_DIR/.git/info/exclude"
+GIT_COMMON_DIR="$(
+  git -C "$SOURCE_DIR" rev-parse --path-format=absolute --git-common-dir
+)"
+GIT_EXCLUDE_FILE="$GIT_COMMON_DIR/info/exclude"
+printf '.server-build/\n' >>"$GIT_EXCLUDE_FILE"
+sort -u "$GIT_EXCLUDE_FILE" -o "$GIT_EXCLUDE_FILE"
 
 log "2/8 Stage the checked-in production build definition"
 cp "$SOURCE_DIR/Dockerfile.ascend" "$BUILD_DIR/Dockerfile"
@@ -275,6 +280,7 @@ docker run -d \
   -e COLOR_GRADING_ENABLED="$COLOR_GRADING_ENABLED" \
   -e COLOR_GRADING_BASE_URL="$COLOR_GRADING_BASE_URL" \
   -e COLOR_GRADING_REQUEST_TIMEOUT_SECONDS="$COLOR_GRADING_REQUEST_TIMEOUT_SECONDS" \
+  -e SEARCH_VISUAL_PRIORITY_ENABLED="$SEARCH_VISUAL_PRIORITY_ENABLED" \
   -e OCR_ENGINE=rapidocr_acl \
   -e OCR_DEVICE=npu \
   -e OCR_ACL_MODEL_DIR=rapidocr/ascend/910b4-cann9-profile \
