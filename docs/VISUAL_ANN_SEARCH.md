@@ -31,8 +31,8 @@ Candidates → VLM Reranking
 ### Environment Variables
 
 ```bash
-# Index type
-VISUAL_USE_DISKANN=false  # false=HNSW (memory), true=DiskANN (disk)
+# Index type (current default)
+VISUAL_USE_DISKANN=true  # true=DiskANN (disk), false=HNSW (memory)
 
 # Recall size
 VISUAL_ANN_TOP_K=500  # Candidates per subquery (300-1000 recommended)
@@ -43,13 +43,13 @@ VISUAL_ANN_SEGMENT_TOP_N=3  # Top-N frames per segment for scoring (3-10 recomme
 
 ### Index Types
 
-**HNSW (default):**
+**HNSW:**
 - In-memory index
 - Fast query (<50ms)
 - Requires ~4GB RAM for 100K frames
 - Uses `ef` parameter (≥ top_k)
 
-**DiskANN:**
+**DiskANN (current default):**
 - Disk-based index
 - Slower query (~100-200ms)
 - Low memory footprint
@@ -95,8 +95,19 @@ For queries with multiple subqueries (e.g., "red car AND mountain scenery"):
 When switching between HNSW and DiskANN:
 
 ```bash
-python backend/scripts/rebuild_visual_index.py
+export VISUAL_USE_DISKANN=true
+export MILVUS_FALLBACK_ENABLED=true
+python backend/scripts/rebuild_visual_index.py --dry-run
+python backend/scripts/rebuild_visual_index.py --confirm
+python backend/scripts/check_visual_config.py
 ```
+
+Pause Visual indexing writes while the index is being rebuilt. The script drops
+and recreates only the `embedding` index: the collection, metadata and vectors
+are preserved, so SigLIP does not need to re-encode existing videos. If the
+environment changed, restart the application process after the rebuild so it
+loads the new values; restarting only Milvus does not update application
+environment variables.
 
 ### Verification
 
@@ -115,8 +126,7 @@ Run backend/scripts/rebuild_visual_index.py to rebuild.
 - Distribution sampling (no longer needed with VLM reranking)
 - Z-score normalization
 - Percentile calculation
-- Legacy full-query fallback
-- `milvus_fallback_enabled` setting
+- Legacy Visual full-query implementation
 - `visual_sample_size`, `visual_sample_strategy` settings
 - **Visual from `BULK_QUERY_FIELDS`** (critical fix - see below)
 
@@ -222,7 +232,8 @@ Candidate(
 ### Unit Tests
 
 ```bash
-pytest backend/tests/integration/test_visual_optimization.py -v
+pytest backend/tests/test_milvus_search_metric.py -v
+pytest backend/tests/test_settings.py -v
 ```
 
 ### Manual Testing
@@ -265,7 +276,8 @@ for c in candidates[:5]:
 
 ```bash
 # Rebuild index to match configuration
-python backend/scripts/rebuild_visual_index.py
+python backend/scripts/rebuild_visual_index.py --dry-run
+python backend/scripts/rebuild_visual_index.py --confirm
 ```
 
 ## References

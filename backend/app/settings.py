@@ -150,8 +150,9 @@ class Settings(BaseSettings):
     # Local NPZ is written before Milvus, so "warn" preserves service
     # availability and leaves a recoverable artifact for later backfill.
     milvus_write_fail_policy: Literal["raise", "warn"] = "warn"
-    # Deprecated: Visual search no longer uses fallback (ANN is always used)
-    milvus_fallback_enabled: bool = False
+    # Fail open to local NPZ indexes when Milvus is unavailable or temporarily
+    # rebuilding an index. This applies to every retrieval modality.
+    milvus_fallback_enabled: bool = True
 
     # Visual ANN search configuration
     visual_use_diskann: bool = True  # Index type: True=DiskANN (disk), False=HNSW (memory)
@@ -190,6 +191,13 @@ class Settings(BaseSettings):
     def validate_milvus_search_video_batch_size(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("milvus_search_video_batch_size 必须大于 0")
+        return value
+
+    @field_validator("visual_ann_top_k", "visual_ann_segment_top_n")
+    @classmethod
+    def validate_visual_ann_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Visual ANN parameters must be greater than 0")
         return value
 
     @property

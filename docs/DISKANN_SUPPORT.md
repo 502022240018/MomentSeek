@@ -37,21 +37,24 @@ print(f"Index type: {index.params.get('index_type')}")
 
 ### 2. Switch Index Type
 ```bash
-# Set environment variable
 export VISUAL_USE_DISKANN=true
-
-# Rebuild index
+export MILVUS_FALLBACK_ENABLED=true
+python backend/scripts/rebuild_visual_index.py --dry-run
 python backend/scripts/rebuild_visual_index.py --confirm
-
-# Restart container to apply
-docker-compose -f compose.milvus.yml restart milvus
+python backend/scripts/check_visual_config.py
 ```
+
+Pause Visual indexing writes during the rebuild. The command replaces only the
+vector index and verifies that the entity count is unchanged; it does not drop
+the collection or require videos to be re-encoded. Restart the application
+process if you changed its environment. A Milvus-only restart does not apply
+application environment variables.
 
 ### 3. Verify Search Works
-```bash
-# Run integration tests
-pytest backend/tests/integration/test_visual_ann.py -v -s
-```
+
+The GitHub `Milvus integration` workflow starts an isolated Milvus instance,
+creates a real DiskANN Visual index, writes deterministic test vectors and
+retrieves an exact match through the production Visual search path.
 
 ## Official Documentation
 - [Milvus DiskANN Index](https://milvus.io/docs/disk_index.md)

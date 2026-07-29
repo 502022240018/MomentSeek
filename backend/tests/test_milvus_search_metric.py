@@ -8,12 +8,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.indexing.milvus_client import _COLLECTION_CONFIGS, _COLLECTION_FOR_MODALITY
+from app.indexing.milvus_client import _COLLECTION_FOR_MODALITY
 from app.indexing.milvus_search import (
     _MODALITY_INDEX_TYPE,
     _MODALITY_METRIC,
     milvus_face_candidates,
 )
+from app.indexing.milvus_search_visual_v2 import _aggregate_by_segment
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ def test_face_candidates_l2_to_cosine_conversion():
     return an object whose .search() method yields known L2 values, then verify
     that the resulting Candidate.raw_score equals the expected cosine.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
 
     # Known cosine value we want to recover
     cosine_expected = 0.72
@@ -146,3 +147,29 @@ def test_face_candidates_l2_to_cosine_conversion():
     # cosine 0.72 > threshold 0.35 → above_threshold must be True
     assert candidate.above_threshold is True
     assert candidate.decision == "absolute_hit"
+
+
+def test_visual_segment_top_n_controls_frame_aggregation():
+    """Top-1 keeps the peak frame while Top-3 averages the three best frames."""
+    ann_results = [
+        {
+            "query_idx": 0,
+            "frame_idx": frame_idx,
+            "timestamp_ms": frame_idx * 1000,
+            "segment_id": 7,
+            "segment_start_ms": 0,
+            "segment_end_ms": 5000,
+            "cosine": cosine,
+        }
+        for frame_idx, cosine in enumerate((0.9, 0.6, 0.3))
+    ]
+
+    top_1 = _aggregate_by_segment(
+        ann_results, "video-test", 1, "balanced", 1, segment_top_n=1
+    )
+    top_3 = _aggregate_by_segment(
+        ann_results, "video-test", 1, "balanced", 1, segment_top_n=3
+    )
+
+    assert top_1[0].raw_score == pytest.approx(0.9)
+    assert top_3[0].raw_score == pytest.approx(0.6)

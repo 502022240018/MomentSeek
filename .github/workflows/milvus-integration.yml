@@ -50,6 +50,9 @@ jobs:
       MILVUS_READ_ENABLED: "true"
       MILVUS_WRITE_ENABLED: "true"
       MILVUS_FALLBACK_ENABLED: "false"
+      VISUAL_USE_DISKANN: "true"
+      VISUAL_ANN_TOP_K: "10"
+      VISUAL_ANN_SEGMENT_TOP_N: "1"
       MINIO_CONSOLE_PORT: "9001"
       MOMENTSEEK_NETWORK_NAME: momentseek-ci-${{ github.run_id }}
       RUN_MILVUS_INTEGRATION_TESTS: "1"
