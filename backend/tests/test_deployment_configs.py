@@ -228,6 +228,25 @@ def test_shared_ascend_deploy_passes_visual_ann_configuration():
     assert '-e VISUAL_ANN_SEGMENT_TOP_N="$VISUAL_ANN_SEGMENT_TOP_N"' in deploy_script
 
 
+def test_shared_ascend_deploy_passes_orchestration_configuration():
+    deploy_script = _read("scripts/deploy_ascend_shared_server.sh")
+
+    for variable in (
+        "ORCHESTRATION_ENABLED",
+        "ORCHESTRATION_CONFIG_PATH",
+        "ORCHESTRATION_PROFILE",
+        "ORCHESTRATION_FAIL_OPEN",
+        "ORCHESTRATION_TRACE_ENABLED",
+        "ORCHESTRATION_TRACE_PATH",
+        "QWEN35_VLLM_BASE_URL",
+        "QWEN35_PLANNER_MODEL",
+        "QWEN35_RERANKER_MODEL",
+    ):
+        assert f'-e {variable}="${variable}"' in deploy_script
+    assert "orchestration_preflight=PASS" in deploy_script
+    assert '"${QWEN35_VLLM_BASE_URL%/}/models"' in deploy_script
+
+
 def test_production_ascend_uses_isolated_resident_workers():
     prod = _parse_env("deploy/env/prod.ascend.example")
     staging = _parse_env("deploy/env/staging.ascend.example")
