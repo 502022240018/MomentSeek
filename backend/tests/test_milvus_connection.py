@@ -108,7 +108,11 @@ def _check_batch_buffer() -> bool:
     try:
         import numpy as np
         from pymilvus import Collection
-        from app.indexing.milvus_client import MilvusClient, _COLLECTION_CONFIGS
+        from app.indexing.milvus_client import (
+            MilvusClient,
+            _COLLECTION_CONFIGS,
+            get_collection_index_config,
+        )
         from app.indexing.batch_buffer import BatchBuffer
         from app.indexing.milvus_schema import visual_pk, MODEL_VERSIONS
 
@@ -126,7 +130,10 @@ def _check_batch_buffer() -> bool:
             schema=schema,
             consistency_level="Strong",
         )
-        col_new.create_index(field_name="embedding", index_params=config["index"])
+        col_new.create_index(
+            field_name="embedding",
+            index_params=get_collection_index_config("visual_embeddings"),
+        )
         col_new.load()
         logger.info("   Temporary collection ready")
 
@@ -216,6 +223,67 @@ def _check_batch_buffer() -> bool:
 def test_batch_buffer() -> None:
     """Expose the isolated batch-buffer check as a real pytest assertion."""
     assert _check_batch_buffer()
+
+
+def test_visual_diskann_write_and_search() -> None:
+    """Write deterministic vectors and retrieve the exact match via DiskANN."""
+    import numpy as np
+
+    from app.indexing.milvus_client import MilvusClient
+    from app.indexing.milvus_schema import EMBEDDING_DIMS, MODEL_VERSIONS, visual_pk
+    from app.indexing.milvus_search import milvus_visual_candidates
+    from app.indexing.milvus_search_visual_v2 import _reset_index_verification
+
+    client = MilvusClient()
+    collection = client.collection_for("visual")
+    index = collection.index()
+    assert index is not None
+    assert index.params.get("index_type") == "DISKANN"
+
+    video_id = f"diskann-ci-{uuid.uuid4().hex}"
+    dim = EMBEDDING_DIMS["visual"]
+    rows = []
+    for frame_idx in range(12):
+        embedding = np.zeros(dim, dtype=np.float32)
+        embedding[frame_idx] = 1.0
+        rows.append(
+            {
+                "pk": visual_pk(video_id, "ci", frame_idx),
+                "video_id": video_id,
+                "asset_version": "ci",
+                "model_version": MODEL_VERSIONS["visual"],
+                "frame_idx": frame_idx,
+                "timestamp_ms": frame_idx * 1000,
+                "segment_id": frame_idx,
+                "segment_start_ms": frame_idx * 1000,
+                "segment_end_ms": (frame_idx + 1) * 1000,
+                "embedding": embedding.tolist(),
+            }
+        )
+
+    try:
+        collection.upsert(rows)
+        collection.flush()
+        collection.load()
+        _reset_index_verification()
+
+        query = np.zeros(dim, dtype=np.float32)
+        query[0] = 1.0
+        candidates = milvus_visual_candidates(
+            client,
+            video_id,
+            query,
+            profile="balanced",
+            limit=3,
+        )
+
+        assert candidates
+        assert candidates[0].video_id == video_id
+        assert candidates[0].unit_id == 0
+        assert candidates[0].raw_score == pytest.approx(1.0)
+    finally:
+        collection.delete(expr=f'video_id == "{video_id}"')
+        collection.flush()
 
 
 if __name__ == "__main__":

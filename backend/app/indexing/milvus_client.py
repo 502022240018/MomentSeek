@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import logging
 import socket
-from typing import Optional
+import threading
 
 from pymilvus import Collection, CollectionSchema, connections, utility
 
 from app.settings import get_settings
+
 from .milvus_schema import (
     create_asr_schema,
     create_face_schema,
@@ -23,47 +24,97 @@ from .milvus_schema import (
 
 logger = logging.getLogger(__name__)
 
+
+def _get_visual_index_config() -> dict:
+    """Get visual index config dynamically (HNSW or DiskANN based on settings).
+
+    Called at runtime to support dynamic configuration changes.
+    """
+    settings = get_settings()
+    if settings.visual_use_diskann:
+        return {
+            "index_type": "DISKANN",
+            "metric_type": "COSINE",
+            "params": {
+                "max_degree": 56,              # 图的最大度数（必需）
+                "search_list_size": 128,       # 构建时搜索列表大小（必需）
+                "pq_code_budget_gb": 0.125,    # PQ压缩预算（可选）
+                "build_dram_budget_gb": 32.0,  # 构建时内存预算（可选）
+            },
+        }
+    else:
+        # 默认使用HNSW
+        return {
+            "index_type": "HNSW",
+            "metric_type": "COSINE",
+            "params": {"M": 16, "efConstruction": 200},
+        }
+
+
+# Static index configs for non-visual modalities
+_STATIC_INDEX_CONFIGS: dict[str, dict] = {
+    "asr_embeddings": {
+        "index_type": "HNSW",
+        "metric_type": "IP",
+        "params": {"M": 16, "efConstruction": 200},
+    },
+    "ocr_embeddings": {
+        "index_type": "HNSW",
+        "metric_type": "IP",
+        "params": {"M": 16, "efConstruction": 200},
+    },
+    "face_embeddings": {
+        "index_type": "IVF_FLAT",
+        "metric_type": "L2",
+        "params": {"nlist": 1024},
+    },
+    "speaker_embeddings": {
+        "index_type": "HNSW",
+        "metric_type": "COSINE",
+        "params": {"M": 16, "efConstruction": 200},
+    },
+}
+
+
+def get_collection_index_config(collection_name: str) -> dict:
+    """Get index config for a collection (dynamic for visual, static for others).
+
+    This function is called at runtime to support dynamic configuration changes,
+    particularly for visual_embeddings which can switch between DISKANN and HNSW.
+
+    Args:
+        collection_name: Collection name (e.g., "visual_embeddings")
+
+    Returns:
+        Index configuration dict with index_type, metric_type, and params
+    """
+    if collection_name == "visual_embeddings":
+        return _get_visual_index_config()
+    return _STATIC_INDEX_CONFIGS[collection_name]
+
+
 # Collection name → (schema_factory, index_params)
+# Note: For visual_embeddings, use get_collection_index_config() at runtime
 _COLLECTION_CONFIGS: dict[str, dict] = {
     "visual_embeddings": {
         "schema": create_visual_schema,
-        "index": {
-            "index_type": "HNSW",
-            "metric_type": "COSINE",
-            "params": {"M": 16, "efConstruction": 200},
-        },
+        "index": None,  # Placeholder - use get_collection_index_config() at runtime
     },
     "asr_embeddings": {
         "schema": create_asr_schema,
-        "index": {
-            "index_type": "HNSW",
-            "metric_type": "IP",
-            "params": {"M": 16, "efConstruction": 200},
-        },
+        "index": _STATIC_INDEX_CONFIGS["asr_embeddings"],
     },
     "ocr_embeddings": {
         "schema": create_ocr_schema,
-        "index": {
-            "index_type": "HNSW",
-            "metric_type": "IP",
-            "params": {"M": 16, "efConstruction": 200},
-        },
+        "index": _STATIC_INDEX_CONFIGS["ocr_embeddings"],
     },
     "face_embeddings": {
         "schema": create_face_schema,
-        "index": {
-            "index_type": "IVF_FLAT",
-            "metric_type": "L2",
-            "params": {"nlist": 1024},
-        },
+        "index": _STATIC_INDEX_CONFIGS["face_embeddings"],
     },
     "speaker_embeddings": {
         "schema": create_speaker_schema,
-        "index": {
-            "index_type": "HNSW",
-            "metric_type": "COSINE",
-            "params": {"M": 16, "efConstruction": 200},
-        },
+        "index": _STATIC_INDEX_CONFIGS["speaker_embeddings"],
     },
 }
 
@@ -100,12 +151,15 @@ class MilvusClient:
     inside indexing workers or search handlers.
     """
 
-    _instance: Optional["MilvusClient"] = None
+    _instance: MilvusClient | None = None
+    _instance_lock: threading.Lock = threading.Lock()
 
-    def __new__(cls) -> "MilvusClient":
+    def __new__(cls) -> MilvusClient:
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._ready = False
+            with cls._instance_lock:
+                if cls._instance is None:  # double-checked locking
+                    cls._instance = super().__new__(cls)
+                    cls._instance._ready = False
         return cls._instance
 
     def __init__(self) -> None:
@@ -135,7 +189,9 @@ class MilvusClient:
                 logger.info("Creating collection: %s", name)
                 schema: CollectionSchema = config["schema"]()
                 col = Collection(name=name, schema=schema, consistency_level="Strong")
-                col.create_index(field_name="embedding", index_params=config["index"])
+                # Get index config dynamically for runtime support
+                index_config = get_collection_index_config(name) if name == "visual_embeddings" else config["index"]
+                col.create_index(field_name="embedding", index_params=index_config)
                 col.load()
                 logger.info("Collection %s created and loaded", name)
             else:
@@ -266,14 +322,21 @@ class MilvusClient:
 # Module-level singleton accessor
 # ---------------------------------------------------------------------------
 
-_client: Optional[MilvusClient] = None
+_client: MilvusClient | None = None
+_client_lock = threading.Lock()
 
 
 def get_milvus_client() -> MilvusClient:
-    """Return the process-wide MilvusClient, initialising it on first call."""
+    """Return the process-wide MilvusClient, initialising it on first call.
+
+    Thread-safe: uses double-checked locking so concurrent callers do not
+    race to create duplicate connections.
+    """
     global _client
     if _client is None:
-        _client = MilvusClient()
+        with _client_lock:
+            if _client is None:  # double-checked locking
+                _client = MilvusClient()
     return _client
 
 

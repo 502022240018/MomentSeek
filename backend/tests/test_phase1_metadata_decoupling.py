@@ -3,7 +3,7 @@
 Tests that milvus_visual_candidates() can correctly infer duration_ms and
 segment_ms from Milvus data itself, without relying on manifest.json.
 """
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 
 
@@ -11,157 +11,195 @@ def test_milvus_visual_infers_segment_ms_from_bounds():
     """Test that segment_ms is inferred from segment_start_ms/segment_end_ms."""
     from app.indexing.milvus_search import milvus_visual_candidates
 
-    # Mock client that returns rows with explicit segment boundaries
-    mock_client = MagicMock()
-    mock_collection = Mock()
-    mock_client.collection_for.return_value = mock_collection
+    # Mock settings to ensure test isolation
+    with patch("app.settings.get_settings") as mock_get_settings:
+        mock_settings_obj = Mock()
+        mock_settings_obj.visual_use_diskann = True
+        mock_settings_obj.visual_ann_top_k = 500
+        mock_settings_obj.visual_ann_segment_top_n = 3
+        mock_get_settings.return_value = mock_settings_obj
 
-    # Simulate 3 frames in one segment (0-5000ms)
-    mock_rows = [
-        {
-            "frame_idx": 0, "timestamp_ms": 0, "segment_id": 0,
-            "segment_start_ms": 0, "segment_end_ms": 5000,
-            "embedding": [0.1] * 1152
-        },
-        {
-            "frame_idx": 1, "timestamp_ms": 200, "segment_id": 0,
-            "segment_start_ms": 0, "segment_end_ms": 5000,
-            "embedding": [0.2] * 1152
-        },
-        {
-            "frame_idx": 2, "timestamp_ms": 400, "segment_id": 0,
-            "segment_start_ms": 0, "segment_end_ms": 5000,
-            "embedding": [0.3] * 1152
-        },
-    ]
+        # Mock client that returns rows with explicit segment boundaries
+        mock_client = MagicMock()
+        mock_collection = Mock()
+        mock_client.collection_for.return_value = mock_collection
 
-    # Mock query_iterator
-    mock_iter = Mock()
-    mock_iter.next.side_effect = [mock_rows, []]
-    mock_iter.close = Mock()
-    mock_collection.query_iterator.return_value = mock_iter
+        # Mock index information for DiskANN/HNSW verification
+        mock_index = Mock()
+        mock_index.params = {"index_type": "DISKANN"}  # Match config expectation
+        mock_collection.index.return_value = mock_index
 
-    query = np.random.randn(1152).astype(np.float32)
+        # Mock search results (ANN path uses collection.search(), not query_iterator)
+        mock_hit = Mock()
+        mock_hit.distance = 0.85
+        mock_hit.entity = Mock()
+        mock_hit.entity.get = lambda field, default=None: {
+            "frame_idx": 0,
+            "timestamp_ms": 200,
+            "segment_id": 0,
+            "segment_start_ms": 0,
+            "segment_end_ms": 5000,
+        }.get(field, default)
 
-    # Call WITHOUT providing segment_ms
-    results = milvus_visual_candidates(
-        mock_client, "test_video", query,
-        duration_ms=None, segment_ms=None,  # Should infer both
-        profile="balanced", limit=10
-    )
+        mock_collection.search.return_value = [[mock_hit]]
 
-    # Should successfully return candidates
-    assert isinstance(results, list)
-    # Verify it computed segment boundaries (start=0, end=5000)
-    if results:
+        query = np.random.randn(1152).astype(np.float32)
+
+        # Call WITHOUT providing segment_ms
+        results = milvus_visual_candidates(
+            mock_client, "test_video", query,
+            duration_ms=None, segment_ms=None,  # Should infer both
+            profile="balanced", limit=10
+        )
+
+        # Should successfully return candidates
+        assert isinstance(results, list)
+        assert len(results) >= 1
+        # Verify it computed segment boundaries (start=0, end=5000)
         assert results[0].start_time == 0.0
         assert results[0].end_time == 5.0
-    assert mock_collection.query_iterator.call_args.kwargs["timeout"] > 0
 
 
 def test_milvus_visual_infers_duration_from_max_timestamp():
     """Test that duration_ms is inferred from max(timestamp_ms)."""
     from app.indexing.milvus_search import milvus_visual_candidates
 
-    mock_client = MagicMock()
-    mock_collection = Mock()
-    mock_client.collection_for.return_value = mock_collection
+    with patch("app.settings.get_settings") as mock_get_settings:
+        mock_settings_obj = Mock()
+        mock_settings_obj.visual_use_diskann = True
+        mock_settings_obj.visual_ann_top_k = 500
+        mock_settings_obj.visual_ann_segment_top_n = 3
+        mock_get_settings.return_value = mock_settings_obj
 
-    # Simulate frames up to 10000ms
-    mock_rows = [
-        {
-            "frame_idx": 0, "timestamp_ms": 0, "segment_id": 0,
-            "segment_start_ms": 0, "segment_end_ms": 5000,
-            "embedding": [0.1] * 1152
-        },
-        {
-            "frame_idx": 1, "timestamp_ms": 10000, "segment_id": 1,
-            "segment_start_ms": 5000, "segment_end_ms": 10000,
-            "embedding": [0.2] * 1152
-        },
-    ]
+        mock_client = MagicMock()
+        mock_collection = Mock()
+        mock_client.collection_for.return_value = mock_collection
 
-    mock_iter = Mock()
-    mock_iter.next.side_effect = [mock_rows, []]
-    mock_iter.close = Mock()
-    mock_collection.query_iterator.return_value = mock_iter
+        # Mock index information for DiskANN/HNSW verification
+        mock_index = Mock()
+        mock_index.params = {"index_type": "DISKANN"}
+        mock_collection.index.return_value = mock_index
 
-    query = np.random.randn(1152).astype(np.float32)
+        # Mock search results
+        mock_hit = Mock()
+        mock_hit.distance = 0.82
+        mock_hit.entity = Mock()
+        mock_hit.entity.get = lambda field, default=None: {
+            "frame_idx": 1,
+            "timestamp_ms": 10000,
+            "segment_id": 1,
+            "segment_start_ms": 5000,
+            "segment_end_ms": 10000,
+        }.get(field, default)
 
-    # Call WITHOUT providing duration_ms
-    results = milvus_visual_candidates(
-        mock_client, "test_video", query,
-        duration_ms=None, segment_ms=None,
-        profile="balanced", limit=10
-    )
+        mock_collection.search.return_value = [[mock_hit]]
 
-    # Should infer duration from max timestamp (10000ms = 10s)
-    assert isinstance(results, list)
+        query = np.random.randn(1152).astype(np.float32)
+
+        # Call WITHOUT providing duration_ms
+        results = milvus_visual_candidates(
+            mock_client, "test_video", query,
+            duration_ms=None, segment_ms=None,
+            profile="balanced", limit=10
+        )
+
+        # Should infer duration from max timestamp (10000ms = 10s)
+        assert isinstance(results, list)
+
+        mock_collection.search.return_value = [[mock_hit]]
+
+        query = np.random.randn(1152).astype(np.float32)
+
+        # Call WITHOUT providing duration_ms
+        results = milvus_visual_candidates(
+            mock_client, "test_video", query,
+            duration_ms=None, segment_ms=None,
+            profile="balanced", limit=10
+        )
+
+        # Should infer duration from max timestamp (10000ms = 10s)
+        assert isinstance(results, list)
 
 
 def test_milvus_visual_fallback_to_provided_params():
     """Test backward compatibility: provided params are used as fallback."""
     from app.indexing.milvus_search import milvus_visual_candidates
 
-    mock_client = MagicMock()
-    mock_collection = Mock()
-    mock_client.collection_for.return_value = mock_collection
+    with patch("app.settings.get_settings") as mock_get_settings:
+        mock_settings_obj = Mock()
+        mock_settings_obj.visual_use_diskann = True
+        mock_settings_obj.visual_ann_top_k = 500
+        mock_settings_obj.visual_ann_segment_top_n = 3
+        mock_get_settings.return_value = mock_settings_obj
 
-    # Simulate OLD data without segment bounds (segment_start_ms = -1)
-    mock_rows = [
-        {
-            "frame_idx": 0, "timestamp_ms": 0, "segment_id": -1,
-            "segment_start_ms": -1, "segment_end_ms": -1,
-            "embedding": [0.1] * 1152
-        },
-        {
-            "frame_idx": 1, "timestamp_ms": 3000, "segment_id": -1,
-            "segment_start_ms": -1, "segment_end_ms": -1,
-            "embedding": [0.2] * 1152
-        },
-    ]
+        mock_client = MagicMock()
+        mock_collection = Mock()
+        mock_client.collection_for.return_value = mock_collection
 
-    mock_iter = Mock()
-    mock_iter.next.side_effect = [mock_rows, []]
-    mock_iter.close = Mock()
-    mock_collection.query_iterator.return_value = mock_iter
+        # Mock index information for DiskANN/HNSW verification
+        mock_index = Mock()
+        mock_index.params = {"index_type": "DISKANN"}
+        mock_collection.index.return_value = mock_index
 
-    query = np.random.randn(1152).astype(np.float32)
+        # Mock search results with OLD data (segment_start_ms = -1)
+        mock_hit = Mock()
+        mock_hit.distance = 0.78
+        mock_hit.entity = Mock()
+        mock_hit.entity.get = lambda field, default=None: {
+            "frame_idx": 0,
+            "timestamp_ms": 0,
+            "segment_id": -1,
+            "segment_start_ms": -1,
+            "segment_end_ms": -1,
+        }.get(field, default)
 
-    # Call WITH provided params (backward compatibility)
-    results = milvus_visual_candidates(
-        mock_client, "test_video", query,
-        duration_ms=15000, segment_ms=5000,  # Should use these as fallback
-        profile="balanced", limit=10
-    )
+        mock_collection.search.return_value = [[mock_hit]]
 
-    # Should successfully use fallback values
-    assert isinstance(results, list)
+        query = np.random.randn(1152).astype(np.float32)
+
+        # Call WITH provided params (backward compatibility)
+        results = milvus_visual_candidates(
+            mock_client, "test_video", query,
+            duration_ms=15000, segment_ms=5000,  # Should use these as fallback
+            profile="balanced", limit=10
+        )
+
+        # Should successfully use fallback values
+        assert isinstance(results, list)
 
 
 def test_empty_milvus_data_returns_empty_list():
     """Test that empty Milvus result returns empty candidate list."""
     from app.indexing.milvus_search import milvus_visual_candidates
 
-    mock_client = MagicMock()
-    mock_collection = Mock()
-    mock_client.collection_for.return_value = mock_collection
+    with patch("app.settings.get_settings") as mock_get_settings:
+        mock_settings_obj = Mock()
+        mock_settings_obj.visual_use_diskann = True
+        mock_settings_obj.visual_ann_top_k = 500
+        mock_settings_obj.visual_ann_segment_top_n = 3
+        mock_get_settings.return_value = mock_settings_obj
 
-    # Empty result
-    mock_iter = Mock()
-    mock_iter.next.return_value = []
-    mock_iter.close = Mock()
-    mock_collection.query_iterator.return_value = mock_iter
+        mock_client = MagicMock()
+        mock_collection = Mock()
+        mock_client.collection_for.return_value = mock_collection
 
-    query = np.random.randn(1152).astype(np.float32)
+        # Mock index information for DiskANN/HNSW verification
+        mock_index = Mock()
+        mock_index.params = {"index_type": "DISKANN"}
+        mock_collection.index.return_value = mock_index
 
-    results = milvus_visual_candidates(
-        mock_client, "test_video", query,
-        duration_ms=None, segment_ms=None,
-        profile="balanced", limit=10
-    )
+        # Empty search result
+        mock_collection.search.return_value = [[]]
 
-    assert results == []
+        query = np.random.randn(1152).astype(np.float32)
+
+        results = milvus_visual_candidates(
+            mock_client, "test_video", query,
+            duration_ms=None, segment_ms=None,
+            profile="balanced", limit=10
+        )
+
+        assert results == []
 
 
 if __name__ == "__main__":

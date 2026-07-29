@@ -144,13 +144,20 @@ class Settings(BaseSettings):
     milvus_query_timeout_seconds: float = 3.0
     milvus_read_enabled: bool = True
     milvus_write_enabled: bool = True
-    milvus_fallback_enabled: bool = True
     milvus_shadow_compare_enabled: bool = False
     milvus_rollout_percent: int = 100
     milvus_search_video_batch_size: int = 8
     # Local NPZ is written before Milvus, so "warn" preserves service
     # availability and leaves a recoverable artifact for later backfill.
     milvus_write_fail_policy: Literal["raise", "warn"] = "warn"
+    # Fail open to local NPZ indexes when Milvus is unavailable or temporarily
+    # rebuilding an index. This applies to every retrieval modality.
+    milvus_fallback_enabled: bool = True
+
+    # Visual ANN search configuration
+    visual_use_diskann: bool = True  # Index type: True=DiskANN (disk), False=HNSW (memory)
+    visual_ann_top_k: int = 500  # ANN recall size per subquery (recommended: 300-1000)
+    visual_ann_segment_top_n: int = 3  # Number of top frames per segment for aggregation (recommended: 3-10)
 
     @field_validator("indexer_mode", mode="before")
     @classmethod
@@ -184,6 +191,13 @@ class Settings(BaseSettings):
     def validate_milvus_search_video_batch_size(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("milvus_search_video_batch_size 必须大于 0")
+        return value
+
+    @field_validator("visual_ann_top_k", "visual_ann_segment_top_n")
+    @classmethod
+    def validate_visual_ann_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Visual ANN parameters must be greater than 0")
         return value
 
     @property

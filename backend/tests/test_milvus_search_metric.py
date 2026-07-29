@@ -8,12 +8,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.indexing.milvus_client import _COLLECTION_CONFIGS, _COLLECTION_FOR_MODALITY
+from app.indexing.milvus_client import _COLLECTION_FOR_MODALITY
 from app.indexing.milvus_search import (
     _MODALITY_INDEX_TYPE,
     _MODALITY_METRIC,
     milvus_face_candidates,
 )
+from app.indexing.milvus_search_visual_v2 import _aggregate_by_segment
 
 
 # ---------------------------------------------------------------------------
@@ -26,29 +27,45 @@ def test_modality_metric_covers_all_modalities():
 
 
 def test_modality_index_type_covers_all_modalities():
-    """Every modality known to the client has an entry in _MODALITY_INDEX_TYPE."""
-    assert set(_MODALITY_INDEX_TYPE) == set(_COLLECTION_FOR_MODALITY)
+    """Every modality known to the client has an entry accessible via get_modality_index_type()."""
+    from app.indexing.milvus_search import get_modality_index_type
+
+    # Verify all modalities can be queried
+    for modality in _COLLECTION_FOR_MODALITY:
+        index_type = get_modality_index_type(modality)
+        assert index_type in ["DISKANN", "HNSW", "IVF_FLAT"], (
+            f"modality '{modality}' returned unexpected index type: {index_type}"
+        )
 
 
 def test_modality_metric_matches_collection_configs():
     """_MODALITY_METRIC must be in sync with _COLLECTION_CONFIGS (the index definition)."""
+    from app.indexing.milvus_client import get_collection_index_config
+
     for modality, collection_name in _COLLECTION_FOR_MODALITY.items():
-        expected = _COLLECTION_CONFIGS[collection_name]["index"]["metric_type"]
+        # Get index config dynamically for visual, statically for others
+        index_config = get_collection_index_config(collection_name)
+        expected = index_config["metric_type"]
         actual   = _MODALITY_METRIC[modality]
         assert actual == expected, (
             f"modality '{modality}': _MODALITY_METRIC={actual!r} "
-            f"but _COLLECTION_CONFIGS says {expected!r}"
+            f"but collection config says {expected!r}"
         )
 
 
 def test_modality_index_type_matches_collection_configs():
-    """_MODALITY_INDEX_TYPE must be in sync with _COLLECTION_CONFIGS."""
+    """get_modality_index_type() must return values matching collection configs."""
+    from app.indexing.milvus_search import get_modality_index_type
+    from app.indexing.milvus_client import get_collection_index_config
+
     for modality, collection_name in _COLLECTION_FOR_MODALITY.items():
-        expected = _COLLECTION_CONFIGS[collection_name]["index"]["index_type"]
-        actual   = _MODALITY_INDEX_TYPE[modality]
+        # Get index config dynamically
+        index_config = get_collection_index_config(collection_name)
+        expected = index_config["index_type"]
+        actual = get_modality_index_type(modality)
         assert actual == expected, (
-            f"modality '{modality}': _MODALITY_INDEX_TYPE={actual!r} "
-            f"but _COLLECTION_CONFIGS says {expected!r}"
+            f"modality '{modality}': get_modality_index_type()={actual!r} "
+            f"but collection config says {expected!r}"
         )
 
 
@@ -57,15 +74,16 @@ def test_modality_index_type_matches_collection_configs():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("modality,expected_metric,expected_index", [
-    ("visual",  "COSINE",   "HNSW"),
+    ("visual",  "COSINE",   None),  # Visual uses dynamic config (DISKANN or HNSW)
     ("asr",     "IP",       "HNSW"),
     ("ocr",     "IP",       "HNSW"),
     ("face",    "L2",       "IVF_FLAT"),
     ("speaker", "COSINE",   "HNSW"),
 ])
 def test_per_modality_metric_and_index(modality, expected_metric, expected_index):
-    assert _MODALITY_METRIC[modality]     == expected_metric
-    assert _MODALITY_INDEX_TYPE[modality] == expected_index
+    assert _MODALITY_METRIC[modality] == expected_metric
+    if expected_index is not None:  # Skip index check for visual (dynamic config)
+        assert _MODALITY_INDEX_TYPE[modality] == expected_index
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +108,7 @@ def test_face_candidates_l2_to_cosine_conversion():
     return an object whose .search() method yields known L2 values, then verify
     that the resulting Candidate.raw_score equals the expected cosine.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
 
     # Known cosine value we want to recover
     cosine_expected = 0.72
@@ -129,3 +147,29 @@ def test_face_candidates_l2_to_cosine_conversion():
     # cosine 0.72 > threshold 0.35 → above_threshold must be True
     assert candidate.above_threshold is True
     assert candidate.decision == "absolute_hit"
+
+
+def test_visual_segment_top_n_controls_frame_aggregation():
+    """Top-1 keeps the peak frame while Top-3 averages the three best frames."""
+    ann_results = [
+        {
+            "query_idx": 0,
+            "frame_idx": frame_idx,
+            "timestamp_ms": frame_idx * 1000,
+            "segment_id": 7,
+            "segment_start_ms": 0,
+            "segment_end_ms": 5000,
+            "cosine": cosine,
+        }
+        for frame_idx, cosine in enumerate((0.9, 0.6, 0.3))
+    ]
+
+    top_1 = _aggregate_by_segment(
+        ann_results, "video-test", 1, "balanced", 1, segment_top_n=1
+    )
+    top_3 = _aggregate_by_segment(
+        ann_results, "video-test", 1, "balanced", 1, segment_top_n=3
+    )
+
+    assert top_1[0].raw_score == pytest.approx(0.9)
+    assert top_3[0].raw_score == pytest.approx(0.6)

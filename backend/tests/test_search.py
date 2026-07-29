@@ -1139,11 +1139,12 @@ def test_milvus_batches_are_scored_before_next_batch_is_loaded(tmp_path):
     ):
         engine.search("football", None, ["visual"])
 
+    # After the fix (Visual removed from BULK_QUERY_FIELDS), _query_rows_for_videos
+    # is never called for visual modality. Visual uses ANN search directly without
+    # pre-fetching rows. Only scoring events should occur.
     assert events == [
-        ("query", "visual", tuple(video_ids[:2])),
         ("score", video_ids[0]),
         ("score", video_ids[1]),
-        ("query", "visual", tuple(video_ids[2:])),
         ("score", video_ids[2]),
     ]
 
@@ -1441,3 +1442,49 @@ def test_milvus_partial_coverage_only_recovers_missing_channel(tmp_path):
     }
     assert evidence_modalities == {"visual", "asr"}
     assert all(result["start_time"] != 0.0 for result in results)
+
+
+def test_visual_ann_does_not_bulk_fetch_rows(tmp_path):
+    """Regression: visual must NOT appear in the BULK_QUERY_FIELDS pre-fetch loop.
+
+    The v2 ANN implementation (milvus_visual_candidates_ann) issues its own
+    collection.search() call and never consumes pre-fetched rows.  Before the
+    fix, the full query_iterator traversal ran for every visual-indexed video,
+    reading all frame embeddings from Milvus before the ANN search — a no-op
+    fetch that wasted significant I/O.
+
+    This test guards against that regression by asserting that
+    _query_rows_for_videos is never called with modality="visual" during a
+    real Milvus-routed visual search.
+    """
+    from unittest.mock import MagicMock, call, patch
+
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    video_id = _make_visual_index(settings, catalog, video_id="v-ann-no-bulk")
+    engine = SearchEngine(settings, catalog)
+
+    milvus_hit = Candidate(video_id, 2.0, 7.0, 0.88, "visual")
+    query_rows_calls: list[str] = []
+
+    def spy_query_rows(_client, modality, _video_ids, _fields, _profiler):
+        query_rows_calls.append(modality)
+        return {video_id: []}
+
+    with (
+        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=True),
+        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
+        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=False),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=MagicMock()),
+        patch.object(engine, "_query_rows_for_videos", side_effect=spy_query_rows),
+        patch.object(engine, "_milvus_candidates_for_video", return_value=[milvus_hit]),
+    ):
+        engine.search("football", None, ["visual"], [video_id])
+
+    assert "visual" not in query_rows_calls, (
+        "_query_rows_for_videos must never be called with modality='visual'; "
+        "visual uses ANN (collection.search) directly and pre-fetching all "
+        "frame embeddings is a costly no-op.  "
+        f"Actual calls: {query_rows_calls}"
+    )
