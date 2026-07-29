@@ -193,6 +193,13 @@ class Settings(BaseSettings):
             raise ValueError("milvus_query_timeout_seconds 必须大于 0")
         return value
 
+    @field_validator("color_grading_request_timeout_seconds")
+    @classmethod
+    def validate_color_grading_request_timeout_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("color_grading_request_timeout_seconds 必须大于 0")
+        return value
+
     @field_validator("milvus_search_video_batch_size")
     @classmethod
     def validate_milvus_search_video_batch_size(cls, value: int) -> int:

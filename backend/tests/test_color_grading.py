@@ -1,13 +1,32 @@
 import shutil
 import sqlite3
 import subprocess
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from app.color_grading import ColorGradingManager
 from app.db import Catalog
 from app.settings import Settings
+from fastapi import UploadFile
 from fastapi.testclient import TestClient
+
+
+def test_reference_image_upload_is_bounded_before_writing_full_file(
+    tmp_path,
+    monkeypatch,
+):
+    from app.api import color_grading_routes
+
+    monkeypatch.setattr(color_grading_routes, "MAX_REFERENCE_IMAGE_BYTES", 4)
+    destination = tmp_path / "reference.jpg"
+    upload = UploadFile(filename="reference.jpg", file=BytesIO(b"12345"))
+
+    with pytest.raises(ValueError, match="25 MB"):
+        color_grading_routes._save_reference_image(upload, destination)
+
+    assert not destination.exists()
 
 
 class FakeClient:

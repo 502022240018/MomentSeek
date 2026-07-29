@@ -2,14 +2,30 @@ from __future__ import annotations
 
 import shutil
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
-from app.color_grading import ColorGradingError
+from app.color_grading import MAX_REFERENCE_IMAGE_BYTES, ColorGradingError
 
 router = APIRouter()
+
+
+def _save_reference_image(upload: UploadFile, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    total_bytes = 0
+    try:
+        with destination.open("wb") as target:
+            while chunk := upload.file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > MAX_REFERENCE_IMAGE_BYTES:
+                    raise ValueError("参考图片不能超过 25 MB")
+                target.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 @router.get("/api/color-grading/status")
@@ -69,8 +85,12 @@ async def create_color_grading_task(
             / task_id
             / f"reference{suffix}"
         )
-        await run_in_threadpool(runtime._save_upload, ref_image, reference_path)
         try:
+            await run_in_threadpool(
+                _save_reference_image,
+                ref_image,
+                reference_path,
+            )
             await run_in_threadpool(manager.validate_reference_image, reference_path)
         except ValueError as error:
             shutil.rmtree(reference_path.parent, ignore_errors=True)
