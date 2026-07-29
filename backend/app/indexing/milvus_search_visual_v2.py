@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import defaultdict
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -78,9 +79,6 @@ def milvus_visual_candidates_ann(
     ann_top_k = settings.visual_ann_top_k
     segment_top_n = settings.visual_ann_segment_top_n
 
-    if profiler:
-        profiler.mark("visual_ann_start")
-
     # Verify index type matches configuration (cached to avoid extra RPC per search)
     _verify_index_type_once(client, settings.visual_use_diskann)
 
@@ -97,16 +95,10 @@ def milvus_visual_candidates_ann(
         logger.info(f"Visual ANN: no results for video {video_id}")
         return []
 
-    if profiler:
-        profiler.mark("visual_ann_recall_done")
-
     # Aggregate by segment with multi-query semantics
     candidates = _aggregate_by_segment(
         ann_results, video_id, limit, profile, len(query_texts), segment_top_n
     )
-
-    if profiler:
-        profiler.mark("visual_ann_complete")
 
     logger.info(
         f"Visual ANN: video={video_id}, profile={profile}, "
@@ -208,21 +200,27 @@ def _ann_recall_multi_query(
             }
 
         # Batch search: process all subqueries in one call
-        hits = collection.search(
-            data=query_values.tolist(),
-            anns_field="embedding",
-            param=search_params,
-            limit=top_k,
-            expr=f'video_id == "{video_id}"',
-            output_fields=[
-                "frame_idx",
-                "timestamp_ms",
-                "segment_id",
-                "segment_start_ms",
-                "segment_end_ms",
-            ],
-            # Do NOT return embedding field to reduce network transfer
+        rpc_span = (
+            profiler.span("milvus_rpc", "visual")
+            if profiler
+            else nullcontext()
         )
+        with rpc_span:
+            hits = collection.search(
+                data=query_values.tolist(),
+                anns_field="embedding",
+                param=search_params,
+                limit=top_k,
+                expr=f'video_id == "{video_id}"',
+                output_fields=[
+                    "frame_idx",
+                    "timestamp_ms",
+                    "segment_id",
+                    "segment_start_ms",
+                    "segment_end_ms",
+                ],
+                # Do NOT return embedding field to reduce network transfer
+            )
 
         results = []
         for query_idx, query_hits in enumerate(hits):
@@ -238,6 +236,9 @@ def _ann_recall_multi_query(
                     "cosine": float(hit.distance),  # COSINE metric returns cosine value
                 })
 
+        if profiler:
+            profiler.increment("milvus", "visual_requests")
+            profiler.increment("milvus", "visual_rows", len(results))
         return results
 
     except Exception as e:

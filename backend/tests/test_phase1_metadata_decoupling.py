@@ -202,6 +202,54 @@ def test_empty_milvus_data_returns_empty_list():
         assert results == []
 
 
+def test_visual_ann_uses_supported_retrieval_profiler_api():
+    """Regression: the production profiler exposes span/increment, not mark."""
+    from app.indexing.milvus_search import milvus_visual_candidates
+    from app.retrieval_metrics import RetrievalProfiler
+
+    with patch("app.settings.get_settings") as mock_get_settings:
+        mock_settings_obj = Mock()
+        mock_settings_obj.visual_use_diskann = True
+        mock_settings_obj.visual_ann_top_k = 500
+        mock_settings_obj.visual_ann_segment_top_n = 3
+        mock_get_settings.return_value = mock_settings_obj
+
+        mock_client = MagicMock()
+        mock_collection = Mock()
+        mock_client.collection_for.return_value = mock_collection
+        mock_index = Mock()
+        mock_index.params = {"index_type": "DISKANN"}
+        mock_collection.index.return_value = mock_index
+
+        mock_hit = Mock()
+        mock_hit.distance = 0.85
+        mock_hit.entity = Mock()
+        mock_hit.entity.get = lambda field, default=None: {
+            "frame_idx": 0,
+            "timestamp_ms": 200,
+            "segment_id": 0,
+            "segment_start_ms": 0,
+            "segment_end_ms": 5000,
+        }.get(field, default)
+        mock_collection.search.return_value = [[mock_hit]]
+
+        profiler = RetrievalProfiler()
+        results = milvus_visual_candidates(
+            mock_client,
+            "test_video",
+            np.random.randn(1152).astype(np.float32),
+            profile="balanced",
+            limit=10,
+            profiler=profiler,
+        )
+
+    assert results
+    snapshot = profiler.snapshot()
+    assert snapshot["timing"]["milvus_rpc"]["visual"] >= 0
+    assert snapshot["counters"]["milvus"]["visual_requests"] == 1
+    assert snapshot["counters"]["milvus"]["visual_rows"] == 1
+
+
 if __name__ == "__main__":
     print("Running Phase 1 metadata decoupling tests...")
     test_milvus_visual_infers_segment_ms_from_bounds()
