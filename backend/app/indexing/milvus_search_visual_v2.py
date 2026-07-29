@@ -76,6 +76,7 @@ def milvus_visual_candidates_ann(
 
     settings = get_settings()
     ann_top_k = settings.visual_ann_top_k
+    segment_top_n = settings.visual_ann_segment_top_n
 
     if profiler:
         profiler.mark("visual_ann_start")
@@ -101,7 +102,7 @@ def milvus_visual_candidates_ann(
 
     # Aggregate by segment with multi-query semantics
     candidates = _aggregate_by_segment(
-        ann_results, video_id, limit, profile, len(query_texts)
+        ann_results, video_id, limit, profile, len(query_texts), segment_top_n
     )
 
     if profiler:
@@ -250,6 +251,7 @@ def _aggregate_by_segment(
     limit: int,
     profile: str,
     n_queries: int,
+    segment_top_n: int = 3,
 ) -> list[Candidate]:
     """Aggregate ANN frames by segment with multi-query support.
 
@@ -259,8 +261,16 @@ def _aggregate_by_segment(
       This ensures "simultaneously satisfying multiple constraints"
 
     Segment aggregation:
-    - Per segment: mean of top-3 frames' aggregate scores
+    - Per segment: mean of top-N frames' aggregate scores (N configurable via segment_top_n)
     - Profile affects selection cap (recall=500, others=limit)
+
+    Args:
+        ann_results: ANN search results
+        video_id: Video ID
+        limit: Number of candidates to return
+        profile: Search profile
+        n_queries: Number of query vectors
+        segment_top_n: Number of top frames per segment for score aggregation (default: 3)
     """
     # Group frames by (segment_id, frame_idx, query_idx)
     frame_scores: dict[tuple[int, int], dict[int, float]] = defaultdict(dict)
@@ -309,9 +319,9 @@ def _aggregate_by_segment(
     for seg_id, frames in seg_frames.items():
         scores = [score for _, score, _ in frames]
 
-        # Segment score: mean of top-3 frames
-        top3_scores = sorted(scores, reverse=True)[:3]
-        segment_score = float(np.mean(top3_scores))
+        # Segment score: mean of top-N frames (N configurable via segment_top_n)
+        topn_scores = sorted(scores, reverse=True)[:segment_top_n]
+        segment_score = float(np.mean(topn_scores))
 
         # Best frame for timestamp
         best_idx = scores.index(max(scores))

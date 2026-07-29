@@ -101,14 +101,11 @@ _MODALITY_INDEX_TYPE: dict[str, str] = _STATIC_INDEX_TYPES.copy()
 _QUERY_BATCH = 2_000
 
 BULK_QUERY_FIELDS: dict[str, list[str]] = {
-    "visual": [
-        "frame_idx",
-        "timestamp_ms",
-        "segment_id",
-        "segment_start_ms",
-        "segment_end_ms",
-        "embedding",
-    ],
+    # "visual" is intentionally absent: the v2 ANN implementation
+    # (milvus_visual_candidates_ann) issues its own collection.search() call
+    # and never consumes pre-fetched rows.  Including "visual" here would
+    # trigger a full query_iterator traversal that reads every frame embedding
+    # before the ANN search runs, wasting significant I/O for no benefit.
     "asr": [
         "segment_idx",
         "start_ms",

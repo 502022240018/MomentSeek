@@ -156,6 +156,7 @@ class Settings(BaseSettings):
     # Visual ANN search configuration
     visual_use_diskann: bool = True  # Index type: True=DiskANN (disk), False=HNSW (memory)
     visual_ann_top_k: int = 500  # ANN recall size per subquery (recommended: 300-1000)
+    visual_ann_segment_top_n: int = 3  # Number of top frames per segment for aggregation (recommended: 3-10)
 
     @field_validator("indexer_mode", mode="before")
     @classmethod

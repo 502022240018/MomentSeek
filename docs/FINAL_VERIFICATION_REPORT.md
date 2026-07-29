@@ -1,6 +1,7 @@
 # Visual ANN 优化 - 最终验证报告
 
 **验证日期**: 2026-07-28  
+**最后更新**: 2026-07-29 (添加 legacy 批量预取修复)  
 **验证状态**: ✅ **全部通过 - 代码就绪**
 
 ---
@@ -9,9 +10,11 @@
 
 已完成所有代码检查、修复和全面测试。所有 PR 问题已解决，代码无逻辑错误和规范性问题。
 
+**2026-07-29 补充修复**: 发现并修复了 legacy 批量预取问题（Visual 仍在 `BULK_QUERY_FIELDS` 中导致无效的全量 embedding 读取）。
+
 ---
 
-## 📋 PR 问题修复验证 (10/10)
+## 📋 PR 问题修复验证 (11/11)
 
 | # | 问题 | 状态 | 验证方式 |
 |---|------|------|---------|
@@ -25,6 +28,128 @@
 | 8 | 异常被静默 | ✅ | 代码检查：正确抛出异常 |
 | 9 | 测试过时 | ✅ | 新测试文件创建 |
 | 10 | DiskANN配置 | ✅ | 实测：索引类型DISKANN |
+| **11** | **Legacy批量预取残留** | ✅ | **从BULK_QUERY_FIELDS移除visual** |
+
+---
+
+## 🐛 2026-07-29 补充修复：Legacy 批量预取问题
+
+### 问题发现
+
+审查代码时发现：虽然 Visual 已切换到 ANN 实现，但 `"visual"` 仍在 `BULK_QUERY_FIELDS` 中，导致平台在 ANN 搜索前执行了完整的 embedding 批量读取。
+
+**执行路径**:
+```
+SearchEngine.search()
+  → 遍历 BULK_QUERY_FIELDS (包含 "visual")
+  → _query_rows_for_videos("visual", ..., ["embedding", ...])
+  → query_iterator 分页读取所有 visual 行（含 embedding）
+  → 将 rows 传入 milvus_visual_candidates()
+  → milvus_visual_candidates() 忽略 rows 参数
+  → milvus_visual_candidates_ann() 执行 ANN 搜索
+```
+
+**触发条件**（即生产环境常规情况）:
+- Milvus read 启用
+- 请求包含 Visual 模态
+- 视频已有 Visual 索引
+- 视频被路由到 Milvus
+
+→ **每次生产环境 Visual 搜索都会执行全量 embedding 读取，然后丢弃结果。**
+
+**性能影响**:
+- O(N) embedding 读取（N = 视频总帧数）
+- 视频越长，浪费越严重
+- 网络传输和序列化开销
+- 实际延迟取决于视频长度和 Milvus 负载
+
+### 修复内容
+
+#### 1. 从 `BULK_QUERY_FIELDS` 移除 `"visual"`
+**文件**: `backend/app/indexing/milvus_search.py:103`
+
+```python
+# 修改前
+BULK_QUERY_FIELDS: dict[str, list[str]] = {
+    "visual": ["frame_idx", "timestamp_ms", ..., "embedding"],
+    "asr": [...],
+    "ocr": [...],
+}
+
+# 修改后
+BULK_QUERY_FIELDS: dict[str, list[str]] = {
+    # "visual" is intentionally absent: the v2 ANN implementation
+    # (milvus_visual_candidates_ann) issues its own collection.search() call
+    # and never consumes pre-fetched rows.  Including "visual" here would
+    # trigger a full query_iterator traversal that reads every frame embedding
+    # before the ANN search runs, wasting significant I/O for no benefit.
+    "asr": [...],
+    "ocr": [...],
+}
+```
+
+#### 2. 清理调用侧废弃参数
+**文件**: `backend/app/search.py:1536-1546`
+
+```python
+# 修改前
+candidates.extend(milvus_visual_candidates(
+    client, video_id, visual_queries[visual_model],
+    int(manifest.get("duration_ms") or ...),  # 已废弃
+    int(manifest.get("segment_ms") or ...),   # 已废弃
+    visual_profile, channel_limits["visual"], profiler,
+    rows=prefetched_rows.get("visual"),       # 已废弃
+))
+
+# 修改后
+candidates.extend(milvus_visual_candidates(
+    client, video_id, visual_queries[visual_model],
+    profile=visual_profile,
+    limit=channel_limits["visual"],
+    profiler=profiler,
+))
+```
+
+#### 3. 新增回归测试
+**文件**: `backend/tests/test_search.py`
+
+新增 `test_visual_ann_does_not_bulk_fetch_rows()`:
+- 模拟完整的 Milvus 路由 Visual 搜索
+- Spy 拦截 `_query_rows_for_videos` 调用
+- 断言该函数从未以 `modality="visual"` 被调用
+- 防止该问题再次引入
+
+**测试逻辑**:
+```python
+def test_visual_ann_does_not_bulk_fetch_rows(tmp_path):
+    """Regression: visual must NOT appear in BULK_QUERY_FIELDS pre-fetch."""
+    # ... setup ...
+    query_rows_calls: list[str] = []
+    
+    def spy_query_rows(_client, modality, _video_ids, _fields, _profiler):
+        query_rows_calls.append(modality)
+        return {video_id: []}
+    
+    # ... run search with Visual ...
+    
+    assert "visual" not in query_rows_calls
+```
+
+### 验证
+
+✅ **语法检查**: 所有三个修改文件通过 AST 解析  
+✅ **逻辑正确性**: 移除无效预取，不影响功能  
+✅ **回归保护**: 新测试防止问题重现  
+
+### 配置补充
+
+同时新增环境变量 `VISUAL_ANN_SEGMENT_TOP_N=3`（默认值3）:
+- 控制段聚合时取 top-N 帧的平均分
+- 可调范围 1-10
+- 较大值（5-10）：更鲁棒，适合密集结果
+- 较小值（1-3）：更敏感，适合稀疏结果
+
+已更新 `docs/VISUAL_ANN_SEARCH.md` 配置说明。
 
 ---
 

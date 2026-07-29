@@ -1537,12 +1537,9 @@ class SearchEngine:
                 client,
                 video_id,
                 visual_queries[visual_model],
-                int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
-                int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
-                visual_profile,
-                channel_limits["visual"],
-                profiler,
-                rows=prefetched_rows.get("visual"),
+                profile=visual_profile,
+                limit=channel_limits["visual"],
+                profiler=profiler,
             ))
         if "face" in modalities and face_query is not None and "face" in indexed:
             candidates.extend(milvus_face_candidates(
