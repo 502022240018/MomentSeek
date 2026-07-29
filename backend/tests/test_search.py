@@ -1139,11 +1139,12 @@ def test_milvus_batches_are_scored_before_next_batch_is_loaded(tmp_path):
     ):
         engine.search("football", None, ["visual"])
 
+    # After the fix (Visual removed from BULK_QUERY_FIELDS), _query_rows_for_videos
+    # is never called for visual modality. Visual uses ANN search directly without
+    # pre-fetching rows. Only scoring events should occur.
     assert events == [
-        ("query", "visual", tuple(video_ids[:2])),
         ("score", video_ids[0]),
         ("score", video_ids[1]),
-        ("query", "visual", tuple(video_ids[2:])),
         ("score", video_ids[2]),
     ]
 

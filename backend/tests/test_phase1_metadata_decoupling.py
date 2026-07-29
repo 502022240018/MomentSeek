@@ -16,6 +16,7 @@ def test_milvus_visual_infers_segment_ms_from_bounds():
         mock_settings_obj = Mock()
         mock_settings_obj.visual_use_diskann = True
         mock_settings_obj.visual_ann_top_k = 500
+        mock_settings_obj.visual_ann_segment_top_n = 3
         mock_get_settings.return_value = mock_settings_obj
 
         # Mock client that returns rows with explicit segment boundaries
@@ -67,6 +68,7 @@ def test_milvus_visual_infers_duration_from_max_timestamp():
         mock_settings_obj = Mock()
         mock_settings_obj.visual_use_diskann = True
         mock_settings_obj.visual_ann_top_k = 500
+        mock_settings_obj.visual_ann_segment_top_n = 3
         mock_get_settings.return_value = mock_settings_obj
 
         mock_client = MagicMock()
@@ -127,6 +129,7 @@ def test_milvus_visual_fallback_to_provided_params():
         mock_settings_obj = Mock()
         mock_settings_obj.visual_use_diskann = True
         mock_settings_obj.visual_ann_top_k = 500
+        mock_settings_obj.visual_ann_segment_top_n = 3
         mock_get_settings.return_value = mock_settings_obj
 
         mock_client = MagicMock()
@@ -173,6 +176,7 @@ def test_empty_milvus_data_returns_empty_list():
         mock_settings_obj = Mock()
         mock_settings_obj.visual_use_diskann = True
         mock_settings_obj.visual_ann_top_k = 500
+        mock_settings_obj.visual_ann_segment_top_n = 3
         mock_get_settings.return_value = mock_settings_obj
 
         mock_client = MagicMock()
