@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -15,14 +15,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import __version__
-from app.api import entity_routes, job_routes, search_routes, speaker_routes, system_routes, video_routes
-from app import media, worker
+from app import __version__, media, worker
+from app.api import (
+    color_grading_routes,
+    entity_routes,
+    job_routes,
+    search_routes,
+    speaker_routes,
+    system_routes,
+    video_routes,
+)
+from app.color_grading import ColorGradingManager
 from app.db import Catalog
 from app.retrieval_orchestration import SearchOrchestrator
 from app.search import SearchEngine
 from app.settings import get_settings
-
 
 probe_video = media.probe_video
 export_preview_clip = media.export_preview_clip
@@ -103,6 +110,7 @@ def _restart_indexer_daemon() -> None:
 async def lifespan(_: FastAPI):
     global _indexer_daemon_process
     settings.ensure_dirs()
+    catalog.recover_color_grading_finalizations()
     if settings.search_prewarm_enabled:
         await asyncio.to_thread(search_engine.prewarm)
     _indexer_daemon_process = _spawn_indexer_daemon() if settings.indexer_mode == "daemon" else None
@@ -166,6 +174,10 @@ def _frame_cache_path(video_id: str, ms: int) -> Path:
     return settings.frame_cache_dir / video_id / f"{max(0, ms):012d}.jpg"
 
 
+def _color_grading_manager() -> ColorGradingManager:
+    return ColorGradingManager(settings, catalog)
+
+
 app = FastAPI(
     title="MomentSeek API",
     version=__version__,
@@ -179,7 +191,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-for route_module in (system_routes, video_routes, speaker_routes, job_routes, entity_routes, search_routes):
+for route_module in (
+    system_routes,
+    video_routes,
+    speaker_routes,
+    job_routes,
+    entity_routes,
+    search_routes,
+    color_grading_routes,
+):
     app.include_router(route_module.router)
 
 # Compatibility exports for callers and tests that imported handlers from app.main.

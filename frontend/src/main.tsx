@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, Entity, Job, OrchestrationProfile, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
+import { api, ColorGradingCapability, ColorGradingTask, Entity, Job, OrchestrationProfile, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
+import { ColorGradingPage } from "./ColorGradingPage";
 import {
   defaultIndexConfiguration,
   IndexConfiguration,
@@ -11,7 +12,7 @@ import {
 } from "./indexing";
 import "./styles.css";
 
-type Page = "overview" | "indexes" | "assets" | "entities" | "search";
+type Page = "overview" | "indexes" | "assets" | "entities" | "search" | "grading";
 
 const icons: Record<Page, string> = {
   overview: "⌂",
@@ -19,6 +20,7 @@ const icons: Record<Page, string> = {
   assets: "+",
   entities: "◎",
   search: "⌕",
+  grading: "◐",
 };
 
 const labels: Record<Page, string> = {
@@ -27,6 +29,7 @@ const labels: Record<Page, string> = {
   assets: "视频资产",
   entities: "人物库",
   search: "检索",
+  grading: "视频仿色",
 };
 
 function formatTime(seconds: number) {
@@ -55,12 +58,30 @@ function App() {
   const [videos, setVideos] = useState<Video[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [entities, setEntities] = useState<Entity[]>([]);
+  const [gradingStatus, setGradingStatus] = useState<ColorGradingCapability>();
+  const [gradingTasks, setGradingTasks] = useState<ColorGradingTask[]>([]);
   const [notice, setNotice] = useState<string>("");
 
   const refresh = async () => {
     try {
-      const [nextVideos, nextJobs, nextEntities] = await Promise.all([api.videos(), api.jobs(), api.entities()]);
-      setVideos(nextVideos); setJobs(nextJobs); setEntities(nextEntities);
+      const [
+        nextVideos,
+        nextJobs,
+        nextEntities,
+        nextGradingStatus,
+        nextGradingTasks,
+      ] = await Promise.all([
+        api.videos(),
+        api.jobs(),
+        api.entities(),
+        api.colorGradingStatus(),
+        api.colorGradingTasks(),
+      ]);
+      setVideos(nextVideos);
+      setJobs(nextJobs);
+      setEntities(nextEntities);
+      setGradingStatus(nextGradingStatus);
+      setGradingTasks(nextGradingTasks);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "服务连接失败");
     }
@@ -78,7 +99,14 @@ function App() {
         <div className="brand"><span className="brand-mark">M</span><span>MomentSeek</span></div>
         <button className="new-button" onClick={() => setPage("assets")}><span>上传视频</span><b>＋</b></button>
         <nav>
-          {(["overview", "indexes", "assets", "entities", "search"] as Page[]).map(item => (
+          {([
+            "overview",
+            "indexes",
+            "assets",
+            "entities",
+            "search",
+            ...(gradingStatus?.enabled ? ["grading" as Page] : []),
+          ] as Page[]).map(item => (
             <button key={item} className={page === item ? "active" : ""} onClick={() => setPage(item)}>
               <span className="nav-icon">{icons[item]}</span>{labels[item]}
             </button>
@@ -102,6 +130,7 @@ function App() {
           {page === "indexes" && <IndexesPage jobs={jobs} videos={videos} refresh={refresh} setNotice={setNotice} />}
           {page === "entities" && <EntitiesPage entities={entities} videos={videos} refresh={refresh} setNotice={setNotice} />}
           {page === "overview" && <Overview videos={videos} jobs={jobs} entities={entities} setPage={setPage} />}
+          {page === "grading" && gradingStatus && <ColorGradingPage status={gradingStatus} tasks={gradingTasks} videos={videos} refresh={refresh} setNotice={setNotice} />}
         </section>
       </main>
     </div>

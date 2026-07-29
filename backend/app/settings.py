@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     ascend_visible_devices: str | None = None
     ascend_rt_visible_devices: str | None = None
     torch_device_backend_autoload: str | None = None
+
+    # Optional VideoColorGrading integration. The grading API runs in its own
+    # container and exchanges large media files through APP_DATA_DIR.
+    color_grading_enabled: bool = False
+    color_grading_base_url: str = "http://video-color-grading:8000"
+    color_grading_request_timeout_seconds: float = 10.0
+
     # Indexing execution mode:
     #   "subprocess" (default) — API spawns a per-job worker; models load+exit per
     #     stage (process_exit). Safe, no resident NPU memory.
@@ -186,6 +193,13 @@ class Settings(BaseSettings):
             raise ValueError("milvus_query_timeout_seconds 必须大于 0")
         return value
 
+    @field_validator("color_grading_request_timeout_seconds")
+    @classmethod
+    def validate_color_grading_request_timeout_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("color_grading_request_timeout_seconds 必须大于 0")
+        return value
+
     @field_validator("milvus_search_video_batch_size")
     @classmethod
     def validate_milvus_search_video_batch_size(cls, value: int) -> int:
@@ -238,6 +252,22 @@ class Settings(BaseSettings):
     def query_dir(self) -> Path:
         return self.app_data_dir / "queries"
 
+    @property
+    def color_grading_dir(self) -> Path:
+        return self.app_data_dir / "color_grading"
+
+    @property
+    def color_grading_reference_dir(self) -> Path:
+        return self.color_grading_dir / "references"
+
+    @property
+    def color_grading_upstream_dir(self) -> Path:
+        return self.color_grading_dir / "upstream"
+
+    @property
+    def color_grading_result_dir(self) -> Path:
+        return self.color_grading_dir / "results"
+
     def ensure_dirs(self) -> None:
         for directory in (
             self.app_data_dir,
@@ -247,6 +277,9 @@ class Settings(BaseSettings):
             self.clip_cache_dir,
             self.frame_cache_dir,
             self.query_dir,
+            self.color_grading_reference_dir,
+            self.color_grading_upstream_dir,
+            self.color_grading_result_dir,
             self.resolve_path(self.app_model_dir / self.speaker_model_cache_dir),
             self.resolve_path(self.visual_hf_cache_dir),
             self.resolve_path(self.orchestration_trace_path).parent,

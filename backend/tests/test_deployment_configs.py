@@ -228,3 +228,24 @@ def test_production_ascend_uses_isolated_resident_workers():
     assert '--pids-limit "$CONTAINER_PID_LIMIT"' in deploy_script
     assert '-e FACE_ORT_INTRA_OP_THREADS="$CPU_THREAD_LIMIT"' in deploy_script
     assert "-e FACE_ORT_INTER_OP_THREADS=1" in deploy_script
+
+
+def test_color_grading_compose_is_optional_and_uses_private_channels():
+    compose = _read("compose.color-grading.yml")
+    example = _parse_env("deploy/env/color-grading.ascend.example")
+    patch = _read(
+        "deploy/color-grading/VideoColorGrading-vcg-output-root.patch"
+    )
+    deploy_script = _read("scripts/deploy_ascend_shared_server.sh")
+
+    assert 'profiles: ["color-grading"]' in compose
+    assert "COLOR_GRADING_BASE_URL: \"http://video-color-grading:8000\"" in compose
+    assert "VCG_OUTPUT_ROOT: /app/runtime/color_grading/upstream" in compose
+    assert "${HOST_RUNTIME_DIR:-./runtime}:/app/runtime" in compose
+    assert "http://127.0.0.1:8000/health" in compose
+    assert '"21098:8000"' not in compose
+    assert '"21097:5432"' not in compose
+    assert "VCG_OUTPUT_ROOT" in patch
+    assert example["VCG_SOURCE_DIR"] == "/home/wenxin/VideoColorGrading"
+    assert '-e COLOR_GRADING_ENABLED="$COLOR_GRADING_ENABLED"' in deploy_script
+    assert '-e COLOR_GRADING_BASE_URL="$COLOR_GRADING_BASE_URL"' in deploy_script

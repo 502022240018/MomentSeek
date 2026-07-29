@@ -36,6 +36,11 @@ def test_milvus_query_timeout_must_be_positive():
         Settings(_env_file=None, milvus_query_timeout_seconds=0)
 
 
+def test_color_grading_request_timeout_must_be_positive():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, color_grading_request_timeout_seconds=0)
+
+
 def test_milvus_search_video_batch_size_must_be_positive():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, milvus_search_video_batch_size=0)

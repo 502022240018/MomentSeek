@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
-
 
 SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -78,6 +77,35 @@ CREATE TABLE IF NOT EXISTS voice_samples (
   voice_embedding BLOB,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS color_grading_tasks (
+  id TEXT PRIMARY KEY,
+  external_task_id TEXT UNIQUE,
+  input_video_id TEXT NOT NULL,
+  reference_type TEXT NOT NULL,
+  reference_video_id TEXT,
+  reference_image_path TEXT,
+  ncc INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'submitting',
+  stage TEXT NOT NULL DEFAULT 'submitting',
+  upstream_status TEXT,
+  queue_position INTEGER,
+  upstream_output_video TEXT,
+  output_lut_path TEXT,
+  final_video_path TEXT,
+  imported_video_id TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS color_grading_tasks_status_idx
+  ON color_grading_tasks(status, created_at);
+CREATE INDEX IF NOT EXISTS color_grading_tasks_input_video_idx
+  ON color_grading_tasks(input_video_id);
+CREATE INDEX IF NOT EXISTS color_grading_tasks_reference_video_idx
+  ON color_grading_tasks(reference_video_id);
 CREATE TABLE IF NOT EXISTS milvus_cleanup_queue (
   video_id TEXT PRIMARY KEY,
   last_error TEXT,
@@ -112,6 +140,26 @@ class Catalog:
         voice_columns = {row["name"] for row in connection.execute("PRAGMA table_info(voice_samples)").fetchall()}
         if "voice_embedding" not in voice_columns:
             connection.execute("ALTER TABLE voice_samples ADD COLUMN voice_embedding BLOB")
+
+        grading_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(color_grading_tasks)"
+            ).fetchall()
+        }
+        if "ncc" not in grading_columns:
+            connection.execute(
+                "ALTER TABLE color_grading_tasks "
+                "ADD COLUMN ncc INTEGER NOT NULL DEFAULT 0"
+            )
+        if "started_at" not in grading_columns:
+            connection.execute(
+                "ALTER TABLE color_grading_tasks ADD COLUMN started_at TEXT"
+            )
+        if "completed_at" not in grading_columns:
+            connection.execute(
+                "ALTER TABLE color_grading_tasks ADD COLUMN completed_at TEXT"
+            )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -164,6 +212,112 @@ class Catalog:
             connection.execute("DELETE FROM jobs WHERE video_id=?", (video_id,))
             cursor = connection.execute("DELETE FROM videos WHERE id=?", (video_id,))
             return cursor.rowcount > 0
+
+    def create_color_grading_task(self, record: dict) -> dict:
+        payload = {
+            "id": record["id"],
+            "external_task_id": record.get("external_task_id"),
+            "input_video_id": record["input_video_id"],
+            "reference_type": record["reference_type"],
+            "reference_video_id": record.get("reference_video_id"),
+            "reference_image_path": record.get("reference_image_path"),
+            "ncc": int(bool(record.get("ncc", False))),
+            "status": record.get("status", "submitting"),
+            "stage": record.get("stage", "submitting"),
+            "started_at": record.get("started_at"),
+            "completed_at": record.get("completed_at"),
+        }
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO color_grading_tasks(
+                   id,external_task_id,input_video_id,reference_type,
+                   reference_video_id,reference_image_path,ncc,status,stage,
+                   started_at,completed_at
+                   ) VALUES(
+                   :id,:external_task_id,:input_video_id,:reference_type,
+                   :reference_video_id,:reference_image_path,:ncc,:status,:stage,
+                   :started_at,:completed_at
+                   )""",
+                payload,
+            )
+        return self.get_color_grading_task(record["id"])
+
+    def get_color_grading_task(self, task_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM color_grading_tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_color_grading_tasks(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM color_grading_tasks ORDER BY created_at DESC, id DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_color_grading_task(self, task_id: str, **values) -> None:
+        allowed = {
+            "external_task_id",
+            "status",
+            "stage",
+            "upstream_status",
+            "queue_position",
+            "upstream_output_video",
+            "output_lut_path",
+            "final_video_path",
+            "imported_video_id",
+            "error_code",
+            "error_message",
+            "started_at",
+            "completed_at",
+        }
+        values = {key: value for key, value in values.items() if key in allowed}
+        if not values:
+            return
+        clause = ",".join(f"{key}=?" for key in values)
+        with self.connect() as connection:
+            connection.execute(
+                f"""UPDATE color_grading_tasks
+                    SET {clause},updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (*values.values(), task_id),
+            )
+
+    def claim_color_grading_finalization(self, task_id: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE color_grading_tasks
+                   SET status='finalizing',stage='finalizing',
+                       error_code=NULL,error_message=NULL,
+                       updated_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND status IN ('queued','running')""",
+                (task_id,),
+            )
+        return cursor.rowcount == 1
+
+    def recover_color_grading_finalizations(self) -> int:
+        """Make interrupted local mux operations eligible for retry."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE color_grading_tasks
+                   SET status='running',
+                       stage='awaiting_result',
+                       updated_at=CURRENT_TIMESTAMP
+                   WHERE status='finalizing'"""
+            )
+        return cursor.rowcount
+
+    def has_active_color_grading_tasks(self, video_id: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT 1 FROM color_grading_tasks
+                   WHERE (input_video_id=? OR reference_video_id=?)
+                     AND status IN ('submitting','queued','running','finalizing')
+                   LIMIT 1""",
+                (video_id, video_id),
+            ).fetchone()
+        return row is not None
 
     def enqueue_milvus_cleanup(self, video_id: str, error: str) -> None:
         with self.connect() as connection:
