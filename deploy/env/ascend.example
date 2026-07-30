@@ -1,0 +1,91 @@
+# 由交付人员提供的完整 MomentSeek Ascend 应用镜像。
+APP_IMAGE=momentseek/app:1.0.0-ascend
+APP_CONTAINER_NAME=momentseek-app
+COMPOSE_PROJECT_NAME=momentseek
+MOMENTSEEK_NETWORK_NAME=momentseek-net
+
+# Web 访问。
+APP_PORT=8000
+APP_PUBLIC_URL=http://SERVER_IP:8000
+
+# 宿主机持久化目录。部署前创建并确认权限。
+HOST_RUNTIME_DIR=/opt/momentseek/runtime
+HOST_MODEL_DIR=/opt/momentseek/models
+
+# Ascend 设备：前三项是宿主机物理卡号，容器内逻辑卡固定为 0。
+HOST_NPU_DEVICE_ID=0
+ASCEND_VISIBLE_DEVICES=0
+ASCEND_RT_VISIBLE_DEVICES=0
+NPU_DEVICE_ID=0
+NPU_ENABLED=true
+CUDA_ENABLED=false
+
+# 索引任务。共享服务器默认任务结束释放模型资源。
+ENV_PROFILE=prod.ascend
+INDEXER_MODE=subprocess
+NPU_WORKER_MODE=isolated
+INDEXER_IDLE_TIMEOUT_SECONDS=300
+MODEL_MANIFEST=/app/deploy/models/ascend.models.json
+
+# 五模态运行配置。
+VISUAL_MODEL=siglip2-so400m-384
+VISUAL_HF_CACHE_DIR=/app/models/hf-cache
+VISUAL_SAMPLE_FPS=5.0
+VISUAL_SEGMENT_SECONDS=5.0
+VISUAL_BATCH_SIZE=32
+
+FACE_MODEL=buffalo_l
+FACE_PROVIDER=cann
+FACE_SAMPLE_FPS=2.0
+
+ASR_ENGINE=funasr
+ASR_ZH_MODEL=iic/SenseVoiceSmall
+ASR_DEVICE=auto
+ASR_LANGUAGE=zh
+ASR_VAD_STRATEGY=silero_12s
+ASR_MODEL_LOCAL_FILES_ONLY=true
+ASR_SEMANTIC_ENABLED=true
+ASR_SEMANTIC_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+ASR_SEMANTIC_DEVICE=cpu
+ASR_SEMANTIC_LOCAL_FILES_ONLY=true
+
+OCR_ENGINE=rapidocr_acl
+OCR_DEVICE=npu
+OCR_VERSION=PP-OCRv6
+OCR_DET_LANG=ch
+OCR_REC_LANG=ch
+OCR_MODEL_TYPE=small
+OCR_SAMPLE_FPS=0.05
+OCR_SEMANTIC_ENABLED=true
+OCR_ACL_MODEL_DIR=rapidocr/ascend/910b4-cann9-profile
+
+SPEAKER_DEVICE=auto
+SPEAKER_MODEL_REPO=3D-Speaker
+SPEAKER_MODEL_CACHE_DIR=3dspeaker-cache
+
+# Milvus。使用本仓 compose.milvus.yml 时保持 host=milvus。
+MILVUS_ENABLED=true
+MILVUS_HOST=milvus
+MILVUS_PORT=19530
+MILVUS_READ_ENABLED=true
+MILVUS_WRITE_ENABLED=true
+MILVUS_FALLBACK_ENABLED=true
+MILVUS_WRITE_FAIL_POLICY=warn
+MILVUS_QUERY_TIMEOUT_SECONDS=3
+
+# Milvus 同机部署镜像与凭据。
+MILVUS_IMAGE=milvusdb/milvus:v2.6.20
+ETCD_IMAGE=quay.io/coreos/etcd:v3.5.16
+MINIO_IMAGE=minio/minio:RELEASE.2024-12-18T13-15-44Z
+MINIO_ROOT_USER=CHANGE_ME
+MINIO_ROOT_PASSWORD=CHANGE_ME_TO_A_STRONG_PASSWORD
+
+# 可选能力默认关闭。
+ORCHESTRATION_ENABLED=false
+COLOR_GRADING_ENABLED=false
+
+# 容器资源上限。
+APP_CPUS=24
+APP_MEMORY_LIMIT=48g
+APP_PIDS_LIMIT=4096
+APP_SHM_SIZE=8gb

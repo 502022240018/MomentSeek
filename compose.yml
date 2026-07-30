@@ -1,0 +1,43 @@
+name: ${COMPOSE_PROJECT_NAME:-momentseek}
+
+services:
+  app:
+    image: "${APP_IMAGE:?请在 .env 中设置完整的 MomentSeek Ascend 应用镜像}"
+    container_name: "${APP_CONTAINER_NAME:-momentseek-app}"
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_DATA_DIR: /app/runtime
+      APP_MODEL_DIR: /app/models
+      APP_PUBLIC_URL: "${APP_PUBLIC_URL:-http://127.0.0.1:8000}"
+      MILVUS_HOST: "${MILVUS_HOST:-milvus}"
+      MILVUS_PORT: "${MILVUS_PORT:-19530}"
+    ports:
+      - "${APP_PORT:-8000}:${APP_PORT:-8000}"
+    volumes:
+      - "${HOST_RUNTIME_DIR:?请设置 HOST_RUNTIME_DIR}:/app/runtime"
+      - "${HOST_MODEL_DIR:?请设置 HOST_MODEL_DIR}:/app/models:ro"
+      - "./deploy/models/ascend.models.json:/app/deploy/models/ascend.models.json:ro"
+      - "./deploy/orchestration:/app/backend/deploy/orchestration:ro"
+    cpus: "${APP_CPUS:-24}"
+    mem_limit: "${APP_MEMORY_LIMIT:-48g}"
+    pids_limit: "${APP_PIDS_LIMIT:-4096}"
+    shm_size: "${APP_SHM_SIZE:-8gb}"
+    stop_grace_period: 60s
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import os, urllib.request; port=os.environ.get('APP_PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - momentseek
+
+networks:
+  momentseek:
+    name: "${MOMENTSEEK_NETWORK_NAME:-momentseek-net}"
