@@ -15,7 +15,6 @@ runtime-server-*.json
 runtime-transfer-*.sftp
 momentseek-runtime-*.tar
 /models/
-vendor-wheels/
 eval/visual/**/*.local.json
 eval/visual/**/*.local.jsonl
 eval/visual/**/*.local.ps1

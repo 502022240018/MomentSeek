@@ -10,10 +10,12 @@
 - `backend/app/`
 - `frontend/`
 - `deploy/orchestration/`
+- `vendor-wheels/`
 
 重新整理的交付内容：
 
 - Compose 与 Ascend 设备映射；
+- Ascend Dockerfile、依赖锁和基础镜像约束；
 - Milvus 独立部署；
 - 环境参数模板；
 - 模型目录清单与校验；
@@ -21,4 +23,3 @@
 - 通用服务器部署说明。
 
 模型、运行数据、视频、实验记录、评测产物和历史运维脚本不进入本交付仓。
-

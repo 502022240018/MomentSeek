@@ -16,6 +16,9 @@
 
 当前可以直接验收的是 **ARM64 + Ascend 910B + Docker Compose**。后端代码虽然包含 CPU/CUDA 兼容逻辑，但本精简交付仓没有提供并验证 CPU/CUDA 镜像、依赖锁和对应 Compose，因此不能把它们写成已交付能力。裸机部署同理，应另立交付项。
 
+如果交付方需要从本仓源码制作完整应用镜像，先执行
+`docs/IMAGE_BUILD.md`；部署人员已经拿到完整应用镜像时，不需要Dockerfile和基础镜像参与上线。
+
 ## 2. 镜像获取
 
 ### 2.1 从镜像仓库拉取
@@ -45,7 +48,7 @@ docker image inspect IMAGE_NAME:TAG
 适合首次部署、正式环境隔离和同机多实例。启动时加载：
 
 ```text
-compose.yml + compose.ascend.yml + compose.milvus.yml
+compose/compose.yml + compose/compose.ascend.yml + compose/compose.milvus.yml
 ```
 
 需要准备 Milvus、etcd、MinIO 镜像及独立运行目录。
@@ -55,7 +58,7 @@ compose.yml + compose.ascend.yml + compose.milvus.yml
 适合已有受管 Milvus 服务的环境。启动时只加载：
 
 ```text
-compose.yml + compose.ascend.yml
+compose/compose.yml + compose/compose.ascend.yml
 ```
 
 必须确认：
@@ -103,4 +106,3 @@ compose.yml + compose.ascend.yml
 ## 8. 下一步
 
 选好路线后，逐步执行 [Ascend 服务器部署说明](DEPLOYMENT_ASCEND.md)。模型目录规则见该说明的模型章节；部署验证记录只用于证明流程经过实测，不能作为配置模板。
-

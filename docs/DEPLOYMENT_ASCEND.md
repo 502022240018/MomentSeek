@@ -84,7 +84,7 @@ MILVUS_HOST=服务器可访问地址
 MILVUS_PORT=19530
 ```
 
-并且启动时不要加载 `compose.milvus.yml`。确认该 Milvus 允许本环境读写；不同环境推荐使用独立 Milvus，避免集合和数据互相影响。
+并且启动时不要加载 `compose/compose.milvus.yml`。确认该 Milvus 允许本环境读写；不同环境推荐使用独立 Milvus，避免集合和数据互相影响。
 
 如果 Milvus 只监听宿主机 `127.0.0.1`，桥接网络中的应用容器无法用
 `127.0.0.1` 连接它。应由管理员提供容器可达地址，或把 Milvus 加入同一
@@ -120,23 +120,25 @@ python3 scripts/preflight.py --env-file .env --with-milvus --upgrade
 
 ```bash
 docker compose \
-  -f compose.yml \
-  -f compose.ascend.yml \
-  -f compose.milvus.yml \
+  --env-file .env \
+  -f compose/compose.yml \
+  -f compose/compose.ascend.yml \
+  -f compose/compose.milvus.yml \
   config
 
 docker compose \
-  -f compose.yml \
-  -f compose.ascend.yml \
-  -f compose.milvus.yml \
+  --env-file .env \
+  -f compose/compose.yml \
+  -f compose/compose.ascend.yml \
+  -f compose/compose.milvus.yml \
   up -d
 ```
 
 连接已有 Milvus 时：
 
 ```bash
-docker compose -f compose.yml -f compose.ascend.yml config
-docker compose -f compose.yml -f compose.ascend.yml up -d
+docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml config
+docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml up -d
 ```
 
 `config` 必须先成功；它能提前发现漏填参数、YAML 错误和挂载变量问题。
@@ -144,8 +146,8 @@ docker compose -f compose.yml -f compose.ascend.yml up -d
 ## 7. 验证
 
 ```bash
-docker compose -f compose.yml -f compose.ascend.yml ps
-docker compose -f compose.yml -f compose.ascend.yml logs --tail=200 app
+docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml ps
+docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml logs --tail=200 app
 python3 scripts/smoke_check.py --base-url http://127.0.0.1:8000
 ```
 
@@ -165,19 +167,19 @@ python3 scripts/smoke_check.py --base-url http://127.0.0.1:8000
 
 ```bash
 # 查看状态
-docker compose -f compose.yml -f compose.ascend.yml ps
+docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml ps
 
 # 查看日志
-docker compose -f compose.yml -f compose.ascend.yml logs -f --tail=200 app
+docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml logs -f --tail=200 app
 
 # 仅重启本环境应用
-docker compose -f compose.yml -f compose.ascend.yml restart app
+docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml restart app
 
 # 停止本环境；不会删除宿主机运行目录
-docker compose -f compose.yml -f compose.ascend.yml down
+docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml down
 ```
 
-如果本环境包含独立 Milvus，所有命令都追加 `-f compose.milvus.yml`。不要用模糊匹配批量停止容器，不要删除模型目录和 `HOST_RUNTIME_DIR`。
+如果本环境包含独立 Milvus，所有命令都追加 `-f compose/compose.milvus.yml`。不要用模糊匹配批量停止容器，不要删除模型目录和 `HOST_RUNTIME_DIR`。
 
 ## 9. 更新与回滚
 

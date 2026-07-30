@@ -1,5 +1,8 @@
 # 由交付人员提供的完整 MomentSeek Ascend 应用镜像。
+RUNTIME=ascend
 APP_IMAGE=momentseek/app:1.0.0-ascend
+# 仅“从源码构建镜像”时使用；直接部署 APP_IMAGE 时不需要本机存在它。
+ASCEND_RUNTIME_IMAGE=swr.cn-south-1.myhuaweicloud.com/ascendhub/mindie:3.0.0b2-800I-A2-py311-openeuler24.03-lts
 APP_CONTAINER_NAME=momentseek-app
 COMPOSE_PROJECT_NAME=momentseek
 MOMENTSEEK_NETWORK_NAME=momentseek-net
@@ -25,7 +28,8 @@ ENV_PROFILE=prod.ascend
 INDEXER_MODE=subprocess
 NPU_WORKER_MODE=isolated
 INDEXER_IDLE_TIMEOUT_SECONDS=300
-MODEL_MANIFEST=/app/deploy/models/ascend.models.json
+MODEL_MANIFEST=/app/deploy/models/runtime.models.json
+MODEL_MANIFEST_FILE=ascend.models.json
 
 # 五模态运行配置。
 VISUAL_MODEL=siglip2-so400m-384
@@ -63,7 +67,7 @@ SPEAKER_DEVICE=auto
 SPEAKER_MODEL_REPO=3D-Speaker
 SPEAKER_MODEL_CACHE_DIR=3dspeaker-cache
 
-# Milvus。使用本仓 compose.milvus.yml 时保持 host=milvus。
+# Milvus。使用本仓 compose/compose.milvus.yml 时保持 host=milvus。
 MILVUS_ENABLED=true
 MILVUS_HOST=milvus
 MILVUS_PORT=19530
