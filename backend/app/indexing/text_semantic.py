@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from app.indexing.common import atomic_save_npz
-from app.model_sources import hf_cached_snapshot_path, offline_env, resolve_hf_model_source
+from app.core.model_sources import hf_cached_snapshot_path, offline_env, resolve_hf_model_source
 
 
 def _hf_cached_snapshot_path(model_dir: str | Path, model_name: str) -> Path | None:

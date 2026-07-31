@@ -15,7 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import __version__, media, worker
+from app import __version__
+from app.execution import worker
+from app.media import media
 from app.api import (
     color_grading_routes,
     entity_routes,
@@ -25,11 +27,11 @@ from app.api import (
     system_routes,
     video_routes,
 )
-from app.color_grading import ColorGradingManager
-from app.db import Catalog
-from app.retrieval_orchestration import SearchOrchestrator
-from app.search import SearchEngine
-from app.settings import get_settings
+from app.integrations.color_grading import ColorGradingManager
+from app.catalog.db import Catalog
+from app.orchestration.retrieval_orchestration import SearchOrchestrator
+from app.retrieval.search import SearchEngine
+from app.core.settings import get_settings
 
 probe_video = media.probe_video
 export_preview_clip = media.export_preview_clip
@@ -55,7 +57,7 @@ def _spawn_indexer_daemon():
     log_path = settings.app_data_dir / "indexer-daemon.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     return subprocess.Popen(
-        [sys.executable, "-m", "app.indexer_daemon"],
+        [sys.executable, "-m", "app.execution.indexer_daemon"],
         cwd=str(backend_dir),
         env=subprocess_environment(settings),
         start_new_session=True,
@@ -71,7 +73,7 @@ def _terminate_process_group(pid: int | None, expected_job_id: str | None = None
     cmdline_path = Path(f"/proc/{pid}/cmdline")
     if expected_job_id and cmdline_path.exists():
         cmdline = cmdline_path.read_bytes().replace(b"\0", b" ").decode("utf-8", errors="replace")
-        if "app.worker" not in cmdline or expected_job_id not in cmdline:
+        if "app.execution.worker" not in cmdline or expected_job_id not in cmdline:
             return False
     try:
         process_group = os.getpgid(pid)

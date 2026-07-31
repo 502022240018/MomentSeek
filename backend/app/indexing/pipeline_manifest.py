@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from app.indexing.manifest import update_channel_manifest
-from app.settings import Settings
+from app.core.settings import Settings
 
 
 def visual_embedding_space(model_key: str) -> str:

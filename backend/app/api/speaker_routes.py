@@ -5,8 +5,8 @@ import uuid
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
-from app.schemas import SpeakerUpdateRequest, UtteranceUpdateRequest, VoiceSearchRequest
-from app.speaker_service import video_speakers, voice_search, voice_search_vectors
+from app.api.schemas import SpeakerUpdateRequest, UtteranceUpdateRequest, VoiceSearchRequest
+from app.identity.speaker_service import video_speakers, voice_search, voice_search_vectors
 
 
 router = APIRouter()
@@ -71,7 +71,7 @@ async def search_voice_upload(
     limit: int = Form(default=50),
 ) -> dict:
     from app import main as runtime
-    from app.indexing.speaker import encode_voice_query
+    from app.indexing.modalities.speaker.speaker import encode_voice_query
 
     settings = runtime.settings
     source_path = settings.query_dir / f"{uuid.uuid4().hex}{runtime._safe_suffix(reference.filename, '.wav')}"

@@ -1,8 +1,8 @@
 from fastapi import APIRouter
 
 from app import __version__
-from app.deployment import build_deployment_info
-from app.schemas import HealthResponse
+from app.core.deployment import build_deployment_info
+from app.api.schemas import HealthResponse
 
 
 router = APIRouter()

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
-from app.schemas import IndexRequest, VideoRenameRequest
+from app.api.schemas import IndexRequest, VideoRenameRequest
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ def delete_video(video_id: str) -> dict:
     milvus_cleanup = None
     if runtime.settings.milvus_enabled:
         try:
-            from app.indexing.milvus_client import get_milvus_client
+            from app.vector_store.milvus.milvus_client import get_milvus_client
 
             milvus_cleanup = get_milvus_client().delete_video(video_id)
             failed_collections = [

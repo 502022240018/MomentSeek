@@ -8,8 +8,8 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
-from app.schemas import EntityUpdateRequest, VoiceOnlyEntityRequest, VoiceSampleRequest
-from app.speaker_service import video_speakers
+from app.api.schemas import EntityUpdateRequest, VoiceOnlyEntityRequest, VoiceSampleRequest
+from app.identity.speaker_service import video_speakers
 
 
 router = APIRouter()
@@ -135,7 +135,7 @@ def list_entity_voice_samples(entity_id: str) -> list[dict]:
 @router.post("/api/entities/{entity_id}/voice-samples", status_code=201)
 def add_entity_voice_sample(entity_id: str, request: VoiceSampleRequest) -> dict:
     from app import main as runtime
-    from app.speaker_service import speaker_utterance_embedding
+    from app.identity.speaker_service import speaker_utterance_embedding
 
     if not runtime.catalog.get_entity(entity_id):
         raise HTTPException(status_code=404, detail="人物不存在")

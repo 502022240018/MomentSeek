@@ -8,7 +8,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
-from app.color_grading import MAX_REFERENCE_IMAGE_BYTES, ColorGradingError
+from app.integrations.color_grading import MAX_REFERENCE_IMAGE_BYTES, ColorGradingError
 
 router = APIRouter()
 

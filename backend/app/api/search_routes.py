@@ -5,7 +5,7 @@ import uuid
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
-from app.retrieval_orchestration import OrchestrationError
+from app.orchestration.retrieval_orchestration import OrchestrationError
 
 
 router = APIRouter()
