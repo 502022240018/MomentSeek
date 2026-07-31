@@ -15,7 +15,10 @@ APP_PUBLIC_URL=http://SERVER_IP:8000
 HOST_RUNTIME_DIR=/opt/momentseek/runtime
 HOST_MODEL_DIR=/opt/momentseek/models
 
-# Ascend 设备：前三项是宿主机物理卡号，容器内逻辑卡固定为 0。
+# Ascend 设备：HOST_NPU_DEVICE_ID / ASCEND_VISIBLE_DEVICES 填宿主机物理卡号；
+# ASCEND_RT_VISIBLE_DEVICES 和 NPU_DEVICE_ID 保持容器内逻辑 0。
+# 注意：新版驱动（实测 25.5.1）在容器内只枚举已映射的设备（合法范围 [0,1)），
+# RT 填宿主物理卡号会报 "Invalid device ID"/107001。
 HOST_NPU_DEVICE_ID=0
 ASCEND_VISIBLE_DEVICES=0
 ASCEND_RT_VISIBLE_DEVICES=0
