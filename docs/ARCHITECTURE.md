@@ -188,11 +188,15 @@ Milvus                       五通道向量 collection（模型版本参与主�
 
 ## 9. 技术债登记（既定优化方向）
 
-| 项 | 现状 | 计划 |
+| 项 | 状态 | 说明 |
 |---|---|---|
-| 运行时单例 context 化 | 路由用函数内 `from app import main as runtime` 惰性取单例（约 38 处） | 建 `platform/context.py` 承载单例，main 只做组装；见 `app/platform/README.md` |
-| 共享编码器抽层 | `retrieval/search.py` 从 `indexing.modalities` 借用 ClipEncoder 等 | 抽独立 encoders 层，检索/索引共同依赖 |
-| 拆分 `retrieval/search.py` | 单文件约 77KB，五通道召回+融合混在一处 | 按通道拆分并抽出 Candidate/SearchResult 类型 |
-| 拆分前端 `main.tsx` | 单文件约 34KB | 按 upload/search/assets/player 拆组件 |
+| 运行时单例 context 化 | ✅ 已完成（2026-07-31） | `platform/context.py` 承载单例与共享辅助，路由顶部直接 import；main 只做组装 |
+| 共享编码器抽层 | ✅ 已完成（2026-07-31） | `app/encoders/{visual,face,text}.py`；retrieval 与 indexing 共同依赖，互不伸手 |
+| 拆分 `retrieval/search.py` | 待办 | 单文件约 77KB，五通道召回+融合混在一处；按通道拆分并抽出 Candidate/SearchResult 类型 |
+| 拆分前端 `main.tsx` | 待办 | 单文件约 34KB；按 upload/search/assets/player 拆组件 |
+| face 等通道升级 P2 直写 | 待办 | visual 已走 `write_modality_from_memory` 内存直写，face/asr/ocr/speaker 仍是"先 NPZ 再入 Milvus"的旧路径 |
 
 以上均为结构优化，不改变行为；每项单独改造、单独回归验证。
+
+注：`app/encoders/` 落地后，第 4 节目录树中 retrieval 对 indexing 的
+"共用编码器"依赖已不存在——两层都依赖 `encoders/`。

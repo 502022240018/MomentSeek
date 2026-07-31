@@ -74,9 +74,10 @@
 
 - ~~context 化：消除路由对 app.main 的 38 处惰性互引~~ → 已完成
   （2026-07-31，`platform/context.py`）
-- 共享编码器抽层：retrieval 不再从 indexing.modalities 借 ClipEncoder 等
+- ~~共享编码器抽层~~ → 已完成（2026-07-31，`app/encoders/{visual,face,text}.py`）
 - `settings.resolve_path` 多候选猜测逻辑待固定语义
 - 拆分 `retrieval/search.py`（约 77KB）与前端 `main.tsx`（约 34KB）
+- face/asr/ocr/speaker 通道升级 Milvus P2 内存直写（visual 已完成）
 
 ## 非技术项
 
