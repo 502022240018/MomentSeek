@@ -12,8 +12,23 @@
 
 ```text
 backend/
-├─ app/                      后端平台代码
-└─ requirements/             Ascend实际依赖和版本约束
+├─ app/                      后端平台代码（分层结构见 docs/ARCHITECTURE.md）
+│  ├─ main.py                FastAPI 组装入口
+│  ├─ api/                   路由 + 请求/响应模型
+│  ├─ core/                  settings / 部署元信息 / 模型池与来源
+│  ├─ catalog/               SQLite 资产元数据
+│  ├─ media/                 ffmpeg 媒体处理
+│  ├─ indexing/              索引生产；modalities/ 下每通道一个子包
+│  ├─ retrieval/             在线检索引擎与融合
+│  ├─ orchestration/         LLM 查询规划/重排
+│  ├─ vector_store/milvus/   Milvus 客户端/schema/索引/检索
+│  ├─ execution/             任务 worker、阶段子进程、daemon
+│  ├─ identity/              说话人/声纹服务
+│  ├─ integrations/          外部系统（视频仿色）
+│  ├─ maintenance/           离线维护任务
+│  └─ platform|observability|evaluation/  预留层（仅 README 约定）
+├─ requirements/             依赖锁：ascend / ci / dev 等
+└─ tests/                    单元测试；integration/ 为 Milvus 集成测试
 frontend/                    Web前端源码
 docker/
 └─ Dockerfile.ascend         制作完整Ascend应用镜像
@@ -32,8 +47,20 @@ scripts/
 vendor-wheels/               Ascend ARM64必须固定的离线wheels
 ```
 
+平台架构、模块分层与扩展指南见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 需要从源码制作镜像时阅读 [docs/IMAGE_BUILD.md](docs/IMAGE_BUILD.md)；拿到镜像后，按
 [docs/DEPLOYMENT_ASCEND.md](docs/DEPLOYMENT_ASCEND.md) 部署。
+
+## 测试
+
+```bash
+python -m pip install -r backend/requirements/ci.txt
+cd backend && python -m pytest tests -m "not integration" -q   # 离线单测
+```
+
+Milvus 集成测试需要先起 `compose/compose.milvus.yml`，再运行
+`python -m pytest tests/integration -m integration -q`；GitHub Actions 的
+CI/Milvus workflow 会自动执行同样的步骤。
 
 ## 不包含的内容
 
