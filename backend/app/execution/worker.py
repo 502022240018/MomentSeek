@@ -96,7 +96,7 @@ def execute_job(job_id: str) -> None:
                 environment = subprocess_environment(settings)
                 process = subprocess.run(
                     [sys.executable, "-m", "app.execution.stage_runner", stage, job_id],
-                    cwd=str(Path(__file__).resolve().parents[1]),
+                    cwd=str(Path(__file__).resolve().parents[2]),
                     env=environment,
                     text=True,
                     encoding="utf-8",
@@ -136,7 +136,7 @@ def execute_job(job_id: str) -> None:
 
 def launch_job(job_id: str) -> int:
     settings = get_settings()
-    backend_dir = Path(__file__).resolve().parents[1]
+    backend_dir = Path(__file__).resolve().parents[2]
     log_path = settings.app_data_dir / f"job-{job_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen(
