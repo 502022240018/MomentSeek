@@ -53,7 +53,8 @@ import 路径更新，零逻辑改动），分层与依赖规则见 `docs/ARCHIT
 
 - 删除 `app/indexing/batch_buffer.py`：上游全仓无引用的死代码（被 Milvus
   P2 直写路径取代），及其对应测试类；
-- 从上游迁入核心单元测试（35 个离线 + 5 个 Milvus 集成）、`pytest.ini`、
+- 从上游迁入核心单元测试（35 个离线 + 1 个 Milvus 集成套件；上游
+  `tests/integration/` 其余 4 个文件是无测试函数的诊断脚本，未迁入）、`pytest.ini`、
   `backend/requirements/{ci,dev}.txt` 与 GitHub Actions CI；排除依赖评测
   脚本/一次性验证的测试文件；
 - 新增 `app/{platform,observability,evaluation}/README.md` 预留层约定，

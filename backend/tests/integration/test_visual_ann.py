@@ -14,6 +14,8 @@ import time
 import pytest
 import numpy as np
 
+pytestmark = pytest.mark.integration
+
 from app.vector_store.milvus.milvus_client import MilvusClient
 from app.vector_store.milvus.milvus_search import milvus_visual_candidates
 from app.vector_store.milvus.milvus_search_visual_v2 import (
