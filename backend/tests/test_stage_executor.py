@@ -1,11 +1,11 @@
-from app.model_pool import ModelPool
-from app.settings import Settings
-from app.stage_executor import execute_stage
+from app.core.model_pool import ModelPool
+from app.core.settings import Settings
+from app.indexing.stage_executor import execute_stage
 
 
 def test_asr_speaker_postprocessing_is_identical_with_and_without_pool(monkeypatch, tmp_path):
-    import app.indexing.asr as asr
-    import app.indexing.speaker as speaker
+    import app.indexing.modalities.asr.asr as asr
+    import app.indexing.modalities.speaker.speaker as speaker
 
     settings = Settings(
         _env_file=None,

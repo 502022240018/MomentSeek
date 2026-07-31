@@ -14,14 +14,14 @@ import time
 import pytest
 import numpy as np
 
-from app.indexing.milvus_client import MilvusClient
-from app.indexing.milvus_search import milvus_visual_candidates
-from app.indexing.milvus_search_visual_v2 import (
+from app.vector_store.milvus.milvus_client import MilvusClient
+from app.vector_store.milvus.milvus_search import milvus_visual_candidates
+from app.vector_store.milvus.milvus_search_visual_v2 import (
     MilvusVisualSearchError,
     _verify_index_type,
     _normalize,
 )
-from app.settings import get_settings
+from app.core.settings import get_settings
 
 
 # Configuration - update with actual test video

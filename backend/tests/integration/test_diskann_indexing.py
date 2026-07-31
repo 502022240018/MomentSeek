@@ -7,7 +7,7 @@ sys.path.insert(0, 'backend')
 pytestmark = pytest.mark.integration
 
 import numpy as np
-from app.indexing.milvus_client import get_milvus_client
+from app.vector_store.milvus.milvus_client import get_milvus_client
 from pymilvus import Collection
 
 print("Step 1: Connecting to MilvusClient...")
@@ -30,7 +30,7 @@ for i in range(num_frames):
     vec = vec / np.linalg.norm(vec)
 
     # 生成正确的主键
-    from app.indexing.milvus_schema import visual_pk
+    from app.vector_store.milvus.milvus_schema import visual_pk
     pk = visual_pk(video_id, "v1", i)
 
     data.append({

@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import app.isolated_stage_workers as workers
-from app.settings import get_settings
+import app.execution.isolated_stage_workers as workers
+from app.core.settings import get_settings
 
 
 class _FakeConnection:

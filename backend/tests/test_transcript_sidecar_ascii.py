@@ -1,7 +1,7 @@
 import numpy as np
 
-from app.indexing import asr
-from app.indexing.asr import build_asr_index
+from app.indexing.modalities.asr import asr
+from app.indexing.modalities.asr.asr import build_asr_index
 
 
 def test_sidecar_asr_index_postprocesses_ascii_fragments_and_preserves_schema(tmp_path, monkeypatch):

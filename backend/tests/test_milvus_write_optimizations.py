@@ -7,7 +7,6 @@ Coverage:
   P0-A  — _setup_milvus_context: connection failure behaviour under raise/warn
   P0-B  — _upsert_with_retry: retry on transient errors, immediate raise on permanent
   P1    — _MODALITY_BATCH / _calc_batch_size: per-modality adaptive batch sizes
-  batch — BatchBuffer.upsert_fn injection for retry integration
 """
 from __future__ import annotations
 
@@ -43,7 +42,7 @@ class TestUpsertWithRetry:
 
     def _get_fn(self):
         """Import fresh every test so module-level state doesn't bleed."""
-        from app.indexing.milvus_indexer import _upsert_with_retry
+        from app.vector_store.milvus.milvus_indexer import _upsert_with_retry
         return _upsert_with_retry
 
     # --- success on first attempt -----------------------------------------
@@ -58,7 +57,7 @@ class TestUpsertWithRetry:
 
     def test_retry_on_transient_code(self):
         """Transient MilvusException (code in _RETRYABLE_CODES) triggers retry."""
-        from app.indexing.milvus_indexer import _RETRYABLE_CODES
+        from app.vector_store.milvus.milvus_indexer import _RETRYABLE_CODES
         retryable_code = next(iter(_RETRYABLE_CODES))
 
         col = _make_collection()
@@ -70,14 +69,14 @@ class TestUpsertWithRetry:
         ]
 
         with (
-            patch("app.indexing.milvus_indexer.time.sleep") as mock_sleep,
+            patch("app.vector_store.milvus.milvus_indexer.time.sleep") as mock_sleep,
             patch(
-                "app.indexing.milvus_indexer._upsert_with_retry.__globals__"
+                "app.vector_store.milvus.milvus_indexer._upsert_with_retry.__globals__"
                 "['__builtins__']",
                 create=True,
             ),
             patch(
-                "app.indexing.milvus_indexer._MilvusExc",
+                "app.vector_store.milvus.milvus_indexer._MilvusExc",
                 _FakeMilvusException,
                 create=True,
             ),
@@ -102,7 +101,7 @@ class TestUpsertWithRetry:
 
         with (
             patch(
-                "app.indexing.milvus_indexer.time.sleep",
+                "app.vector_store.milvus.milvus_indexer.time.sleep",
                 side_effect=lambda s: sleeps.append(s),
             ),
             patch(
@@ -112,7 +111,7 @@ class TestUpsertWithRetry:
         ):
             fn = self._get_fn()
             # Patch MilvusException inside the function's closure
-            import app.indexing.milvus_indexer as _mod
+            import app.vector_store.milvus.milvus_indexer as _mod
             orig = getattr(_mod, "_RETRYABLE_CODES", None)
             try:
                 fn(col2, rows, max_retries=3, base_delay=1.0)
@@ -138,9 +137,9 @@ class TestUpsertWithRetry:
         col.upsert.side_effect = _side_effect
         sleeps: list[float] = []
 
-        with patch("app.indexing.milvus_indexer.time.sleep",
+        with patch("app.vector_store.milvus.milvus_indexer.time.sleep",
                    side_effect=lambda s: sleeps.append(s)):
-            from app.indexing.milvus_indexer import _upsert_with_retry
+            from app.vector_store.milvus.milvus_indexer import _upsert_with_retry
             _upsert_with_retry(col, rows, max_retries=3, base_delay=0.01)
 
         assert attempt_counter["n"] == 3
@@ -161,9 +160,9 @@ class TestUpsertWithRetry:
         col.upsert.side_effect = _side_effect
         sleeps: list[float] = []
 
-        with patch("app.indexing.milvus_indexer.time.sleep",
+        with patch("app.vector_store.milvus.milvus_indexer.time.sleep",
                    side_effect=lambda s: sleeps.append(s)):
-            from app.indexing.milvus_indexer import _upsert_with_retry
+            from app.vector_store.milvus.milvus_indexer import _upsert_with_retry
             _upsert_with_retry(col, rows, max_retries=3, base_delay=base)
 
         assert sleeps[0] == pytest.approx(base * 1)   # 2^0
@@ -176,9 +175,9 @@ class TestUpsertWithRetry:
         rows = [{"pk": "w"}]
 
         sleeps: list[float] = []
-        with patch("app.indexing.milvus_indexer.time.sleep",
+        with patch("app.vector_store.milvus.milvus_indexer.time.sleep",
                    side_effect=lambda s: sleeps.append(s)):
-            from app.indexing.milvus_indexer import _upsert_with_retry
+            from app.vector_store.milvus.milvus_indexer import _upsert_with_retry
             with pytest.raises(ConnectionResetError, match="persistent failure"):
                 _upsert_with_retry(col, rows, max_retries=2, base_delay=0.01)
 
@@ -191,8 +190,8 @@ class TestUpsertWithRetry:
         col = _make_collection()
         rows = [{"pk": "ok"}]
 
-        with patch("app.indexing.milvus_indexer.time.sleep") as mock_sleep:
-            from app.indexing.milvus_indexer import _upsert_with_retry
+        with patch("app.vector_store.milvus.milvus_indexer.time.sleep") as mock_sleep:
+            from app.vector_store.milvus.milvus_indexer import _upsert_with_retry
             _upsert_with_retry(col, rows, max_retries=3, base_delay=1.0)
 
         mock_sleep.assert_not_called()
@@ -207,7 +206,7 @@ class TestUpsertBatched:
 
     def test_single_batch_when_rows_fit(self):
         """When rows < batch_size, exactly one upsert call is made."""
-        from app.indexing.milvus_indexer import _upsert_batched, _MODALITY_BATCH
+        from app.vector_store.milvus.milvus_indexer import _upsert_batched, _MODALITY_BATCH
 
         col = _make_collection()
         # Use fewer rows than the speaker batch size (speaker has the largest batch)
@@ -219,7 +218,7 @@ class TestUpsertBatched:
 
     def test_multiple_batches_for_visual(self):
         """Visual batch size is small (~55); 200 rows should require multiple calls."""
-        from app.indexing.milvus_indexer import _upsert_batched, _MODALITY_BATCH
+        from app.vector_store.milvus.milvus_indexer import _upsert_batched, _MODALITY_BATCH
 
         col = _make_collection()
         n = 200
@@ -232,7 +231,7 @@ class TestUpsertBatched:
 
     def test_fallback_batch_without_modality(self):
         """Omitting modality falls back to _BATCH (200)."""
-        from app.indexing.milvus_indexer import _upsert_batched, _BATCH
+        from app.vector_store.milvus.milvus_indexer import _upsert_batched, _BATCH
 
         col = _make_collection()
         rows = [{"pk": str(i)} for i in range(_BATCH + 1)]
@@ -242,7 +241,7 @@ class TestUpsertBatched:
 
     def test_all_rows_upserted(self):
         """Every row in the input is included exactly once across all batches."""
-        from app.indexing.milvus_indexer import _upsert_batched
+        from app.vector_store.milvus.milvus_indexer import _upsert_batched
 
         col = _make_collection()
         rows = [{"pk": str(i)} for i in range(300)]
@@ -263,29 +262,29 @@ class TestModalityBatchSizes:
 
     def test_all_modalities_covered(self):
         """_MODALITY_BATCH has an entry for every modality in EMBEDDING_DIMS."""
-        from app.indexing.milvus_indexer import _MODALITY_BATCH
-        from app.indexing.milvus_schema import EMBEDDING_DIMS
+        from app.vector_store.milvus.milvus_indexer import _MODALITY_BATCH
+        from app.vector_store.milvus.milvus_schema import EMBEDDING_DIMS
         assert set(_MODALITY_BATCH) == set(EMBEDDING_DIMS)
 
     def test_visual_batch_smaller_than_speaker(self):
         """Visual (1152 dims) batch must be smaller than Speaker (192 dims)."""
-        from app.indexing.milvus_indexer import _MODALITY_BATCH
+        from app.vector_store.milvus.milvus_indexer import _MODALITY_BATCH
         assert _MODALITY_BATCH["visual"] < _MODALITY_BATCH["speaker"]
 
     def test_batch_sizes_in_sensible_range(self):
         """All batch sizes must be between 50 and 500 (the _calc_batch_size clamps)."""
-        from app.indexing.milvus_indexer import _MODALITY_BATCH
+        from app.vector_store.milvus.milvus_indexer import _MODALITY_BATCH
         for mod, size in _MODALITY_BATCH.items():
             assert 50 <= size <= 500, f"{mod}: batch_size={size} out of [50, 500]"
 
     def test_payload_estimate_within_target(self):
         """Estimated payload per batch should be reasonably close to 256 KB."""
-        from app.indexing.milvus_indexer import (
+        from app.vector_store.milvus.milvus_indexer import (
             _BATCH_TARGET_BYTES,
             _METADATA_BYTES,
             _MODALITY_BATCH,
         )
-        from app.indexing.milvus_schema import EMBEDDING_DIMS
+        from app.vector_store.milvus.milvus_schema import EMBEDDING_DIMS
 
         for mod, size in _MODALITY_BATCH.items():
             dim = EMBEDDING_DIMS[mod]
@@ -299,14 +298,14 @@ class TestModalityBatchSizes:
 
     def test_visual_batch_vs_old_batch(self):
         """Visual batch must be significantly smaller than the old flat 200."""
-        from app.indexing.milvus_indexer import _MODALITY_BATCH
+        from app.vector_store.milvus.milvus_indexer import _MODALITY_BATCH
         assert _MODALITY_BATCH["visual"] < 200, (
             "visual batch should be reduced from the old 200 to avoid oversized RPC payloads"
         )
 
     def test_speaker_batch_larger_than_old_batch(self):
         """Speaker (small vectors) can use a larger batch than the old flat 200."""
-        from app.indexing.milvus_indexer import _MODALITY_BATCH
+        from app.vector_store.milvus.milvus_indexer import _MODALITY_BATCH
         assert _MODALITY_BATCH["speaker"] > 200, (
             "speaker batch should exceed old 200 to reduce unnecessary RPC overhead"
         )
@@ -325,7 +324,7 @@ class TestSetupMilvusContext:
         _setup_milvus_context uses lazy (in-function) imports, so the correct
         patch targets are the original definition sites, not app.stage_runner.*
         """
-        import app.stage_runner as sr
+        import app.execution.stage_runner as sr
 
         fake_dir = tmp_path / video_id
         fake_dir.mkdir()
@@ -336,17 +335,17 @@ class TestSetupMilvusContext:
             return MagicMock()
 
         with (
-            patch("app.indexing.milvus_client.get_milvus_client", _fake_get_client),
+            patch("app.vector_store.milvus.milvus_client.get_milvus_client", _fake_get_client),
             patch(
-                "app.indexing.milvus_flags.milvus_write_fail_policy",
+                "app.vector_store.milvus.milvus_flags.milvus_write_fail_policy",
                 return_value=policy,
             ),
             patch(
-                "app.indexing.milvus_asset_version.bump_asset_version",
+                "app.vector_store.milvus.milvus_asset_version.bump_asset_version",
                 return_value="2",
             ) as mock_bump,
             patch(
-                "app.indexing.milvus_indexer.MilvusWriteContext", autospec=True
+                "app.vector_store.milvus.milvus_indexer.MilvusWriteContext", autospec=True
             ) as ctx_cls,
         ):
             result = sr._setup_milvus_context(video_id, fake_dir)
@@ -370,13 +369,13 @@ class TestSetupMilvusContext:
         """bump_asset_version must NOT be called when connection fails (raise policy)."""
         # Patch at original definition sites (lazy imports inside _setup_milvus_context).
         with (
-            patch("app.indexing.milvus_client.get_milvus_client",
+            patch("app.vector_store.milvus.milvus_client.get_milvus_client",
                   side_effect=ConnectionRefusedError("Milvus not available")),
-            patch("app.indexing.milvus_flags.milvus_write_fail_policy",
+            patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy",
                   return_value="raise"),
-            patch("app.indexing.milvus_asset_version.bump_asset_version") as mock_bump,
+            patch("app.vector_store.milvus.milvus_asset_version.bump_asset_version") as mock_bump,
         ):
-            import app.stage_runner as sr
+            import app.execution.stage_runner as sr
             fake_dir = tmp_path / "vid4"
             fake_dir.mkdir()
             with pytest.raises(RuntimeError):
@@ -386,74 +385,18 @@ class TestSetupMilvusContext:
     def test_asset_version_bumped_only_after_connection_success(self, tmp_path):
         """bump_asset_version is called exactly once, after connection succeeds."""
         with (
-            patch("app.indexing.milvus_client.get_milvus_client",
+            patch("app.vector_store.milvus.milvus_client.get_milvus_client",
                   return_value=MagicMock()),
-            patch("app.indexing.milvus_flags.milvus_write_fail_policy",
+            patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy",
                   return_value="raise"),
-            patch("app.indexing.milvus_asset_version.bump_asset_version",
+            patch("app.vector_store.milvus.milvus_asset_version.bump_asset_version",
                   return_value="3") as mock_bump,
-            patch("app.indexing.milvus_indexer.MilvusWriteContext", autospec=True),
+            patch("app.vector_store.milvus.milvus_indexer.MilvusWriteContext", autospec=True),
         ):
-            import app.stage_runner as sr
+            import app.execution.stage_runner as sr
             fake_dir = tmp_path / "vid5"
             fake_dir.mkdir()
             sr._setup_milvus_context("vid5", fake_dir)
             mock_bump.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# BatchBuffer — upsert_fn injection
-# ---------------------------------------------------------------------------
-
-class TestBatchBufferUpsertFnInjection:
-    """BatchBuffer.upsert_fn: custom callable replaces direct collection.upsert."""
-
-    def test_default_calls_collection_upsert(self):
-        col = _make_collection()
-        buf = __import__(
-            "app.indexing.batch_buffer", fromlist=["BatchBuffer"]
-        ).BatchBuffer(col, batch_size=3)
-        for i in range(3):
-            buf.add({"pk": str(i)})
-        col.upsert.assert_called_once()
-
-    def test_custom_upsert_fn_used_instead(self):
-        """When upsert_fn is injected, collection.upsert should NOT be called."""
-        col = _make_collection()
-        calls: list = []
-
-        def _custom_upsert(rows):
-            calls.append(list(rows))
-
-        from app.indexing.batch_buffer import BatchBuffer
-        buf = BatchBuffer(col, batch_size=2, upsert_fn=_custom_upsert)
-        buf.add({"pk": "a"})
-        buf.add({"pk": "b"})  # triggers auto-flush
-
-        col.upsert.assert_not_called()
-        assert len(calls) == 1
-        assert {r["pk"] for r in calls[0]} == {"a", "b"}
-
-    def test_manual_flush_uses_custom_fn(self):
-        col = _make_collection()
-        calls: list = []
-
-        from app.indexing.batch_buffer import BatchBuffer
-        buf = BatchBuffer(col, batch_size=100, upsert_fn=lambda rows: calls.append(rows))
-        buf.add({"pk": "x"})
-        buf.flush()
-
-        col.upsert.assert_not_called()
-        assert len(calls) == 1
-
-    def test_upsert_fn_error_propagates(self):
-        """Errors from the injected upsert_fn should propagate out of add()."""
-        col = _make_collection()
-
-        def _failing_fn(rows):
-            raise RuntimeError("injected failure")
-
-        from app.indexing.batch_buffer import BatchBuffer
-        buf = BatchBuffer(col, batch_size=1, upsert_fn=_failing_fn)
-        with pytest.raises(RuntimeError, match="injected failure"):
-            buf.add({"pk": "err"})

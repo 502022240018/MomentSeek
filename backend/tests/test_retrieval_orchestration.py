@@ -5,14 +5,14 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.retrieval_orchestration import (
+from app.orchestration.retrieval_orchestration import (
     OpenAICompatibleProvider,
     OrchestrationRegistry,
     RetrievalPlan,
     SearchOrchestrator,
     _extract_json_object,
 )
-from app.settings import Settings
+from app.core.settings import Settings
 
 
 class FakeCatalog:

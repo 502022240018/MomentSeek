@@ -4,7 +4,7 @@ import json
 
 import numpy as np
 
-from app.settings import Settings
+from app.core.settings import Settings
 
 
 def _frame(width: int = 20, height: int = 10) -> np.ndarray:
@@ -22,7 +22,7 @@ def _decode_np_strings(values: np.ndarray) -> list[str]:
 
 
 def test_visual_index_writes_frame_offsets_and_no_per_segment_payload(tmp_path, monkeypatch):
-    from app.indexing import visual
+    from app.indexing.modalities.visual import visual
 
     frames = [(1.0, _frame()), (6.0, _frame()), (16.0, _frame())]
     monkeypatch.setattr(visual, "read_frames", lambda *_args, **_kwargs: iter(frames))
@@ -68,7 +68,7 @@ def test_visual_index_writes_frame_offsets_and_no_per_segment_payload(tmp_path, 
 
 
 def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatch):
-    from app.indexing import visual
+    from app.indexing.modalities.visual import visual
 
     frames = [(1.0, _frame()), (3.0, _frame()), (8.0, _frame()), (12.0, _frame())]
     monkeypatch.setattr(visual, "read_frames", lambda *_args, **_kwargs: iter(frames))
@@ -124,7 +124,7 @@ def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatc
 
 
 def test_visual_index_can_use_pyscenedetect_shot_detector(tmp_path, monkeypatch):
-    from app.indexing import visual
+    from app.indexing.modalities.visual import visual
 
     frames = [(1.0, _frame()), (3.0, _frame()), (8.0, _frame()), (12.0, _frame())]
     calls: list[str] = []
@@ -177,7 +177,7 @@ def test_visual_index_can_use_pyscenedetect_shot_detector(tmp_path, monkeypatch)
 
 
 def test_asr_index_writes_chunks_and_sparse_semantic_arrays(tmp_path, monkeypatch):
-    from app.indexing import asr
+    from app.indexing.modalities.asr import asr
 
     sidecar = tmp_path / "asr.json"
     sidecar.write_text(
@@ -234,7 +234,7 @@ def test_asr_index_writes_chunks_and_sparse_semantic_arrays(tmp_path, monkeypatc
 
 
 def test_ocr_index_writes_box_level_arrays_and_chunk_semantics(tmp_path, monkeypatch):
-    from app.indexing import ocr
+    from app.indexing.modalities.ocr import ocr
 
     class Output:
         txts = ["FIFA", "WORLD CUP"]
@@ -302,7 +302,7 @@ def test_ocr_index_writes_box_level_arrays_and_chunk_semantics(tmp_path, monkeyp
 
 
 def test_face_index_writes_track_times_without_precomputed_thumbnails(tmp_path, monkeypatch):
-    from app.indexing import faces
+    from app.indexing.modalities.face import faces
 
     class Face:
         def __init__(self, score, bbox):
@@ -451,7 +451,7 @@ def test_write_stage_manifest_records_optional_visual_shot_metadata(tmp_path):
 def test_index_request_accepts_visual_shot_segment_options():
     from pydantic import ValidationError
 
-    from app.schemas import IndexRequest
+    from app.api.schemas import IndexRequest
 
     request = IndexRequest(
         visual_segment_strategy="shot",
@@ -492,7 +492,7 @@ def test_index_request_accepts_visual_shot_segment_options():
 def test_index_request_accepts_asr_engine_override():
     from pydantic import ValidationError
 
-    from app.schemas import IndexRequest
+    from app.api.schemas import IndexRequest
 
     request = IndexRequest(asr_engine="faster_whisper", asr_language="auto", asr_model="turbo")
 

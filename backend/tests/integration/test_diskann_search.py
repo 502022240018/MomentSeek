@@ -8,9 +8,9 @@ pytestmark = pytest.mark.integration
 
 import time
 import numpy as np
-from app.indexing.milvus_client import get_milvus_client
-from app.indexing.milvus_search_visual_v2 import milvus_visual_candidates_ann
-from app.settings import get_settings
+from app.vector_store.milvus.milvus_client import get_milvus_client
+from app.vector_store.milvus.milvus_search_visual_v2 import milvus_visual_candidates_ann
+from app.core.settings import get_settings
 
 print("="*70)
 print("DiskANN模式Visual检索功能测试")

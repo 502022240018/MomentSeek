@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
-from app.db import Catalog
-from app.settings import Settings
+from app.catalog.db import Catalog
+from app.core.settings import Settings
 
 
 def test_video_frame_bounds_timestamp_and_reuses_cached_jpeg(monkeypatch, tmp_path):

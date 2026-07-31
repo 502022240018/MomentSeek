@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
-from app.db import Catalog
-from app.settings import Settings
-from app.worker import subprocess_environment, worker_environment
+from app.catalog.db import Catalog
+from app.core.settings import Settings
+from app.execution.worker import subprocess_environment, worker_environment
 
 
 def test_worker_environment_uses_absolute_runtime_paths(tmp_path):
@@ -87,7 +87,7 @@ def test_worker_environment_propagates_indexing_profile_settings(tmp_path):
 
 
 def test_selective_rebuild_preserves_existing_modalities(monkeypatch, tmp_path):
-    import app.worker as worker
+    import app.execution.worker as worker
 
     settings = Settings(
         _env_file=None,

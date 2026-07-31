@@ -1,4 +1,4 @@
-from app.db import Catalog
+from app.catalog.db import Catalog
 
 
 def test_catalog_video_job_and_entity_roundtrip(tmp_path):

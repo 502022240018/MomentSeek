@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.settings import Settings
+from app.core.settings import Settings
 
 
 def test_process_exit_indexer_mode_is_normalized_for_backward_compatibility():

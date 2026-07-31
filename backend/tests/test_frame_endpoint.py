@@ -2,8 +2,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.db import Catalog
-from app.settings import Settings
+from app.catalog.db import Catalog
+from app.core.settings import Settings
 
 
 def _client(tmp_path, monkeypatch):

@@ -32,10 +32,10 @@ import pytest
 
 
 def test_milvus_reachability_preflight_fails_before_grpc_retry():
-    from app.indexing.milvus_client import ensure_milvus_reachable
+    from app.vector_store.milvus.milvus_client import ensure_milvus_reachable
 
     with patch(
-        "app.indexing.milvus_client.socket.create_connection",
+        "app.vector_store.milvus.milvus_client.socket.create_connection",
         side_effect=OSError("connection refused"),
     ):
         with pytest.raises(ConnectionError, match="Milvus is unreachable"):
@@ -107,7 +107,7 @@ def test_visual_upsert_idempotent(tmp_path):
     npz = _make_npz(tmp_path, "visual")
     client, col = _make_mock_client()
 
-    from app.indexing.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
 
     ctx = MilvusWriteContext(video_id="vid1", asset_version="1", client=client)
     indexer = VisualMilvusIndexer()
@@ -133,7 +133,7 @@ def test_visual_asset_version_isolation(tmp_path):
     npz = _make_npz(tmp_path, "visual")
     client, col = _make_mock_client()
 
-    from app.indexing.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
 
     ctx_v1 = MilvusWriteContext(video_id="vid1", asset_version="1", client=client)
     ctx_v2 = MilvusWriteContext(video_id="vid1", asset_version="2", client=client)
@@ -158,8 +158,8 @@ def test_visual_asset_version_isolation(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_model_version_upgrade_disjoint_pks(tmp_path):
-    from app.indexing.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
-    from app.indexing.milvus_schema import MODEL_VERSIONS
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
+    from app.vector_store.milvus.milvus_schema import MODEL_VERSIONS
 
     npz = _make_npz(tmp_path, "visual")
     client, col = _make_mock_client()
@@ -196,14 +196,14 @@ def test_write_failure_enqueues_retry(tmp_path):
 
     queue_path = tmp_path / "queue.jsonl"
 
-    from app.indexing.milvus_indexer import MilvusWriteContext, write_modality_to_milvus
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, write_modality_to_milvus
     from app.indexing.milvus_write_queue import MilvusWriteQueue
 
     ctx = MilvusWriteContext(video_id="vid_fail", asset_version="1", client=client)
 
     with patch("app.indexing.milvus_write_queue.get_write_queue",
                return_value=MilvusWriteQueue(queue_path)), \
-         patch("app.indexing.milvus_flags.milvus_write_fail_policy", return_value="queue"):
+         patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="queue"):
         write_modality_to_milvus(ctx, "visual", npz)
 
     queue = MilvusWriteQueue(queue_path)
@@ -225,11 +225,11 @@ def test_write_fail_policy_raise(tmp_path):
     col.upsert = MagicMock(side_effect=RuntimeError("timeout"))
     client.collection_for = MagicMock(return_value=col)
 
-    from app.indexing.milvus_indexer import MilvusWriteContext, write_modality_to_milvus
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, write_modality_to_milvus
 
     ctx = MilvusWriteContext(video_id="vid_raise", asset_version="1", client=client)
 
-    with patch("app.indexing.milvus_flags.milvus_write_fail_policy", return_value="raise"):
+    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="raise"):
         with pytest.raises(RuntimeError, match="policy=raise"):
             write_modality_to_milvus(ctx, "visual", npz)
 
@@ -248,13 +248,13 @@ def test_delete_video_calls_all_collections():
         deleted_names.append(name)
         return col
 
-    from app.indexing.milvus_client import _COLLECTION_CONFIGS
+    from app.vector_store.milvus.milvus_client import _COLLECTION_CONFIGS
 
     client.collection_for = MagicMock(side_effect=lambda m: make_col(m))
 
     # Patch Collection at the pymilvus level to avoid real connections.
     from unittest.mock import patch as upatch
-    with upatch("app.indexing.milvus_client.Collection") as MockCol:
+    with upatch("app.vector_store.milvus.milvus_client.Collection") as MockCol:
         col_instances: dict[str, MagicMock] = {}
 
         def col_factory(name):
@@ -265,7 +265,7 @@ def test_delete_video_calls_all_collections():
 
         MockCol.side_effect = col_factory
 
-        from app.indexing.milvus_client import MilvusClient
+        from app.vector_store.milvus.milvus_client import MilvusClient
         # Create a minimally wired client without real Milvus.
         cli = object.__new__(MilvusClient)
         cli._ready = True
@@ -284,7 +284,7 @@ def test_speaker_upsert(tmp_path):
     npz = _make_npz(tmp_path, "speaker")
     client, col = _make_mock_client("speaker_embeddings")
 
-    from app.indexing.milvus_indexer import MilvusWriteContext, SpeakerMilvusIndexer
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, SpeakerMilvusIndexer
 
     ctx = MilvusWriteContext(video_id="vid_spk", asset_version="1", client=client)
     count = SpeakerMilvusIndexer().upsert_from_npz(ctx, npz)
@@ -302,12 +302,12 @@ def test_speaker_upsert(tmp_path):
 
 def test_search_fallback_on_service_error(tmp_path):
     """When Milvus raises MilvusServiceError and fallback is enabled, NPZ is used."""
-    from app.indexing.milvus_search import MilvusServiceError
+    from app.vector_store.milvus.milvus_search import MilvusServiceError
 
-    with patch("app.indexing.milvus_flags.milvus_read_enabled", return_value=True), \
-         patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True), \
-         patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=True), \
-         patch("app.indexing.milvus_search.milvus_visual_candidates",
+    with patch("app.vector_store.milvus.milvus_flags.milvus_read_enabled", return_value=True), \
+         patch("app.vector_store.milvus.milvus_flags.milvus_fallback_enabled", return_value=True), \
+         patch("app.vector_store.milvus.milvus_flags.should_use_milvus_for_video", return_value=True), \
+         patch("app.vector_store.milvus.milvus_search.milvus_visual_candidates",
                side_effect=MilvusServiceError("timeout")):
         # This test just verifies that MilvusServiceError is a distinct exception class
         # and can be caught separately from, e.g., empty results.
@@ -321,7 +321,7 @@ def test_search_fallback_on_service_error(tmp_path):
 
 def test_empty_milvus_result_is_not_service_error():
     """Milvus returning 0 results is valid; no exception should be raised."""
-    from app.indexing.milvus_search import MilvusServiceError
+    from app.vector_store.milvus.milvus_search import MilvusServiceError
 
     # Empty results would come back as an empty list from _search()
     # and produce an empty Candidate list — no exception.
@@ -337,9 +337,9 @@ def test_empty_milvus_result_is_not_service_error():
 
 def test_stable_hash_routing_determinism():
     """The same video_id always maps to the same routing decision."""
-    from app.indexing.milvus_flags import should_use_milvus_for_video
+    from app.vector_store.milvus.milvus_flags import should_use_milvus_for_video
 
-    with patch("app.indexing.milvus_flags._settings") as mock_settings:
+    with patch("app.vector_store.milvus.milvus_flags._settings") as mock_settings:
         mock_settings.return_value.milvus_rollout_percent = 50
 
         video_id = "abc123def456"
@@ -352,10 +352,10 @@ def test_stable_hash_routing_determinism():
 def test_stable_hash_routing_distribution():
     """At rollout_percent=50, ~50% of distinct IDs should route to Milvus."""
     import hashlib
-    from app.indexing.milvus_flags import should_use_milvus_for_video
+    from app.vector_store.milvus.milvus_flags import should_use_milvus_for_video
 
     ids = [f"video-{i:06d}" for i in range(200)]
-    with patch("app.indexing.milvus_flags._settings") as mock_settings:
+    with patch("app.vector_store.milvus.milvus_flags._settings") as mock_settings:
         mock_settings.return_value.milvus_rollout_percent = 50
         routed = sum(1 for vid in ids if should_use_milvus_for_video(vid))
     # Expect between 30% and 70% (wide margin for 200 samples)
@@ -386,7 +386,7 @@ def test_write_queue_retry(tmp_path):
     col.upsert = MagicMock()
     client.collection_for = MagicMock(return_value=col)
 
-    with patch("app.indexing.milvus_indexer._reindex_from_npz") as mock_reindex:
+    with patch("app.vector_store.milvus.milvus_indexer._reindex_from_npz") as mock_reindex:
         mock_reindex.return_value = None
         result = queue.retry_pending(client)
 
@@ -401,16 +401,16 @@ def test_write_queue_retry(tmp_path):
 
 def test_pre_delete_failure_raises_when_policy_raise(tmp_path):
     """delete_video_modality returning -1 must raise when policy=raise."""
-    from app.indexing.milvus_indexer import MilvusWriteContext
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
 
     client = MagicMock()
     client.delete_video_modality = MagicMock(return_value=-1)  # simulate failure
 
     ctx = MilvusWriteContext(video_id="vid_x", asset_version="2", client=client)
 
-    with patch("app.indexing.milvus_flags.milvus_write_fail_policy", return_value="raise"):
+    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="raise"):
         # Import after patching so the flag function is the mock.
-        from app.stage_runner import _pre_delete_modality
+        from app.execution.stage_runner import _pre_delete_modality
         with pytest.raises(RuntimeError, match="Pre-index Milvus cleanup failed"):
             _pre_delete_modality(ctx, "vid_x", "visual")
 
@@ -418,15 +418,15 @@ def test_pre_delete_failure_raises_when_policy_raise(tmp_path):
 def test_pre_delete_failure_warns_when_policy_warn(tmp_path):
     """delete_video_modality returning -1 must only warn when policy=warn."""
     import logging
-    from app.indexing.milvus_indexer import MilvusWriteContext
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
 
     client = MagicMock()
     client.delete_video_modality = MagicMock(return_value=-1)
 
     ctx = MilvusWriteContext(video_id="vid_y", asset_version="1", client=client)
 
-    with patch("app.indexing.milvus_flags.milvus_write_fail_policy", return_value="warn"):
-        from app.stage_runner import _pre_delete_modality
+    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="warn"):
+        from app.execution.stage_runner import _pre_delete_modality
         # Must NOT raise — only warn.
         _pre_delete_modality(ctx, "vid_y", "visual")
 
@@ -446,13 +446,13 @@ def test_reindex_fewer_frames_deletes_before_write(tmp_path):
     client.collection_for = MagicMock(return_value=col)
     client.delete_video_modality = MagicMock(return_value=5)  # deleted 5 old rows
 
-    from app.indexing.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
 
     ctx = MilvusWriteContext(video_id="vid_reindex", asset_version="2", client=client)
 
     # Simulate what stage_runner does: pre-delete then upsert.
-    from app.stage_runner import _pre_delete_modality
-    with patch("app.indexing.milvus_flags.milvus_write_fail_policy", return_value="queue"):
+    from app.execution.stage_runner import _pre_delete_modality
+    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="queue"):
         _pre_delete_modality(ctx, "vid_reindex", "visual")
 
     # After successful pre-delete, upsert the new (smaller) index.
@@ -470,13 +470,13 @@ def test_reindex_fewer_frames_deletes_before_write(tmp_path):
 
 def test_asset_version_starts_at_1(tmp_path):
     """First call returns "1" (no meta file present)."""
-    from app.indexing.milvus_asset_version import current_asset_version
+    from app.vector_store.milvus.milvus_asset_version import current_asset_version
     assert current_asset_version(tmp_path) == "1"
 
 
 def test_asset_version_bump_increments(tmp_path):
     """bump_asset_version() persists and increments the counter."""
-    from app.indexing.milvus_asset_version import bump_asset_version, current_asset_version
+    from app.vector_store.milvus.milvus_asset_version import bump_asset_version, current_asset_version
 
     assert bump_asset_version(tmp_path) == "2"
     assert current_asset_version(tmp_path) == "2"
@@ -490,7 +490,7 @@ def test_asset_version_bump_handles_non_integer_legacy(tmp_path):
     meta = tmp_path / "milvus_meta.json"
     meta.write_text(json.dumps({"asset_version": "abc"}), encoding="utf-8")
 
-    from app.indexing.milvus_asset_version import bump_asset_version
+    from app.vector_store.milvus.milvus_asset_version import bump_asset_version
     assert bump_asset_version(tmp_path) == "2"
 
 
@@ -548,15 +548,15 @@ def test_asr_stage_does_not_pre_delete_speaker_on_entry():
     tracing delete_video_modality calls up to (but not including) the
     speaker build step, then verifies 'speaker' was not touched.
     """
-    from app.indexing.milvus_indexer import MilvusWriteContext
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
 
     client = MagicMock()
     client.delete_video_modality = MagicMock(return_value=0)
 
     ctx = MilvusWriteContext(video_id="vid_asr", asset_version="2", client=client)
 
-    with patch("app.indexing.milvus_flags.milvus_write_fail_policy", return_value="warn"):
-        from app.stage_runner import _pre_delete_modality
+    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="warn"):
+        from app.execution.stage_runner import _pre_delete_modality
         # Simulate what the asr branch does: only pre-delete 'asr'.
         _pre_delete_modality(ctx, "vid_asr", "asr")
 
@@ -575,7 +575,7 @@ def test_asr_stage_does_not_pre_delete_speaker_on_entry():
 
 def test_stage_lock_blocks_concurrent_same_stage(tmp_path):
     """Acquiring the same stage lock twice raises StageLockError."""
-    from app.indexing.milvus_stage_lock import StageLockError, video_stage_lock
+    from app.vector_store.milvus.milvus_stage_lock import StageLockError, video_stage_lock
 
     with video_stage_lock(tmp_path, video_id="vid_lock", stage="visual"):
         # Second acquisition of the same lock must fail immediately.
@@ -586,7 +586,7 @@ def test_stage_lock_blocks_concurrent_same_stage(tmp_path):
 
 def test_stage_lock_allows_different_stages(tmp_path):
     """Different stages on the same video can be locked concurrently."""
-    from app.indexing.milvus_stage_lock import video_stage_lock
+    from app.vector_store.milvus.milvus_stage_lock import video_stage_lock
 
     # Both locks should be acquirable without error.
     with video_stage_lock(tmp_path, video_id="vid_multi", stage="visual"):
@@ -596,7 +596,7 @@ def test_stage_lock_allows_different_stages(tmp_path):
 
 def test_stage_lock_releases_on_exception(tmp_path):
     """The lock is released even when the body raises an exception."""
-    from app.indexing.milvus_stage_lock import video_stage_lock
+    from app.vector_store.milvus.milvus_stage_lock import video_stage_lock
 
     with pytest.raises(ValueError):
         with video_stage_lock(tmp_path, video_id="vid_exc", stage="face"):

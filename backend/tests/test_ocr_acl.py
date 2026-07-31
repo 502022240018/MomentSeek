@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.indexing.ocr_acl import _choose_covering_shape, _shape_from_name
+from app.indexing.modalities.ocr.ocr_acl import _choose_covering_shape, _shape_from_name
 
 
 def test_shape_from_om_filename():

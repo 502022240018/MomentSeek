@@ -4,8 +4,8 @@ import sys
 
 from fastapi.testclient import TestClient
 
-from app.db import Catalog
-from app.settings import Settings
+from app.catalog.db import Catalog
+from app.core.settings import Settings
 
 
 def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
@@ -40,7 +40,7 @@ def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
     main._spawn_indexer_daemon()
 
     environment = captured["env"]
-    assert captured["args"][:3] == [sys.executable, "-m", "app.indexer_daemon"]
+    assert captured["args"][:3] == [sys.executable, "-m", "app.execution.indexer_daemon"]
     assert environment["EXISTING_CONTAINER_ENV"] == "kept"
     assert environment["ENV_PROFILE"] == "staging.ascend"
     assert environment["RELEASE_MANIFEST_PATH"] == str((tmp_path / "release.json").resolve())
@@ -264,8 +264,8 @@ def test_cancel_running_daemon_job_restarts_queue_consumer(monkeypatch, tmp_path
 
 
 def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
-    import app.indexing.asr as asr
-    import app.stage_runner as stage_runner
+    import app.indexing.modalities.asr.asr as asr
+    import app.execution.stage_runner as stage_runner
 
     settings = Settings(
         _env_file=None,

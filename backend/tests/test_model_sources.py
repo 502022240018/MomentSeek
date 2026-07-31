@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from app import model_sources
-from app.model_sources import (
+from app.core import model_sources
+from app.core.model_sources import (
     hf_cached_snapshot_path,
     offline_env,
     resolve_faster_whisper_model_source,

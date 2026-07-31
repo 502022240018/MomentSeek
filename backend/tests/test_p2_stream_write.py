@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, call
-from app.indexing.milvus_indexer import (
+from app.vector_store.milvus.milvus_indexer import (
     write_modality_from_memory,
     VisualMilvusIndexer,
     AsrMilvusIndexer,
@@ -78,7 +78,7 @@ class TestVisualDirectWrite:
 
         with (
             patch(
-                "app.indexing.milvus_flags.milvus_write_fail_policy",
+                "app.vector_store.milvus.milvus_flags.milvus_write_fail_policy",
                 return_value="raise",
             ),
             pytest.raises(RuntimeError, match="Milvus write failed"),
@@ -192,28 +192,28 @@ class TestSpeakerDirectWrite:
 class TestBuildFunctionsP2Integration:
     """Integration tests: verify build_* functions use direct-write when Milvus is available."""
 
-    @patch("app.indexing.milvus_indexer.write_modality_from_memory")
+    @patch("app.vector_store.milvus.milvus_indexer.write_modality_from_memory")
     def test_build_visual_uses_direct_write(self, mock_write_mem):
         """build_visual_index: calls write_modality_from_memory via lazy import."""
         # Placeholder: full e2e would require video decode setup
         pass
 
-    @patch("app.indexing.milvus_indexer.write_modality_from_memory")
+    @patch("app.vector_store.milvus.milvus_indexer.write_modality_from_memory")
     def test_build_asr_uses_direct_write(self, mock_write_mem):
         """build_asr_index: calls write_modality_from_memory."""
         pass
 
-    @patch("app.indexing.milvus_indexer.write_modality_from_memory")
+    @patch("app.vector_store.milvus.milvus_indexer.write_modality_from_memory")
     def test_build_ocr_uses_direct_write(self, mock_write_mem):
         """build_ocr_index: calls write_modality_from_memory."""
         pass
 
-    @patch("app.indexing.milvus_indexer.write_modality_from_memory")
+    @patch("app.vector_store.milvus.milvus_indexer.write_modality_from_memory")
     def test_build_face_uses_direct_write(self, mock_write_mem):
         """build_face_index: calls write_modality_from_memory."""
         pass
 
-    @patch("app.indexing.milvus_indexer.write_modality_from_memory")
+    @patch("app.vector_store.milvus.milvus_indexer.write_modality_from_memory")
     def test_build_speaker_uses_direct_write(self, mock_write_mem):
         """build_speaker_index: calls write_modality_from_memory."""
         pass

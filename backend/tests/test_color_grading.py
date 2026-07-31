@@ -6,9 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from app.color_grading import ColorGradingManager
-from app.db import Catalog
-from app.settings import Settings
+from app.integrations.color_grading import ColorGradingManager
+from app.catalog.db import Catalog
+from app.core.settings import Settings
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
 
@@ -209,7 +209,7 @@ def test_successful_upstream_task_is_finalized_into_platform_result(
     )
     monkeypatch.setattr(manager, "_has_audio", lambda path: False)
     monkeypatch.setattr(
-        "app.color_grading.probe_video",
+        "app.integrations.color_grading.probe_video",
         lambda path: SimpleNamespace(
             duration=10,
             fps=25,

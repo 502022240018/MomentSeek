@@ -1,5 +1,5 @@
-from app.indexing.asr_pipeline_types import RawTranscriptItem
-from app.indexing.asr_retrieval_chunks import RetrievalChunkConfig, build_retrieval_chunks
+from app.indexing.modalities.asr.asr_pipeline_types import RawTranscriptItem
+from app.indexing.modalities.asr.asr_retrieval_chunks import RetrievalChunkConfig, build_retrieval_chunks
 
 
 def test_default_config_uses_final_8_12_window():

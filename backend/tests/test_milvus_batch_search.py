@@ -1,5 +1,5 @@
-from app.indexing.milvus_search import query_rows_for_videos
-from app.retrieval_metrics import RetrievalProfiler
+from app.vector_store.milvus.milvus_search import query_rows_for_videos
+from app.retrieval.retrieval_metrics import RetrievalProfiler
 
 
 class FakeIterator:

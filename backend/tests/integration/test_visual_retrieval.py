@@ -7,9 +7,9 @@ pytestmark = pytest.mark.integration
 
 import numpy as np
 import time
-from app.indexing.milvus_client import get_milvus_client
-from app.indexing.milvus_search import milvus_visual_candidates, milvus_visual_candidates_ann
-from app.settings import get_settings
+from app.vector_store.milvus.milvus_client import get_milvus_client
+from app.vector_store.milvus.milvus_search import milvus_visual_candidates, milvus_visual_candidates_ann
+from app.core.settings import get_settings
 
 video_id = "4c7f80cff1374441ae19c8de1c7a0b66"
 duration_ms = int(59.833 * 1000)

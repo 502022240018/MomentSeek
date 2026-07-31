@@ -7,7 +7,7 @@ import pytest
 
 def test_speaker_should_skip_when_asr_empty():
     """当 ASR 阶段返回空结果（仅背景音乐）时，speaker 应该优雅跳过而不写入文件"""
-    from app.indexing.speaker import build_speaker_index
+    from app.indexing.modalities.speaker.speaker import build_speaker_index
     
     # 模拟 ASR 空结果：0 个 chunk
     with tempfile.TemporaryDirectory() as tmpdir:

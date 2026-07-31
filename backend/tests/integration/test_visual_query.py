@@ -6,7 +6,7 @@ sys.path.insert(0, '/app/backend')
 pytestmark = pytest.mark.integration
 
 from pymilvus import utility, connections, Collection
-from app.settings import get_settings
+from app.core.settings import get_settings
 
 settings = get_settings()
 connections.connect(host=settings.milvus_host, port=settings.milvus_port)
