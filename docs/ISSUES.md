@@ -72,9 +72,10 @@
 
 ## 结构优化（既定技术债，见 ARCHITECTURE.md 第 9 节）
 
-- context 化：消除路由对 app.main 的 38 处惰性互引 → `platform/context.py`
+- ~~context 化：消除路由对 app.main 的 38 处惰性互引~~ → 已完成
+  （2026-07-31，`platform/context.py`）
 - 共享编码器抽层：retrieval 不再从 indexing.modalities 借 ClipEncoder 等
-- `settings.resolve_path` 多候选猜测逻辑在 context 化时固定语义
+- `settings.resolve_path` 多候选猜测逻辑待固定语义
 - 拆分 `retrieval/search.py`（约 77KB）与前端 `main.tsx`（约 34KB）
 
 ## 非技术项

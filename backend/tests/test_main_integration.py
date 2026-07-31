@@ -5,12 +5,12 @@ import sys
 from fastapi.testclient import TestClient
 
 from app.api import job_routes
+from app.platform import context
 from app.catalog.db import Catalog
 from app.core.settings import Settings
 
 
 def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
-    import app.main as main
 
     settings = Settings(
         _env_file=None,
@@ -26,7 +26,7 @@ def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
         visual_model="siglip2-so400m-384",
         visual_hf_cache_dir=tmp_path / "models" / "hf-cache",
     )
-    monkeypatch.setattr(main, "settings", settings)
+    monkeypatch.setattr(context, "settings", settings)
     monkeypatch.setenv("EXISTING_CONTAINER_ENV", "kept")
     captured = {}
 
@@ -38,7 +38,7 @@ def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
-    main._spawn_indexer_daemon()
+    context._spawn_indexer_daemon()
 
     environment = captured["env"]
     assert captured["args"][:3] == [sys.executable, "-m", "app.execution.indexer_daemon"]
@@ -54,7 +54,6 @@ def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
 
 
 def test_spawn_indexer_daemon_strips_inherited_npu_environment_when_disabled(monkeypatch, tmp_path):
-    import app.main as main
 
     settings = Settings(
         _env_file=None,
@@ -63,7 +62,7 @@ def test_spawn_indexer_daemon_strips_inherited_npu_environment_when_disabled(mon
         indexer_mode="daemon",
         npu_enabled=False,
     )
-    monkeypatch.setattr(main, "settings", settings)
+    monkeypatch.setattr(context, "settings", settings)
     monkeypatch.setenv("NPU_DEVICE_ID", "7")
     monkeypatch.setenv("ASCEND_VISIBLE_DEVICES", "7")
     monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "7")
@@ -77,7 +76,7 @@ def test_spawn_indexer_daemon_strips_inherited_npu_environment_when_disabled(mon
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
-    main._spawn_indexer_daemon()
+    context._spawn_indexer_daemon()
 
     environment = captured["env"]
     assert environment["NPU_ENABLED"] == "false"
@@ -109,7 +108,7 @@ def test_health_endpoint_serializes_release_manifest_metadata(monkeypatch, tmp_p
         npu_enabled=True,
         npu_device_id=0,
     )
-    monkeypatch.setattr(main, "settings", settings)
+    monkeypatch.setattr(context, "settings", settings)
 
     with TestClient(main.app) as client:
         response = client.get("/api/health")
@@ -144,7 +143,7 @@ def test_orchestration_profiles_endpoint_uses_runtime_orchestrator(monkeypatch):
         def profiles(self):
             return expected
 
-    monkeypatch.setattr(main, "search_orchestrator", FakeOrchestrator())
+    monkeypatch.setattr(context, "search_orchestrator", FakeOrchestrator())
 
     with TestClient(main.app) as client:
         response = client.get("/api/orchestration/profiles")
@@ -178,9 +177,9 @@ def test_create_index_job_queues_only_requested_modalities(monkeypatch, tmp_path
     })
     catalog.update_video("video-1", indexed_modalities=["face", "visual"])
     launched: list[str] = []
-    monkeypatch.setattr(main, "settings", settings)
-    monkeypatch.setattr(main, "catalog", catalog)
-    monkeypatch.setattr(main, "launch_job", lambda job_id: launched.append(job_id))
+    monkeypatch.setattr(context, "settings", settings)
+    monkeypatch.setattr(context, "catalog", catalog)
+    monkeypatch.setattr(context, "launch_job", lambda job_id: launched.append(job_id))
 
     with TestClient(main.app) as client:
         response = client.post(
@@ -221,7 +220,6 @@ def _create_cancellable_job(catalog, tmp_path, *, status="queued"):
 
 
 def test_cancel_queued_subprocess_job_preserves_other_jobs(monkeypatch, tmp_path):
-    import app.main as main
 
     settings = Settings(
         _env_file=None, app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models",
@@ -230,9 +228,9 @@ def test_cancel_queued_subprocess_job_preserves_other_jobs(monkeypatch, tmp_path
     catalog = Catalog(settings.db_path)
     _create_cancellable_job(catalog, tmp_path, status="queued")
     terminated = []
-    monkeypatch.setattr(main, "settings", settings)
-    monkeypatch.setattr(main, "catalog", catalog)
-    monkeypatch.setattr(main, "_terminate_process_group", lambda pid, expected_job_id=None: terminated.append((pid, expected_job_id)))
+    monkeypatch.setattr(context, "settings", settings)
+    monkeypatch.setattr(context, "catalog", catalog)
+    monkeypatch.setattr(context, "_terminate_process_group", lambda pid, expected_job_id=None: terminated.append((pid, expected_job_id)))
 
     response = job_routes.cancel_job("cancel-job")
 
@@ -244,7 +242,6 @@ def test_cancel_queued_subprocess_job_preserves_other_jobs(monkeypatch, tmp_path
 
 
 def test_cancel_running_daemon_job_restarts_queue_consumer(monkeypatch, tmp_path):
-    import app.main as main
 
     settings = Settings(
         _env_file=None, app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models",
@@ -253,9 +250,9 @@ def test_cancel_running_daemon_job_restarts_queue_consumer(monkeypatch, tmp_path
     catalog = Catalog(settings.db_path)
     _create_cancellable_job(catalog, tmp_path, status="running")
     restarted = []
-    monkeypatch.setattr(main, "settings", settings)
-    monkeypatch.setattr(main, "catalog", catalog)
-    monkeypatch.setattr(main, "_restart_indexer_daemon", lambda: restarted.append(True))
+    monkeypatch.setattr(context, "settings", settings)
+    monkeypatch.setattr(context, "catalog", catalog)
+    monkeypatch.setattr(context, "_restart_indexer_daemon", lambda: restarted.append(True))
 
     response = job_routes.cancel_job("cancel-job")
 

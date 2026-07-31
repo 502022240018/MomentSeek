@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app import __version__
 from app.core.deployment import build_deployment_info
 from app.api.schemas import HealthResponse
+from app.platform import context
 
 
 router = APIRouter()
@@ -10,9 +11,8 @@ router = APIRouter()
 
 @router.get("/api/health", response_model=HealthResponse)
 def health() -> dict:
-    from app import main as runtime
 
-    settings = runtime.settings
+    settings = context.settings
     return {
         "status": "ok",
         "version": __version__,
@@ -33,5 +33,5 @@ def health() -> dict:
             and settings.milvus_rollout_percent == 100
         ),
         "milvus_fallback_enabled": settings.milvus_fallback_enabled,
-        "query_models": runtime.search_engine.query_model_status(),
+        "query_models": context.search_engine.query_model_status(),
     }

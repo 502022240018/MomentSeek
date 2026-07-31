@@ -12,6 +12,7 @@ from app.orchestration.retrieval_orchestration import (
     SearchOrchestrator,
     _extract_json_object,
 )
+from app.platform import context
 from app.core.settings import Settings
 
 
@@ -409,7 +410,7 @@ def test_search_api_returns_execution_trace(monkeypatch):
                 },
             }
 
-    monkeypatch.setattr(main, "search_orchestrator", FakeOrchestrator())
+    monkeypatch.setattr(context, "search_orchestrator", FakeOrchestrator())
 
     with TestClient(main.app) as client:
         response = client.post(

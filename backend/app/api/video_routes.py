@@ -6,6 +6,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from app.api.schemas import IndexRequest, VideoRenameRequest
+from app.platform import context
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -16,23 +17,22 @@ async def upload_video(
     video: UploadFile = File(...),
     transcript: UploadFile | None = File(default=None),
 ) -> dict:
-    from app import main as runtime
 
     video_id = uuid.uuid4().hex
-    suffix = runtime._safe_suffix(video.filename, ".mp4")
-    video_path = runtime.settings.upload_dir / f"{video_id}{suffix}"
-    await run_in_threadpool(runtime._save_upload, video, video_path)
+    suffix = context._safe_suffix(video.filename, ".mp4")
+    video_path = context.settings.upload_dir / f"{video_id}{suffix}"
+    await run_in_threadpool(context._save_upload, video, video_path)
     try:
-        info = await run_in_threadpool(runtime.probe_video, video_path)
+        info = await run_in_threadpool(context.probe_video, video_path)
     except Exception as exc:
         video_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="无法解析上传的视频") from exc
     sidecar_path = None
     if transcript and transcript.filename:
-        transcript_suffix = runtime._safe_suffix(transcript.filename, ".json")
-        sidecar_path = runtime.settings.upload_dir / f"{video_id}.transcript{transcript_suffix}"
-        await run_in_threadpool(runtime._save_upload, transcript, sidecar_path)
-    record = runtime.catalog.create_video({
+        transcript_suffix = context._safe_suffix(transcript.filename, ".json")
+        sidecar_path = context.settings.upload_dir / f"{video_id}.transcript{transcript_suffix}"
+        await run_in_threadpool(context._save_upload, transcript, sidecar_path)
+    record = context.catalog.create_video({
         "id": video_id,
         "name": video.filename or video_path.name,
         "file_path": str(video_path.resolve()),
@@ -48,52 +48,48 @@ async def upload_video(
 
 @router.get("/api/videos")
 def list_videos() -> list[dict]:
-    from app import main as runtime
 
-    videos = runtime.catalog.list_videos()
+    videos = context.catalog.list_videos()
     for video in videos:
         video["speaker_indexed"] = (
-            runtime.settings.index_dir / video["id"] / "speaker.npz"
+            context.settings.index_dir / video["id"] / "speaker.npz"
         ).exists()
     return videos
 
 
 @router.get("/api/videos/{video_id}")
 def get_video(video_id: str) -> dict:
-    from app import main as runtime
 
-    video = runtime.catalog.get_video(video_id)
+    video = context.catalog.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
-    video["jobs"] = runtime.catalog.list_jobs(video_id)
-    video["speaker_indexed"] = (runtime.settings.index_dir / video_id / "speaker.npz").exists()
+    video["jobs"] = context.catalog.list_jobs(video_id)
+    video["speaker_indexed"] = (context.settings.index_dir / video_id / "speaker.npz").exists()
     return video
 
 
 @router.patch("/api/videos/{video_id}")
 def rename_video(video_id: str, request: VideoRenameRequest) -> dict:
-    from app import main as runtime
 
-    if not runtime.catalog.get_video(video_id):
+    if not context.catalog.get_video(video_id):
         raise HTTPException(status_code=404, detail="视频不存在")
-    runtime.catalog.update_video(video_id, name=request.name)
-    return runtime.catalog.get_video(video_id)
+    context.catalog.update_video(video_id, name=request.name)
+    return context.catalog.get_video(video_id)
 
 
 @router.delete("/api/videos/{video_id}")
 def delete_video(video_id: str) -> dict:
-    from app import main as runtime
 
-    video = runtime.catalog.get_video(video_id)
+    video = context.catalog.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
-    jobs = runtime.catalog.list_jobs(video_id)
+    jobs = context.catalog.list_jobs(video_id)
     if any(job["status"] in {"queued", "running"} for job in jobs):
         raise HTTPException(status_code=409, detail="该视频有索引任务进行中，请等任务结束后再删除")
-    if runtime.catalog.has_active_color_grading_tasks(video_id):
+    if context.catalog.has_active_color_grading_tasks(video_id):
         raise HTTPException(status_code=409, detail="该视频有仿色任务进行中，请等任务结束后再删除")
     milvus_cleanup = None
-    if runtime.settings.milvus_enabled:
+    if context.settings.milvus_enabled:
         try:
             from app.vector_store.milvus.milvus_client import get_milvus_client
 
@@ -105,19 +101,19 @@ def delete_video(video_id: str) -> dict:
                 raise RuntimeError(
                     "failed collections: " + ", ".join(sorted(failed_collections))
                 )
-            runtime.catalog.complete_milvus_cleanup(video_id)
+            context.catalog.complete_milvus_cleanup(video_id)
         except Exception as exc:
             logger.warning(
                 "Milvus cleanup failed for video=%s; local deletion continues: %s",
                 video_id,
                 exc,
             )
-            runtime.catalog.enqueue_milvus_cleanup(video_id, str(exc))
+            context.catalog.enqueue_milvus_cleanup(video_id, str(exc))
             milvus_cleanup = {"status": "deferred", "error": str(exc)}
-    runtime._remove_video_files(video, video_id)
+    context._remove_video_files(video, video_id)
     for job in jobs:
-        (runtime.settings.app_data_dir / f"job-{job['id']}.log").unlink(missing_ok=True)
-    runtime.catalog.delete_video(video_id)
+        (context.settings.app_data_dir / f"job-{job['id']}.log").unlink(missing_ok=True)
+    context.catalog.delete_video(video_id)
     return {
         "status": "deleted",
         "id": video_id,
@@ -127,17 +123,16 @@ def delete_video(video_id: str) -> dict:
 
 @router.get("/api/videos/{video_id}/media")
 def video_media(video_id: str):
-    from app import main as runtime
 
-    video = runtime.catalog.get_video(video_id)
+    video = context.catalog.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="视频文件不存在")
-    video_path = runtime.settings.resolve_path(video["file_path"])
+    video_path = context.settings.resolve_path(video["file_path"])
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="视频文件不存在")
     return FileResponse(
         video_path,
-        media_type=runtime._video_media_type(video_path, video.get("name")),
+        media_type=context._video_media_type(video_path, video.get("name")),
         filename=video["name"],
         content_disposition_type="inline",
     )
@@ -149,14 +144,13 @@ async def video_clip(
     start: float = Query(..., ge=0),
     end: float = Query(..., gt=0),
 ):
-    from app import main as runtime
 
-    video = runtime.catalog.get_video(video_id)
+    video = context.catalog.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="视频文件不存在")
     if end <= start:
         raise HTTPException(status_code=400, detail="片段结束时间必须大于开始时间")
-    video_path = runtime.settings.resolve_path(video["file_path"])
+    video_path = context.settings.resolve_path(video["file_path"])
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="视频文件不存在")
     max_seconds = 45.0
@@ -166,11 +160,11 @@ async def video_clip(
         bounded_end = min(bounded_end, duration)
     if bounded_end <= start:
         bounded_end = start + 0.25
-    clip_path = runtime._clip_cache_path(video_id, start, bounded_end)
+    clip_path = context._clip_cache_path(video_id, start, bounded_end)
     if not clip_path.exists() or clip_path.stat().st_size == 0:
         try:
             await run_in_threadpool(
-                runtime.export_preview_clip, video_path, clip_path, start, bounded_end, max_seconds
+                context.export_preview_clip, video_path, clip_path, start, bounded_end, max_seconds
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -188,12 +182,11 @@ async def video_frame(
     time: float | None = Query(default=None, ge=0),
     ms: int | None = Query(default=None, ge=0),
 ):
-    from app import main as runtime
 
-    video = runtime.catalog.get_video(video_id)
+    video = context.catalog.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="视频文件不存在")
-    video_path = runtime.settings.resolve_path(video["file_path"])
+    video_path = context.settings.resolve_path(video["file_path"])
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="视频文件不存在")
     if time is None and ms is None:
@@ -206,16 +199,16 @@ async def video_frame(
     else:
         bounded_time = min(float(time), duration) if duration > 0 else float(time)
         timestamp_ms = max(0, round(bounded_time * 1000))
-    frame_path = runtime._frame_cache_path(video_id, timestamp_ms)
+    frame_path = context._frame_cache_path(video_id, timestamp_ms)
     if not frame_path.exists() or frame_path.stat().st_size == 0:
         try:
             if ms is not None:
                 await run_in_threadpool(
-                    runtime.extract_frame, video_path, frame_path, timestamp_ms
+                    context.extract_frame, video_path, frame_path, timestamp_ms
                 )
             else:
                 await run_in_threadpool(
-                    runtime.extract_video_frame, video_path, frame_path, bounded_time
+                    context.extract_video_frame, video_path, frame_path, bounded_time
                 )
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -249,25 +242,24 @@ def _index_options(request: IndexRequest) -> dict:
 
 @router.post("/api/videos/{video_id}/index", status_code=202)
 def create_index_job(video_id: str, request: IndexRequest = Body(default_factory=IndexRequest)) -> dict:
-    from app import main as runtime
 
-    video = runtime.catalog.get_video(video_id)
+    video = context.catalog.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
     running = [
-        job for job in runtime.catalog.list_jobs(video_id)
+        job for job in context.catalog.list_jobs(video_id)
         if job["status"] in {"queued", "running"}
     ]
     if running:
         raise HTTPException(status_code=409, detail="该视频已有索引任务在运行")
     options = _index_options(request)
     for suffix in ("json", "srt", "vtt"):
-        sidecar = runtime.settings.upload_dir / f"{video_id}.transcript.{suffix}"
+        sidecar = context.settings.upload_dir / f"{video_id}.transcript.{suffix}"
         if sidecar.exists():
             options["sidecar_path"] = str(sidecar)
             break
     job_id = uuid.uuid4().hex
-    job = runtime.catalog.create_job({
+    job = context.catalog.create_job({
         "id": job_id,
         "video_id": video_id,
         "status": "queued",
@@ -276,6 +268,6 @@ def create_index_job(video_id: str, request: IndexRequest = Body(default_factory
         "modalities": request.modalities,
         "options": options,
     })
-    if runtime.settings.indexer_mode != "daemon":
-        runtime.launch_job(job_id)
-    return runtime.catalog.get_job(job_id) or job
+    if context.settings.indexer_mode != "daemon":
+        context.launch_job(job_id)
+    return context.catalog.get_job(job_id) or job

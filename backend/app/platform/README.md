@@ -1,18 +1,23 @@
-# platform/ — 平台化预留层
+# platform/ — 平台运行时层
 
-当前为空，暂无代码。这里预留给"平台级运行时上下文"。
+## context.py
 
-## 既定方向：context 化（待办）
+平台运行时上下文，承载进程级单例与路由共享辅助函数：
 
-现状：全局单例（`settings` / `catalog` / `search_engine` / `search_orchestrator`）
-定义在 `app/main.py`，各路由模块通过函数内 `from app import main as runtime`
-惰性导入来规避循环依赖（全仓约 38 处）。
+- 单例：`settings` / `catalog` / `search_engine` / `search_orchestrator`
+- 媒体与任务入口别名：`probe_video`、`extract_video_frame`、`launch_job` 等
+- indexer daemon 监督：`start_indexer_daemon_if_configured()` /
+  `stop_indexer_daemon()` / `_restart_indexer_daemon()`
+- 路由共享辅助：`_safe_suffix`、`_save_upload`、`_clip_cache_path` 等
 
-计划：新建 `app/platform/context.py` 承载这些单例与共享辅助函数，
-`main.py` 只负责组装 FastAPI app 与生命周期管理；路由模块顶部直接
-`from app.platform import context`，消除惰性互引。
+依赖规则：**本模块不 import 任何路由**，因此路由文件在顶部
+`from app.platform import context` 不会形成循环；`main.py` 只负责组装
+FastAPI app、挂路由和生命周期。
 
-依赖方向由 `main → routes →（惰性）main` 变为 `main → routes → context`。
+依赖方向：`main → routes → context ← main`（树，无环）。
 
-执行该改造时需同步更新对 `app.main` 属性做 monkeypatch 的测试
-（如 `test_main_integration.py`、`test_retrieval_orchestration.py`）。
+测试约定：需要替换运行时状态时 monkeypatch 本模块属性，例如
+`monkeypatch.setattr(context, "catalog", fake_catalog)`。
+
+历史：2026-07-31 之前这些对象住在 `app.main`，路由靠 38 处函数内
+`from app import main as runtime` 惰性导入规避循环依赖；context 化后已全部消除。

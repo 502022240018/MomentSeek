@@ -9,6 +9,7 @@ import pytest
 from app.integrations.color_grading import ColorGradingManager
 from app.catalog.db import Catalog
 from app.core.settings import Settings
+from app.platform import context
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
 
@@ -439,9 +440,9 @@ def test_video_reference_task_endpoint_persists_platform_mapping(
             )
             return catalog.get_color_grading_task(task_id)
 
-    monkeypatch.setattr(main, "settings", settings)
-    monkeypatch.setattr(main, "catalog", catalog)
-    monkeypatch.setattr(main, "_color_grading_manager", FakeManager)
+    monkeypatch.setattr(context, "settings", settings)
+    monkeypatch.setattr(context, "catalog", catalog)
+    monkeypatch.setattr(context, "_color_grading_manager", FakeManager)
 
     with TestClient(main.app) as client:
         response = client.post(
