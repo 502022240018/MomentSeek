@@ -53,6 +53,9 @@ jobs:
       MINIO_CONSOLE_PORT: "9001"
       MOMENTSEEK_NETWORK_NAME: momentseek-ci-${{ github.run_id }}
       RUN_MILVUS_INTEGRATION_TESTS: "1"
+      # Throwaway credentials for the CI-local MinIO container only.
+      MINIO_ROOT_USER: momentseek-ci
+      MINIO_ROOT_PASSWORD: momentseek-ci-password
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -72,7 +75,7 @@ jobs:
       - name: Start isolated Milvus
         run: |
           mkdir -p "$HOST_RUNTIME_DIR"
-          docker compose -f compose/compose.milvus.yml up -d
+          docker compose -f compose/compose.milvus.yml -f compose/compose.milvus.ci.yml up -d etcd minio milvus
 
       - name: Wait for Milvus
         run: |
@@ -83,8 +86,8 @@ jobs:
             fi
             sleep 2
           done
-          docker compose -f compose/compose.milvus.yml ps
-          docker compose -f compose/compose.milvus.yml logs milvus
+          docker compose -f compose/compose.milvus.yml -f compose/compose.milvus.ci.yml ps
+          docker compose -f compose/compose.milvus.yml -f compose/compose.milvus.ci.yml logs milvus
           exit 1
 
       - name: Run live Milvus tests
@@ -93,8 +96,8 @@ jobs:
 
       - name: Show Milvus logs after failure
         if: failure()
-        run: docker compose -f compose/compose.milvus.yml logs --no-color
+        run: docker compose -f compose/compose.milvus.yml -f compose/compose.milvus.ci.yml logs --no-color
 
       - name: Stop isolated Milvus
         if: always()
-        run: docker compose -f compose/compose.milvus.yml down --volumes --remove-orphans
+        run: docker compose -f compose/compose.milvus.yml -f compose/compose.milvus.ci.yml down --volumes --remove-orphans

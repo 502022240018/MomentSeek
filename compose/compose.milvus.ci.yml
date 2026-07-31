@@ -1,0 +1,20 @@
+# CI-only override for running the Milvus stack standalone on a GitHub runner.
+# Production deployments must NOT use this file: it exposes Milvus ports on the
+# host and stubs out the app service. Use together with compose.milvus.yml:
+#   docker compose -f compose.milvus.yml -f compose.milvus.ci.yml up -d etcd minio milvus
+services:
+  # The base file only adds a depends_on fragment for app; give it a dummy
+  # definition behind an inactive profile so standalone validation passes.
+  app:
+    image: busybox:stable
+    command: ["true"]
+    profiles: ["never"]
+
+  milvus:
+    ports:
+      - "127.0.0.1:${MILVUS_PORT:-19530}:19530"
+      - "127.0.0.1:${MILVUS_HEALTH_PORT:-9091}:9091"
+
+networks:
+  momentseek:
+    name: "${MOMENTSEEK_NETWORK_NAME:-momentseek-ci-net}"
