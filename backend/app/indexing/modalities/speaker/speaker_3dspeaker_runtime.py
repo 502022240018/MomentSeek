@@ -13,17 +13,15 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 import torch
+from modelscope.pipelines import pipeline as modelscope_pipeline
+from modelscope.utils.constant import Tasks
 from scipy.signal import resample_poly
 from sklearn.cluster import AgglomerativeClustering, KMeans
 from sklearn.metrics.pairwise import cosine_similarity
-
-from speakerlab.process.processor import FBank
 from speakerlab.models.campplus.DTDNN import CAMPPlus
-from modelscope.pipelines import pipeline as modelscope_pipeline
-from modelscope.utils.constant import Tasks
+from speakerlab.process.processor import FBank
 
 from app.core.model_sources import resolve_modelscope_model_source
-
 
 EMBEDDING_MODEL_ID = "iic/speech_campplus_sv_zh_en_16k-common_advanced"
 EMBEDDING_REVISION = "v1.0.0"

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable
 
-
 _FALLBACK_ZH_VARIANT_FOLD = str.maketrans({
     "臺": "台",
     "灣": "湾",

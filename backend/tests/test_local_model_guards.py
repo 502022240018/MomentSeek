@@ -4,7 +4,7 @@ import sys
 import numpy as np
 import pytest
 
-from app.indexing.modalities.face.faces import FaceEncoder
+from app.encoders.face import FaceEncoder
 from app.indexing.modalities.ocr.ocr import _load_ocr, _rapidocr_params, create_ocr_backend
 from app.indexing.modalities.ocr.ocr_acl import _choose_rec_width, _limit_rec_tensor_width
 

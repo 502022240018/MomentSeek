@@ -3,8 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from app.indexing.modalities.asr.asr_pipeline_types import RawTranscriptItem, RetrievalChunk
-from app.indexing.modalities.asr.asr_text import normalize_asr_text, normalize_search_text, semantic_text_quality
+from app.indexing.modalities.asr.asr_pipeline_types import (
+    RawTranscriptItem,
+    RetrievalChunk,
+)
+from app.indexing.modalities.asr.asr_text import (
+    normalize_asr_text,
+    normalize_search_text,
+    semantic_text_quality,
+)
 
 
 @dataclass(frozen=True)

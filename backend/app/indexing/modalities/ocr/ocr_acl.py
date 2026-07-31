@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 ACL_SUCCESS = 0
 ACL_MEM_MALLOC_NORMAL_ONLY = 2
 ACL_MEMCPY_HOST_TO_DEVICE = 1

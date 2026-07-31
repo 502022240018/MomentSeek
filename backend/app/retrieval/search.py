@@ -1069,7 +1069,7 @@ class SearchEngine:
         visual_model: str | None = None,
         profiler: RetrievalProfiler | None = None,
     ):
-        from app.indexing.modalities.visual.visual import ClipEncoder, normalize_visual_model, resolve_device
+        from app.encoders.visual import ClipEncoder, normalize_visual_model, resolve_device
 
         model_key = normalize_visual_model(visual_model or self.settings.visual_model)
         if model_key not in self._clip_encoders:
@@ -1101,7 +1101,7 @@ class SearchEngine:
 
     def _face(self):
         if self._face_encoder is None:
-            from app.indexing.modalities.face.faces import FaceEncoder
+            from app.encoders.face import FaceEncoder
 
             self._face_encoder = FaceEncoder(
                 self.settings.face_model,
@@ -1119,7 +1119,7 @@ class SearchEngine:
         model_name: str,
         profiler: RetrievalProfiler | None = None,
     ) -> np.ndarray:
-        from app.indexing.text_semantic import TextEmbeddingEncoder, resolve_text_embedding_device
+        from app.encoders.text import TextEmbeddingEncoder, resolve_text_embedding_device
 
         device = resolve_text_embedding_device(self.settings.asr_semantic_device, self.settings.cuda_enabled)
         key = (model_name, device)

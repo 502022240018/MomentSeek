@@ -6,7 +6,6 @@ from typing import Any, Iterable
 
 from app.indexing.modalities.asr.asr_pipeline_types import RawTranscriptItem
 
-
 _SENSEVOICE_TAG_RE = re.compile(r"<\|([^|<>]+)\|>")
 _SENSEVOICE_EMOTION_TAGS = {
     "neutral": "neutral",

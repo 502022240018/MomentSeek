@@ -15,9 +15,12 @@ from typing import TYPE_CHECKING, Iterable
 import numpy as np
 
 from app.indexing.modalities.asr.asr_debug import write_asr_debug_artifacts
-from app.indexing.modalities.asr.asr_retrieval_chunks import RetrievalChunkConfig, build_retrieval_chunks
-from app.indexing.modalities.asr.asr_text import asr_text_profile, normalize_search_text
 from app.indexing.modalities.asr.asr_pipeline_types import RawTranscriptItem
+from app.indexing.modalities.asr.asr_retrieval_chunks import (
+    RetrievalChunkConfig,
+    build_retrieval_chunks,
+)
+from app.indexing.modalities.asr.asr_text import asr_text_profile, normalize_search_text
 from app.indexing.modalities.asr.asr_transcript_parser import (
     apply_safe_raw_split,
     parse_funasr_raw_transcript,
@@ -26,15 +29,15 @@ from app.indexing.modalities.asr.asr_transcript_parser import (
 
 if TYPE_CHECKING:
     from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
-from app.indexing.common import atomic_save_npz
-from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
-from app.media.media import extract_audio, parse_timecode
 from app.core.model_sources import (
     offline_env,
     resolve_faster_whisper_model_source,
     resolve_modelscope_model_source,
 )
-
+from app.encoders.text import resolve_text_embedding_device
+from app.indexing.common import atomic_save_npz
+from app.indexing.text_semantic import build_text_semantic_arrays
+from app.media.media import extract_audio, parse_timecode
 
 SAMPLE_RATE = 16000
 FASTER_WHISPER_WINDOW_SECONDS = 24.0

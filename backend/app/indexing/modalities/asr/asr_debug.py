@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from app.indexing.modalities.asr.asr_pipeline_types import RawTranscriptItem, RetrievalChunk, SpeechUnit
+from app.indexing.modalities.asr.asr_pipeline_types import (
+    RawTranscriptItem,
+    RetrievalChunk,
+    SpeechUnit,
+)
 
 
 def _write_json(path: Path, payload: object) -> None:

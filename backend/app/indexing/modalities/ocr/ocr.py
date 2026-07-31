@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 import time
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
+from app.encoders.text import resolve_text_embedding_device
 from app.indexing.common import atomic_save_npz
-from app.indexing.text_semantic import build_text_semantic_arrays, resolve_text_embedding_device
+from app.indexing.text_semantic import build_text_semantic_arrays
 from app.media.media import read_frames
 
 if TYPE_CHECKING:
@@ -27,7 +28,13 @@ def _rapidocr_params(
     ort_intra_op_threads: int = 8,
     ort_inter_op_threads: int = 1,
 ) -> dict[str, Any]:
-    from rapidocr.utils.typings import EngineType, LangDet, LangRec, ModelType, OCRVersion
+    from rapidocr.utils.typings import (
+        EngineType,
+        LangDet,
+        LangRec,
+        ModelType,
+        OCRVersion,
+    )
 
     version_map = {item.value.casefold(): item for item in OCRVersion}
     det_lang_map = {item.value.casefold(): item for item in LangDet}

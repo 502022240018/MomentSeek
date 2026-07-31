@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from app.indexing.pipeline_manifest import write_stage_manifest
 from app.core.model_pool import ModelPool
 from app.core.settings import Settings
+from app.indexing.pipeline_manifest import write_stage_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,8 @@ def _write_manifest(stage: str, context: StageContext, result: dict) -> None:
 
 
 def _run_visual(context: StageContext) -> dict:
-    from app.indexing.modalities.visual.visual import ClipEncoder, build_visual_index, resolve_device
+    from app.encoders.visual import ClipEncoder, resolve_device
+    from app.indexing.modalities.visual.visual import build_visual_index
 
     settings = context.settings
     options = context.options
@@ -182,7 +183,8 @@ def _run_visual(context: StageContext) -> dict:
 
 
 def _run_face(context: StageContext) -> dict:
-    from app.indexing.modalities.face.faces import FaceEncoder, build_face_index
+    from app.encoders.face import FaceEncoder
+    from app.indexing.modalities.face.faces import build_face_index
 
     settings = context.settings
     options = context.options
