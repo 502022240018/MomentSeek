@@ -5,11 +5,7 @@ import json
 
 from app.catalog.db import Catalog
 from app.core.settings import get_settings
-from app.indexing.stage_executor import (
-    _pre_delete_modality,  # noqa: F401 - compatibility re-export
-    _setup_milvus_context,  # noqa: F401 - compatibility re-export
-    execute_stage,
-)
+from app.indexing.stage_executor import execute_stage
 
 
 def run(stage: str, job_id: str) -> dict:

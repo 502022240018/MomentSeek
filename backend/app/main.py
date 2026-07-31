@@ -204,35 +204,6 @@ for route_module in (
 ):
     app.include_router(route_module.router)
 
-# Compatibility exports for callers and tests that imported handlers from app.main.
-health = system_routes.health
-upload_video = video_routes.upload_video
-list_videos = video_routes.list_videos
-get_video = video_routes.get_video
-rename_video = video_routes.rename_video
-delete_video = video_routes.delete_video
-video_media = video_routes.video_media
-video_clip = video_routes.video_clip
-video_frame = video_routes.video_frame
-create_index_job = video_routes.create_index_job
-get_video_speakers = speaker_routes.get_video_speakers
-update_video_speaker = speaker_routes.update_video_speaker
-update_video_utterance = speaker_routes.update_video_utterance
-search_voice = speaker_routes.search_voice
-search_voice_upload = speaker_routes.search_voice_upload
-get_job = job_routes.get_job
-list_jobs = job_routes.list_jobs
-cancel_job = job_routes.cancel_job
-create_entity = entity_routes.create_entity
-list_entities = entity_routes.list_entities
-get_entity = entity_routes.get_entity
-rename_entity = entity_routes.rename_entity
-delete_entity = entity_routes.delete_entity
-create_voice_only_entity = entity_routes.create_voice_only_entity
-list_entity_voice_samples = entity_routes.list_entity_voice_samples
-add_entity_voice_sample = entity_routes.add_entity_voice_sample
-entity_reference = entity_routes.entity_reference
-search = search_routes.search
 
 
 static_dir = Path(__file__).resolve().parent / "static"

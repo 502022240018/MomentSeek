@@ -4,6 +4,7 @@ import sys
 
 from fastapi.testclient import TestClient
 
+from app.api import job_routes
 from app.catalog.db import Catalog
 from app.core.settings import Settings
 
@@ -233,7 +234,7 @@ def test_cancel_queued_subprocess_job_preserves_other_jobs(monkeypatch, tmp_path
     monkeypatch.setattr(main, "catalog", catalog)
     monkeypatch.setattr(main, "_terminate_process_group", lambda pid, expected_job_id=None: terminated.append((pid, expected_job_id)))
 
-    response = main.cancel_job("cancel-job")
+    response = job_routes.cancel_job("cancel-job")
 
     assert response["status"] == "cancelled"
     assert response["stage"] == "cancelled"
@@ -256,7 +257,7 @@ def test_cancel_running_daemon_job_restarts_queue_consumer(monkeypatch, tmp_path
     monkeypatch.setattr(main, "catalog", catalog)
     monkeypatch.setattr(main, "_restart_indexer_daemon", lambda: restarted.append(True))
 
-    response = main.cancel_job("cancel-job")
+    response = job_routes.cancel_job("cancel-job")
 
     assert response["status"] == "cancelled"
     assert restarted == [True]

@@ -410,7 +410,7 @@ def test_pre_delete_failure_raises_when_policy_raise(tmp_path):
 
     with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="raise"):
         # Import after patching so the flag function is the mock.
-        from app.execution.stage_runner import _pre_delete_modality
+        from app.indexing.stage_executor import _pre_delete_modality
         with pytest.raises(RuntimeError, match="Pre-index Milvus cleanup failed"):
             _pre_delete_modality(ctx, "vid_x", "visual")
 
@@ -426,7 +426,7 @@ def test_pre_delete_failure_warns_when_policy_warn(tmp_path):
     ctx = MilvusWriteContext(video_id="vid_y", asset_version="1", client=client)
 
     with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="warn"):
-        from app.execution.stage_runner import _pre_delete_modality
+        from app.indexing.stage_executor import _pre_delete_modality
         # Must NOT raise — only warn.
         _pre_delete_modality(ctx, "vid_y", "visual")
 
@@ -451,7 +451,7 @@ def test_reindex_fewer_frames_deletes_before_write(tmp_path):
     ctx = MilvusWriteContext(video_id="vid_reindex", asset_version="2", client=client)
 
     # Simulate what stage_runner does: pre-delete then upsert.
-    from app.execution.stage_runner import _pre_delete_modality
+    from app.indexing.stage_executor import _pre_delete_modality
     with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="queue"):
         _pre_delete_modality(ctx, "vid_reindex", "visual")
 
@@ -556,7 +556,7 @@ def test_asr_stage_does_not_pre_delete_speaker_on_entry():
     ctx = MilvusWriteContext(video_id="vid_asr", asset_version="2", client=client)
 
     with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="warn"):
-        from app.execution.stage_runner import _pre_delete_modality
+        from app.indexing.stage_executor import _pre_delete_modality
         # Simulate what the asr branch does: only pre-delete 'asr'.
         _pre_delete_modality(ctx, "vid_asr", "asr")
 

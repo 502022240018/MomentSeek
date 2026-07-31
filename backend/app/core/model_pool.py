@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import gc
+import logging
 import threading
 import time
 from typing import Callable
+
+
+logger = logging.getLogger(__name__)
 
 
 class ModelPool:
@@ -84,7 +88,7 @@ class ModelPool:
             try:
                 self.evict_idle()
             except Exception:
-                pass
+                logger.warning("model pool idle eviction failed", exc_info=True)
 
     def _free(self, obj: object) -> None:
         if self._on_free is not None:

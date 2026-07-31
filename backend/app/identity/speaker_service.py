@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -9,6 +10,8 @@ from app.catalog.db import Catalog
 from app.indexing.modalities.speaker.speaker import load_speaker_index
 from app.core.settings import get_settings
 
+
+logger = logging.getLogger(__name__)
 
 SPEAKER_PREVIEW_UTTERANCES = 5
 
@@ -107,7 +110,7 @@ def _texts_for_video(index_dir: Path, video_id: str) -> list[str]:
             if texts:
                 return texts
         except Exception:
-            pass
+            logger.warning("Milvus ASR text fetch failed for %s; falling back to NPZ", video_id, exc_info=True)
     path = index_dir / video_id / "asr.npz"
     return _texts(path) if path.exists() else []
 

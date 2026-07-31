@@ -5,6 +5,8 @@ services:
     image: "${APP_IMAGE:?请在 .env 中设置完整的 MomentSeek Ascend 应用镜像}"
     container_name: "${APP_CONTAINER_NAME:-momentseek-app}"
     restart: unless-stopped
+    # PID 1 需要 init 进程收割 detached worker 子进程，否则积累僵尸进程。
+    init: true
     env_file:
       - ../.env
     environment:

@@ -324,7 +324,7 @@ class TestSetupMilvusContext:
         _setup_milvus_context uses lazy (in-function) imports, so the correct
         patch targets are the original definition sites, not app.stage_runner.*
         """
-        import app.execution.stage_runner as sr
+        import app.indexing.stage_executor as sr
 
         fake_dir = tmp_path / video_id
         fake_dir.mkdir()
@@ -375,7 +375,7 @@ class TestSetupMilvusContext:
                   return_value="raise"),
             patch("app.vector_store.milvus.milvus_asset_version.bump_asset_version") as mock_bump,
         ):
-            import app.execution.stage_runner as sr
+            import app.indexing.stage_executor as sr
             fake_dir = tmp_path / "vid4"
             fake_dir.mkdir()
             with pytest.raises(RuntimeError):
@@ -393,7 +393,7 @@ class TestSetupMilvusContext:
                   return_value="3") as mock_bump,
             patch("app.vector_store.milvus.milvus_indexer.MilvusWriteContext", autospec=True),
         ):
-            import app.execution.stage_runner as sr
+            import app.indexing.stage_executor as sr
             fake_dir = tmp_path / "vid5"
             fake_dir.mkdir()
             sr._setup_milvus_context("vid5", fake_dir)
