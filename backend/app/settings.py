@@ -166,6 +166,11 @@ class Settings(BaseSettings):
     visual_ann_top_k: int = 500  # ANN recall size per subquery (recommended: 300-1000)
     visual_ann_segment_top_n: int = 3  # Number of top frames per segment for aggregation (recommended: 3-10)
 
+    # OCR hybrid search configuration (DiskANN + BM25)
+    ocr_hybrid_recall_size: int = 100  # Dense and Sparse recall size (recommended: 50-200)
+    ocr_lexical_weight: float = 0.7  # Lexical (BM25) weight; semantic weight = 1.0 - this (recommended: 0.6-0.8)
+    ocr_diskann_search_list: int = 100  # DiskANN search_list parameter (recommended: 100-200)
+
     @field_validator("indexer_mode", mode="before")
     @classmethod
     def normalize_indexer_mode(cls, value: object) -> object:
@@ -198,6 +203,20 @@ class Settings(BaseSettings):
     def validate_color_grading_request_timeout_seconds(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("color_grading_request_timeout_seconds 必须大于 0")
+        return value
+
+    @field_validator("ocr_hybrid_recall_size", "ocr_diskann_search_list")
+    @classmethod
+    def validate_ocr_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("OCR hybrid search parameters must be greater than 0")
+        return value
+
+    @field_validator("ocr_lexical_weight")
+    @classmethod
+    def validate_ocr_lexical_weight(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("ocr_lexical_weight must be between 0.0 and 1.0")
         return value
 
     @field_validator("milvus_search_video_batch_size")

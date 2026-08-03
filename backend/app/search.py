@@ -670,66 +670,6 @@ def _ocr_display_text(
 
 
 
-def _ocr_chunks_from_npz(data) -> list[dict]:
-    """Load the frame-native OCR v3 layout."""
-    required = {"frame_times_ms", "frame_windows_ms", "box_frame_indices", "box_texts", "box_scores", "boxes"}
-    if not required.issubset(set(data.files)):
-        raise ValueError("ocr v3 索引缺少帧级数组，请重跑 OCR 索引")
-    frame_times = data["frame_times_ms"].astype(np.int32)
-    frame_windows = data["frame_windows_ms"].astype(np.int32)
-    box_frame_indices = data["box_frame_indices"].astype(np.int32)
-    box_texts = _decode_text_array(data["box_texts"])
-    box_scores = np.asarray(data["box_scores"], dtype=np.float32)
-    boxes = np.asarray(data["boxes"], dtype=np.float32)
-    if frame_times.ndim != 1:
-        raise ValueError("ocr v3 frame_times_ms 必须是一维数组，请重跑 OCR 索引")
-    if frame_windows.ndim != 2 or frame_windows.shape != (len(frame_times), 2):
-        raise ValueError("ocr v3 frame_windows_ms 必须是 [num_frames, 2]，请重跑 OCR 索引")
-    if not (len(box_frame_indices) == len(box_texts) == len(box_scores) == len(boxes)):
-        raise ValueError("ocr v3 box 数组长度不一致，请重跑 OCR 索引")
-    if len(box_frame_indices) and np.any((box_frame_indices < 0) | (box_frame_indices >= len(frame_times))):
-        raise ValueError("ocr v3 box_frame_indices 越界，请重跑 OCR 索引")
-    chunks: list[dict] = []
-    for frame_index, frame_ms in enumerate(frame_times):
-        indices = np.flatnonzero(box_frame_indices == frame_index)
-        box_text_values = [box_texts[int(index)].strip() for index in indices if box_texts[int(index)].strip()]
-        box_score_values = [float(box_scores[int(index)]) for index in indices if box_texts[int(index)].strip()]
-        chunks.append({
-            "chunk_id": frame_index,
-            "start_ms": int(frame_windows[frame_index, 0]),
-            "end_ms": int(frame_windows[frame_index, 1]),
-            "frame_ms": int(frame_ms),
-            "text": " ".join(box_text_values),
-            "ocr_box_texts": box_text_values,
-            "ocr_box_scores": box_score_values,
-            "score": max(box_score_values) if box_score_values else 0.0,
-        })
-    return chunks
-
-
-def _remap_embedding_frame_times_to_chunk_indices(
-    chunks: list[dict],
-    embedding_frame_times_ms: np.ndarray | None,
-) -> np.ndarray | None:
-    """
-    OCR 新 schema 的 embedding_chunk_indices 保存的是 frame_ms。
-    但 _asr_candidates 内部需要 embedding_id -> chunk_id。
-    所以这里把 frame_ms 映射成当前重建 chunks 的 chunk_id。
-    """
-    if embedding_frame_times_ms is None:
-        return None
-
-    frame_to_chunk_id = {
-        int(chunk["frame_ms"]): int(chunk["chunk_id"])
-        for chunk in chunks
-        if "frame_ms" in chunk and "chunk_id" in chunk
-    }
-
-    values = np.asarray(embedding_frame_times_ms, dtype=np.int32).reshape((-1,))
-    return np.asarray(
-        [frame_to_chunk_id.get(int(frame_ms), -1) for frame_ms in values],
-        dtype=np.int32,
-    )
 
 
 def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict, Path]:
@@ -785,25 +725,27 @@ def _serialize_evidence(item: Candidate) -> dict:
     }
 
 _OCR_ONLY_MERGE_GAP_SECONDS = 0.35
-_OCR_MERGE_MIN_SCORE_RATIO = 0.70
-_OCR_MERGE_MAX_SCORE_DROP = 0.25
+_OCR_MERGE_MIN_SCORE_RATIO = 0.90  # 收紧至80%，让高低分更明确分开
+_OCR_MERGE_MAX_SCORE_DROP = 0.10   # 减小至0.10，避免低分拖长高分片段
 
 def _ocr_scores_compatible(group: list[Candidate], candidate: Candidate) -> bool:
     """
     OCR-only 合并时，避免高分命中被明显低分命中拖长。
 
     规则：
-    - candidate 必须是 above_threshold；
-    - group 里必须已有 above_threshold 的 OCR 命中；
+    - candidate 必须是 OCR 模态；
+    - group 里必须已有 OCR 命中；
     - candidate 分数不能比 group 里最佳 OCR 命中低太多。
+
+    注意：不再检查 above_threshold，聚合只基于分数差异。
     """
-    if candidate.modality != "ocr" or not candidate.above_threshold:
+    if candidate.modality != "ocr":
         return False
 
     group_scores = [
         float(item.score)
         for item in group
-        if item.modality == "ocr" and item.above_threshold
+        if item.modality == "ocr"
     ]
     if not group_scores:
         return False
@@ -829,9 +771,11 @@ def _should_merge_ocr_only(
 
     只允许：
     - OCR 与 OCR 合并；
-    - 都是 above-threshold；
     - 时间窗口重叠或几乎相邻；
     - 分数不能差太多。
+
+    注意：不再检查 above_threshold，聚合只基于分数和时间。
+    above_threshold 只影响最终展示，不影响聚合逻辑。
 
     不设置最大合并时长：
     如果同一段 OCR 文本持续稳定出现很久，它应该保留为一个连续命中片段。
@@ -839,11 +783,6 @@ def _should_merge_ocr_only(
     if candidate.modality != "ocr":
         return False
     if any(item.modality != "ocr" for item in group):
-        return False
-
-    if not candidate.above_threshold:
-        return False
-    if not any(item.above_threshold for item in group):
         return False
 
     group_end = max(item.end_time for item in group)
@@ -894,13 +833,128 @@ def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_
     return near
 
 
+def _groups_ocr_score_first(candidates: list[Candidate]) -> list[list[Candidate]]:
+    """
+    OCR 专用聚合：从高分帧开始向两边扩展。
+
+    算法：
+    1. 按分数降序选种子（未聚合的最高分）
+    2. 从种子向时间两边扩展，基于种子分数判断是否合并
+    3. 标记已聚合的帧，避免重复处理
+    4. 重复直到所有帧都处理完
+    """
+    if not candidates:
+        return []
+
+    # 按 video_id 分组处理
+    by_video: dict[str, list[Candidate]] = {}
+    for candidate in candidates:
+        by_video.setdefault(candidate.video_id, []).append(candidate)
+
+    all_groups: list[list[Candidate]] = []
+
+    for video_id, video_candidates in by_video.items():
+        # 按时间排序（用于向两边扩展）
+        time_sorted = sorted(video_candidates, key=lambda c: (c.start_time, c.end_time))
+        # 按分数降序（用于选种子）
+        score_sorted = sorted(video_candidates, key=lambda c: -float(c.score))
+
+        used_ids = set()  # 记录已聚合的候选
+
+        for seed in score_sorted:
+            seed_id = id(seed)
+            if seed_id in used_ids:
+                continue  # 已被其他组聚合，跳过
+
+            # 以 seed 为核心建新组
+            group = [seed]
+            used_ids.add(seed_id)
+
+            # 计算分数阈值（基于种子分数，不会滑坡）
+            seed_score = float(seed.score)
+            score_threshold = max(
+                seed_score * _OCR_MERGE_MIN_SCORE_RATIO,
+                seed_score - _OCR_MERGE_MAX_SCORE_DROP,
+            )
+
+            seed_idx = time_sorted.index(seed)
+
+            # === 向左扩展（时间更早的帧）===
+            for i in range(seed_idx - 1, -1, -1):
+                candidate = time_sorted[i]
+                cand_id = id(candidate)
+
+                if cand_id in used_ids:
+                    continue  # 已被聚合，跳过但继续尝试更早的帧
+
+                # 检查分数兼容性
+                if float(candidate.score) < score_threshold:
+                    break  # 分数不够，停止向左扩展
+
+                # 检查时间 gap（candidate 在左边，检查它的 end_time 和 group 最早的 start_time）
+                group_start = min(c.start_time for c in group)
+                gap_to_group = group_start - candidate.end_time
+
+                if gap_to_group > _OCR_ONLY_MERGE_GAP_SECONDS:
+                    break  # 时间太远，停止向左扩展
+
+                # 满足条件，加入组
+                group.append(candidate)
+                used_ids.add(cand_id)
+
+            # === 向右扩展（时间更晚的帧）===
+            for i in range(seed_idx + 1, len(time_sorted)):
+                candidate = time_sorted[i]
+                cand_id = id(candidate)
+
+                if cand_id in used_ids:
+                    continue  # 已被聚合，跳过但继续尝试更晚的帧
+
+                # 检查分数兼容性
+                if float(candidate.score) < score_threshold:
+                    break  # 分数不够，停止向右扩展
+
+                # 检查时间 gap（candidate 在右边，检查 group 最晚的 end_time 和它的 start_time）
+                group_end = max(c.end_time for c in group)
+                gap_to_group = candidate.start_time - group_end
+
+                if gap_to_group > _OCR_ONLY_MERGE_GAP_SECONDS:
+                    break  # 时间太远，停止向右扩展
+
+                # 满足条件，加入组
+                group.append(candidate)
+                used_ids.add(cand_id)
+
+            all_groups.append(group)
+
+    return all_groups
+
+
 def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -> list[list[Candidate]]:
+    # OCR-only 候选使用新的分数优先算法
+    ocr_candidates = [c for c in candidates if c.modality == "ocr"]
+    non_ocr_candidates = [c for c in candidates if c.modality != "ocr"]
+
     groups: list[list[Candidate]] = []
-    for candidate in sorted(candidates, key=lambda item: (item.video_id, item.start_time, item.end_time)):
+
+    # OCR 使用分数优先聚合
+    if ocr_candidates:
+        # 检查是否是纯 OCR 场景
+        if not non_ocr_candidates:
+            # 纯 OCR，直接使用新算法
+            return _groups_ocr_score_first(ocr_candidates)
+        else:
+            # 混合模态，OCR 先聚合，再和其他模态合并
+            ocr_groups = _groups_ocr_score_first(ocr_candidates)
+            groups.extend(ocr_groups)
+
+    # 非 OCR 候选使用原有的时间优先算法
+    for candidate in sorted(non_ocr_candidates, key=lambda item: (item.video_id, item.start_time, item.end_time)):
         if groups and _should_merge(groups[-1], candidate, gap, max_duration):
             groups[-1].append(candidate)
             continue
         groups.append([candidate])
+
     return groups
 
 
@@ -980,20 +1034,6 @@ def _reserve_asr_lexical_results(results: list[SearchResult], limit: int) -> lis
     return reranked + remaining_above + below
 
 
-def _ocr_semantic_arrays(data) -> tuple[np.ndarray | None, np.ndarray | None]:
-    embeddings = data["embeddings"].astype(np.float32) if "embeddings" in data.files else None
-    if embeddings is not None and (embeddings.ndim != 2 or not embeddings.shape[0] or not embeddings.shape[1]):
-        embeddings = None
-    indices = (
-        data["embedding_frame_indices"].astype(np.int32)
-        if "embedding_frame_indices" in data.files
-        else None
-    )
-    if embeddings is not None and indices is None:
-        raise ValueError("ocr v3 索引缺少 embedding_frame_indices，请重跑 OCR 索引")
-    if embeddings is not None and len(indices) != embeddings.shape[0]:
-        raise ValueError("ocr v3 semantic 数组长度不一致，请重跑 OCR 索引")
-    return embeddings, indices
 
 
 def _fuse_candidate_groups(
@@ -1424,36 +1464,6 @@ class SearchEngine:
                 ),
             )
 
-    def _ocr_for_video(
-        self,
-        video: dict,
-        text: str,
-        limit: int,
-        semantic_queries: dict[str, np.ndarray | None],
-    ) -> list[Candidate]:
-        index_dir = self.settings.index_dir / video["id"]
-        _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
-        if int(channel_manifest.get("schema_version") or 0) != 3:
-            raise ValueError(f"视频 {video.get('name') or video['id']} 的 OCR 索引不是重构后的 v3，请重跑 OCR 索引")
-        with np.load(index_file, allow_pickle=False) as data:
-            embeddings, indices = _ocr_semantic_arrays(data)
-            semantic_query = None
-            if embeddings is not None:
-                model_name = self._semantic_model_for_channel(
-                    channel_manifest
-                )
-                if model_name is not None:
-                    semantic_query = semantic_queries.get(model_name)
-            return _asr_candidates(
-                _ocr_chunks_from_npz(data),
-                text,
-                video["id"],
-                limit,
-                modality="ocr",
-                semantic_embeddings=embeddings,
-                embedding_chunk_indices=indices,
-                semantic_query=semantic_query,
-            )
 
     def _candidates_for_video(
         self,
@@ -1486,13 +1496,6 @@ class SearchEngine:
                 channel_limits["asr"],
                 semantic_queries,
             ))
-        if "ocr" in modalities and text and "ocr" in indexed:
-            candidates.extend(self._ocr_for_video(
-                video,
-                text,
-                channel_limits["ocr"],
-                semantic_queries,
-            ))
         return candidates
 
     def _milvus_candidates_for_video(
@@ -1513,7 +1516,7 @@ class SearchEngine:
         from app.indexing.milvus_search import (
             milvus_asr_candidates,
             milvus_face_candidates,
-            milvus_ocr_candidates,
+            milvus_ocr_candidates_hybrid,
             milvus_visual_candidates,
         )
 
@@ -1579,7 +1582,7 @@ class SearchEngine:
                 if model_name is not None
                 else None
             )
-            candidates.extend(milvus_ocr_candidates(
+            candidates.extend(milvus_ocr_candidates_hybrid(
                 client,
                 video_id,
                 text,
@@ -1940,6 +1943,19 @@ class SearchEngine:
             # Milvus query, bounding peak memory by video batch size.
             prefetched_rows.clear()
             modality_rows.clear()
+
+        # Apply global dynamic threshold to OCR candidates across all videos
+        ocr_candidates = [c for c in candidates if c.modality == "ocr"]
+        if ocr_candidates:
+            global_top_score = max(float(c.score) for c in ocr_candidates)
+            global_threshold = max(0.10, global_top_score * 0.3)  # At least 0.10, or 30% of global top score
+
+            for candidate in ocr_candidates:
+                candidate.above_threshold = float(candidate.score) >= global_threshold
+                # Update evidence text to include threshold marker if below threshold
+                if not candidate.above_threshold and " · 低于阈值" not in candidate.evidence:
+                    candidate.evidence += " · 低于阈值"
+
         fusion_span = (
             profiler.span("local_processing", "fusion")
             if profiler

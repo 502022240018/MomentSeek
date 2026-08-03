@@ -58,10 +58,10 @@ _STATIC_INDEX_CONFIGS: dict[str, dict] = {
         "metric_type": "IP",
         "params": {"M": 16, "efConstruction": 200},
     },
-    "ocr_embeddings": {
-        "index_type": "HNSW",
+    "ocr": {
+        "index_type": "DISKANN",
         "metric_type": "IP",
-        "params": {"M": 16, "efConstruction": 200},
+        "params": {"search_list": 200},
     },
     "face_embeddings": {
         "index_type": "IVF_FLAT",
@@ -106,7 +106,25 @@ _COLLECTION_CONFIGS: dict[str, dict] = {
     },
     "ocr_embeddings": {
         "schema": create_ocr_schema,
-        "index": _STATIC_INDEX_CONFIGS["ocr_embeddings"],
+        "indexes": {
+            # Dense index: DiskANN for semantic search
+            "embedding": {
+                "index_type": "DISKANN",
+                "metric_type": "IP",
+                "params": {
+                    "max_degree": 56,
+                    "search_list_size": 128,
+                    "pq_code_budget_gb": 0.125,
+                    "build_dram_budget_gb": 32.0,
+                },
+            },
+            # Sparse index: BM25 function output requires BM25 metric type
+            "sparse_embedding": {
+                "index_type": "SPARSE_INVERTED_INDEX",
+                "metric_type": "BM25",
+                "params": {"drop_ratio_build": 0.2},
+            },
+        },
     },
     "face_embeddings": {
         "schema": create_face_schema,
@@ -189,9 +207,18 @@ class MilvusClient:
                 logger.info("Creating collection: %s", name)
                 schema: CollectionSchema = config["schema"]()
                 col = Collection(name=name, schema=schema, consistency_level="Strong")
-                # Get index config dynamically for runtime support
-                index_config = get_collection_index_config(name) if name == "visual_embeddings" else config["index"]
-                col.create_index(field_name="embedding", index_params=index_config)
+
+                # Handle different index configuration formats
+                if "indexes" in config:
+                    # Multiple indexes (e.g., ocr_embeddings_v2 with dense + sparse)
+                    for field_name, index_params in config["indexes"].items():
+                        col.create_index(field_name=field_name, index_params=index_params)
+                        logger.info("Created index on %s.%s: %s", name, field_name, index_params["index_type"])
+                else:
+                    # Single index (legacy format)
+                    index_config = get_collection_index_config(name) if name == "visual_embeddings" else config["index"]
+                    col.create_index(field_name="embedding", index_params=index_config)
+
                 col.load()
                 logger.info("Collection %s created and loaded", name)
             else:
@@ -212,6 +239,12 @@ class MilvusClient:
 
     def collection_for(self, modality: str) -> Collection:
         name = _COLLECTION_FOR_MODALITY[modality]
+        return Collection(name)
+
+    def collection_for_name(self, name: str) -> Collection:
+        """Get collection by exact name (for v2 detection)."""
+        if not utility.has_collection(name):
+            raise ValueError(f"Collection {name} does not exist")
         return Collection(name)
 
     def stats(self, name: str) -> dict:
@@ -289,9 +322,17 @@ class MilvusClient:
             Number of records deleted, or -1 on failure.
         """
         name = _COLLECTION_FOR_MODALITY[modality]
-        col = Collection(name)
-        expr = f'video_id == "{video_id}"'
         try:
+            # Check if collection exists first
+            if not utility.has_collection(name):
+                logger.info(
+                    "delete_video_modality video=%s modality=%s: collection %s does not exist, skipping",
+                    video_id, modality, name
+                )
+                return 0  # No records to delete
+
+            col = Collection(name)
+            expr = f'video_id == "{video_id}"'
             result = col.delete(expr)
             col.flush()
             count = getattr(result, "delete_count", 0)
