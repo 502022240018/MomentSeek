@@ -1,7 +1,7 @@
 import json
 
-from app.deployment import build_deployment_info, load_release_manifest
-from app.settings import Settings
+from app.core.deployment import build_deployment_info, load_release_manifest
+from app.core.settings import Settings
 
 
 DEPLOYMENT_ENV_VARS = (

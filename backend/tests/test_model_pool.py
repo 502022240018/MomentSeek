@@ -1,10 +1,10 @@
 import time
 
-from app.db import Catalog
-from app.indexer_daemon import execute_job
-from app.indexer_daemon import indexer_singleton_lock
-from app.model_pool import ModelPool
-from app.settings import Settings
+from app.catalog.db import Catalog
+from app.execution.indexer_daemon import execute_job
+from app.execution.indexer_daemon import indexer_singleton_lock
+from app.core.model_pool import ModelPool
+from app.core.settings import Settings
 
 
 def test_pool_caches_by_key():

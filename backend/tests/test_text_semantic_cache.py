@@ -1,4 +1,4 @@
-from app.indexing.text_semantic import _hf_cached_snapshot_path
+from app.encoders.text import _hf_cached_snapshot_path
 
 
 def test_text_semantic_cache_accepts_hub_layout(tmp_path):

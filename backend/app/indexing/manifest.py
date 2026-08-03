@@ -5,7 +5,6 @@ from typing import Any
 
 from app.indexing.common import atomic_save_json
 
-
 INDEX_SCHEMA_VERSION = 3
 MANIFEST_NAME = "index_manifest.json"
 

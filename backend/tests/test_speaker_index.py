@@ -1,6 +1,6 @@
 import numpy as np
 
-from app.indexing.speaker import _adaptive_turn_units, load_speaker_index, save_speaker_index
+from app.indexing.modalities.speaker.speaker import _adaptive_turn_units, load_speaker_index, save_speaker_index
 
 
 def test_speaker_index_uses_five_array_schema_and_builds_track_cache(tmp_path):

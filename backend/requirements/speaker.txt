@@ -1,0 +1,6 @@
+# MomentSeek production 3D-Speaker/CAM++ runtime dependencies.
+soundfile==0.13.1
+PyYAML==6.0.2
+simplejson==3.20.1
+sortedcontainers==2.4.0
+modelscope==1.38.1

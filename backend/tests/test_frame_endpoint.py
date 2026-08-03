@@ -2,8 +2,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.db import Catalog
-from app.settings import Settings
+from app.catalog.db import Catalog
+from app.platform import context
+from app.core.settings import Settings
 
 
 def _client(tmp_path, monkeypatch):
@@ -16,8 +17,8 @@ def _client(tmp_path, monkeypatch):
     )
     settings.ensure_dirs()
     catalog = Catalog(settings.db_path)
-    monkeypatch.setattr(main, "settings", settings)
-    monkeypatch.setattr(main, "catalog", catalog)
+    monkeypatch.setattr(context, "settings", settings)
+    monkeypatch.setattr(context, "catalog", catalog)
     return main, settings, catalog, TestClient(main.app)
 
 
@@ -49,7 +50,7 @@ def test_frame_endpoint_extracts_and_caches(tmp_path, monkeypatch):
         Path(output_path).write_bytes(b"\xff\xd8\xff\xd9")  # minimal jpeg marker
         return Path(output_path)
 
-    monkeypatch.setattr(main, "extract_frame", fake_extract)
+    monkeypatch.setattr(context, "extract_frame", fake_extract)
 
     response = client.get("/api/videos/video-1/frame", params={"ms": 5000})
     assert response.status_code == 200
@@ -78,7 +79,7 @@ def test_frame_endpoint_clamps_ms_to_duration(tmp_path, monkeypatch):
         Path(output_path).write_bytes(b"\xff\xd8\xff\xd9")
         return Path(output_path)
 
-    monkeypatch.setattr(main, "extract_frame", fake_extract)
+    monkeypatch.setattr(context, "extract_frame", fake_extract)
 
     response = client.get("/api/videos/video-1/frame", params={"ms": 999999})
     assert response.status_code == 200

@@ -5,14 +5,15 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.retrieval_orchestration import (
+from app.orchestration.retrieval_orchestration import (
     OpenAICompatibleProvider,
     OrchestrationRegistry,
     RetrievalPlan,
     SearchOrchestrator,
     _extract_json_object,
 )
-from app.settings import Settings
+from app.platform import context
+from app.core.settings import Settings
 
 
 class FakeCatalog:
@@ -409,7 +410,7 @@ def test_search_api_returns_execution_trace(monkeypatch):
                 },
             }
 
-    monkeypatch.setattr(main, "search_orchestrator", FakeOrchestrator())
+    monkeypatch.setattr(context, "search_orchestrator", FakeOrchestrator())
 
     with TestClient(main.app) as client:
         response = client.post(

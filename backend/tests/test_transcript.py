@@ -7,9 +7,9 @@ import wave
 import numpy as np
 import pytest
 
-from app.indexing import asr
-from app.indexing.asr import build_asr_index, load_sidecar
-from app.search import lexical_score
+from app.indexing.modalities.asr import asr
+from app.indexing.modalities.asr.asr import build_asr_index, load_sidecar
+from app.retrieval.search import lexical_score
 
 
 def test_load_json_and_srt(tmp_path):
@@ -847,7 +847,7 @@ def test_sidecar_asr_pipeline_does_not_repair_cjk_boundary_across_gap(tmp_path, 
 
 
 def test_settings_default_asr_language_is_auto():
-    from app.settings import Settings
+    from app.core.settings import Settings
 
     settings = Settings(app_data_dir="runtime-test")
 

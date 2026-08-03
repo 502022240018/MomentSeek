@@ -1,174 +1,108 @@
-# 部署流程
+# 服务器部署总入口
 
-## 环境分层
+本仓只讨论 Linux 服务器部署，不讨论开发机或本地调试。
 
-MomentSeek 部署分为四类 profile：
+## 1. 先确认交付路线
+
+| 问题 | 场景 A | 场景 B | 选择结果 |
+|---|---|---|---|
+| 应用镜像从哪里来 | 镜像仓库可拉取 | 离线 `.tar` 导入 | 都支持 |
+| Milvus 在哪里 | 本环境独立启动 | 连接已有 Milvus | 都支持 |
+| 是否首次部署 | 新建实例 | 更新/回滚已有实例 | 都支持 |
+| 同机实例数 | 单实例 | 多实例 | 都支持，参数必须隔离 |
+| 模型是否联网下载 | 不允许，预置模型 | 运行时下载 | 只支持预置模型 |
+| 硬件 | Ascend 910B | CUDA/CPU | 当前交付只承诺 Ascend |
+| 运行方式 | Docker Compose | 裸机 Python/systemd | 当前交付只承诺容器 |
+
+当前可以直接验收的是 **ARM64 + Ascend 910B + Docker Compose**。后端代码虽然包含 CPU/CUDA 兼容逻辑，但本精简交付仓没有提供并验证 CPU/CUDA 镜像、依赖锁和对应 Compose，因此不能把它们写成已交付能力。裸机部署同理，应另立交付项。
+
+如果交付方需要从本仓源码制作完整应用镜像，先执行
+`docs/IMAGE_BUILD.md`；部署人员已经拿到完整应用镜像时，不需要Dockerfile和基础镜像参与上线。
+
+## 2. 镜像获取
+
+### 2.1 从镜像仓库拉取
+
+```bash
+docker login REGISTRY.example.com
+docker pull REGISTRY.example.com/team/momentseek:VERSION-ascend
+docker image inspect REGISTRY.example.com/team/momentseek:VERSION-ascend
+```
+
+### 2.2 离线导入
+
+交付方同时提供镜像 tar 和 SHA256：
+
+```bash
+sha256sum -c momentseek-VERSION-ascend.tar.sha256
+docker load -i momentseek-VERSION-ascend.tar
+docker image inspect IMAGE_NAME:TAG
+```
+
+部署服务器不负责从源码构建生产镜像。若服务器上没有应用镜像，必须从仓库拉取或离线导入；“服务器一定自带基础镜像”不是部署前提。
+
+## 3. Milvus 选择
+
+### 3.1 本环境独立 Milvus（推荐）
+
+适合首次部署、正式环境隔离和同机多实例。启动时加载：
 
 ```text
-dev.cpu：本地 CPU 开发。
-dev.cuda：本地 CUDA 开发。
-staging.ascend：Ascend 服务器预发布验证。
-prod.ascend：Ascend 生产或演示环境。
+compose/compose.yml + compose/compose.ascend.yml + compose/compose.milvus.yml
 ```
 
-dev profile 可以通过 bootstrap 或 `scripts/verify_models.py --download` 显式下载校验脚本支持的 Hugging Face 模型；服务运行时只读取本地模型。staging/prod profile 必须使用预缓存模型、model manifest 和 models lock 复现环境，禁止运行时下载。部署流程以 manifest 为准，不依赖操作者记忆。
+需要准备 Milvus、etcd、MinIO 镜像及独立运行目录。
 
-## 标准目录
+### 3.2 连接已有 Milvus
 
-服务器标准目录：
+适合已有受管 Milvus 服务的环境。启动时只加载：
 
 ```text
-/opt/momentseek/
-  releases/
-  current -> releases/<release-id>
-  runtime/
-  models/
-  env/
-  logs/
-  deployment-record.json
+compose/compose.yml + compose/compose.ascend.yml
 ```
 
-`releases/` 保存不可变 release 内容，`current` 指向当前生效版本。`runtime/` 保存 catalog、uploads、indexes、thumbnails、clips 等运行时数据。`models/` 保存预缓存模型。`env/` 保存服务器实际 `.env` 或 profile 派生配置。`deployment-record.json` 记录最后一次部署的 release、profile、模型清单和验证结果。
+必须确认：
 
-当前共享服务器已有历史路径，迁移到标准目录前应先做只读盘点，不直接移动或清理现有 runtime。
+- 应用容器可以访问 `MILVUS_HOST:MILVUS_PORT`，不能误填只在宿主机有效的 `127.0.0.1`；
+- 目标 Milvus 版本与应用客户端兼容；
+- 该实例允许读写，且集合命名/数据隔离方案已经确定；
+- Milvus 故障、备份和容量由谁负责。
 
-模型路径分为宿主机视角和容器视角：
+## 4. 单实例与多实例
 
-```text
-宿主机标准目录：/opt/momentseek/models
-容器内目录：/app/models
-```
+同一服务器每套环境必须拥有不同的：
 
-`deploy/models/ascend-prod.models.json` 中的 target 使用容器内路径 `/app/models/...`。因此 staging/prod 的模型校验必须在容器内，或在拥有等价 `/app/models` 挂载的环境里执行。不要在宿主机直接用这份 manifest 去校验 `/opt/momentseek/models`，否则路径语义会错位。
+- `COMPOSE_PROJECT_NAME`
+- `APP_CONTAINER_NAME`
+- `MOMENTSEEK_NETWORK_NAME`
+- `APP_PORT`
+- `HOST_RUNTIME_DIR`
+- 物理 NPU 卡
 
-Compose 挂载通过 `.env` 中的宿主机变量控制：
+`HOST_MODEL_DIR` 可以只读共享。Milvus 若独立部署，其数据位于各自的 `HOST_RUNTIME_DIR`，不可共享。
 
-```text
-HOST_RUNTIME_DIR=/opt/momentseek/runtime
-HOST_MODEL_DIR=/opt/momentseek/models
-```
+## 5. 首次部署、升级与回滚
 
-容器内运行时仍固定使用：
+- 首次部署：执行完整预检，确认容器名、端口和 NPU 都未占用。
+- 升级：记录旧 `APP_IMAGE`，修改为新版本，使用 `preflight.py --upgrade`，再执行 `up -d`。
+- 回滚：把 `APP_IMAGE` 改回旧版本并再次 `up -d`；不要删除运行目录。
 
-```text
-APP_DATA_DIR=/app/runtime
-APP_MODEL_DIR=/app/models
-```
+涉及数据库结构变化时，必须先阅读对应版本的升级说明并备份；不能只靠切换镜像假设数据一定可逆。
 
-## Release Manifest
+## 6. 权限场景
 
-Release manifest 描述一次可复现发布，示例见：
+- root：可直接访问 Docker 和 `/dev/davinci*`。
+- 非 root：账号必须有 Docker 权限、部署目录写权限和设备访问权限；这些权限由服务器管理员配置。
+- 无 `sudo` 且无 Docker 权限：不能部署，不应通过修改设备权限或开放 Docker socket 绕过管理。
 
-```text
-deploy/releases/release.example.json
-```
+## 7. 网络与安全
 
-manifest 至少应记录：
+- 只需要本机访问：防火墙不开放 `APP_PORT`，通过反向代理或 SSH 隧道访问。
+- 局域网/公网访问：由管理员开放端口或配置 HTTPS 反向代理。
+- Milvus、etcd、MinIO 默认不映射宿主机端口，不应直接暴露公网。
+- `.env` 含凭据，不提交 Git，不放入报告。
+- 生产环境不要使用浮动镜像标签 `latest`，使用不可变版本或 digest。
 
-```text
-release_id
-git_commit
-branch
-image
-frontend build 信息
-models.manifest
-models.lock
-runtime mount
-env_profile
-verification
-```
+## 8. 下一步
 
-`verification.api_smoke` 对应 `scripts/smoke_check.py`，只检查 `/api/health` 和 `/api/jobs` 这类基础 API。`verification.search_smoke` 对应 `docs/VALIDATION.md` 中的 Visual / ASR / OCR 搜索 smoke，需要已有测试视频、索引和查询数据；两者不要混写。
-
-生成入口：
-
-```powershell
-python scripts/write_release_manifest.py --env-profile staging.ascend --model-manifest deploy/models/ascend-prod.models.json
-```
-
-生成 release manifest 前应确认前端 `frontend/dist` 已由目标提交构建完成，并且工作区没有会污染 release 内容的未确认改动。
-
-staging、prod 和新服务器复制都应从 release manifest、env profile、model manifest 和 models lock 还原，而不是临时拼接命令。`staging.ascend` 和 `prod.ascend` profile 默认设置 `RELEASE_MANIFEST_PATH=/app/release.json`，部署时应把本次生成的 release manifest 复制或挂载到容器内这个路径。
-
-## Deployment Record
-
-`deployment-record.json` 是服务器当前状态记录，用于回答“当前跑的是哪个 release”。它应保存：
-
-```text
-release_id
-git_commit
-image_tag
-env_profile
-model_manifest
-models_lock
-deployed_at
-deployed_by
-verification_result
-rollback_from
-```
-
-Deployment record 只记录事实，不替代 release manifest。release manifest 描述可发布内容，deployment record 描述某台服务器实际生效内容。
-
-## Staging Ascend
-
-staging 使用：
-
-```text
-deploy/env/staging.ascend.example
-deploy/models/ascend-prod.models.json
-```
-
-staging 目标是验证 Ascend 设备、模型缓存、health metadata、基础 API smoke、真实搜索 smoke 和资源占用。部署前先把模型预缓存到宿主机模型目录，并在容器视角通过 `scripts/verify_models.py` 生成 lock；同时把本次 release manifest 放到容器内 `/app/release.json`，让 `/api/health` 能读取 release 元信息。部署后检查 `/api/health` 中的 `env_profile`、`release_id`、`git_commit`、`image_tag` 和 `model_manifest`，确认与 release manifest 一致。
-
-Ascend 镜像构建还需要本地 `vendor-wheels/`。该目录不进 Git，至少要包含 `Dockerfile.ascend` 直接安装的 `insightface-1.0.1-py3-none-any.whl`，以及 `requirements-ascend.txt` 所需且基础镜像未提供的离线 wheel。缺少该目录时，clean clone 不能直接构建 Ascend 镜像；应先从可信构建产物或当前服务器部署记录恢复 wheel 包。
-
-NPU 设备号必须区分宿主物理卡和容器逻辑卡：
-
-```text
-HOST_NPU_DEVICE_ID=2
-ASCEND_VISIBLE_DEVICES=2
-ASCEND_RT_VISIBLE_DEVICES=2
-NPU_DEVICE_ID=0
-```
-
-`HOST_NPU_DEVICE_ID` 只用于 Compose 映射宿主机 `/dev/davinci2`。`ASCEND_VISIBLE_DEVICES` 和 `ASCEND_RT_VISIBLE_DEVICES` 只暴露这张物理卡。容器内 runtime 看到的逻辑卡是 `0`，因此 `NPU_DEVICE_ID` 保持 `0`。不要用 `NPU_DEVICE_ID` 去表示宿主机物理卡号。
-
-## Prod Ascend
-
-prod 使用：
-
-```text
-deploy/env/prod.ascend.example
-deploy/models/ascend-prod.models.json
-```
-
-prod 只接受已在 staging 验证过的 release manifest。上线前确认模型 lock、镜像 tag、git commit、runtime mount、`/app/release.json` 挂载和回滚目标。上线后用只读 health 和 smoke check 验证，不做临时下载、不临时改 profile。
-
-## 新服务器复制
-
-新服务器复制流程以 manifest 为中心：
-
-1. clone 仓库或拉取指定 `git_commit`。
-2. 准备标准目录 `/opt/momentseek/`。
-3. 复制或预缓存 `deploy/models/ascend-prod.models.json` 中的模型到宿主机模型目录。
-4. 在 `.env` 中设置 `HOST_RUNTIME_DIR`、`HOST_MODEL_DIR`、`HOST_NPU_DEVICE_ID` 和 Ascend 可见设备变量。
-5. 用容器内 `/app/models` 视角运行 `scripts/verify_models.py`，校验模型并生成 models lock。
-6. 准备 `vendor-wheels/` 和匹配服务器驱动的 `ASCEND_RUNTIME_IMAGE`。
-7. 根据 release manifest 选择 env profile、镜像 tag、runtime mount 和前端 build。
-8. 把 release manifest 复制或挂载到容器内 `/app/release.json`。
-9. 启动后检查 `/api/health` 部署元信息、`scripts/smoke_check.py` 基础 API smoke 和 `docs/VALIDATION.md` 搜索 smoke。
-10. 写入 `deployment-record.json`。
-
-新服务器不应依赖旧服务器上的临时 shell 历史；所有可复现信息必须来自 release manifest、model manifest、models lock 和 env profile。
-
-## 回滚原则
-
-回滚优先切换 `current` 到上一个已验证 release，并保留 runtime 和 models 目录不动。回滚前后都要记录 deployment record，并用只读命令确认 health 和 smoke check。
-
-如果回滚涉及数据库 schema 或 runtime 数据变化，先停止在该环境继续写入新任务，并单独评估数据兼容性。不要在未确认 active indexing jobs 的情况下替换 runtime。
-
-## 共享服务器安全要求
-
-任何服务器状态变更前，先执行 docs/OPERATIONS.md 的只读检查，并确认没有 active indexing jobs。
-
-共享服务器只能操作明确归属 MomentSeek 的进程、容器、目录和端口。禁止 broad kill、禁止清理他人模型缓存、禁止重启不属于 MomentSeek 的服务。所有 staging/prod 操作都应先读 `docs/OPERATIONS.md`，再按 release manifest 执行。
+选好路线后，逐步执行 [Ascend 服务器部署说明](DEPLOYMENT_ASCEND.md)。模型目录规则见该说明的模型章节；部署验证记录只用于证明流程经过实测，不能作为配置模板。

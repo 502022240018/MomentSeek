@@ -1,4 +1,4 @@
-from app.indexing.asr_transcript_parser import parse_funasr_raw_transcript, raw_items_from_chunks
+from app.indexing.modalities.asr.asr_transcript_parser import parse_funasr_raw_transcript, raw_items_from_chunks
 
 
 def test_sensevoice_tags_become_chunk_metadata_not_retrieval_text():

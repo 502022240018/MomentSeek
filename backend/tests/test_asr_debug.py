@@ -1,7 +1,7 @@
 import json
 
-from app.indexing.asr_debug import write_asr_debug_artifacts
-from app.indexing.asr_pipeline_types import RawTranscriptItem, RetrievalChunk
+from app.indexing.modalities.asr.asr_debug import write_asr_debug_artifacts
+from app.indexing.modalities.asr.asr_pipeline_types import RawTranscriptItem, RetrievalChunk
 
 
 def test_debug_writer_does_not_create_directory_when_disabled(tmp_path):

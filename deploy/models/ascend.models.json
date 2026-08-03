@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "name": "ascend-production",
+  "allow_download": false,
+  "models": [
+    {
+      "name": "visual_siglip2_so400m_384",
+      "kind": "huggingface",
+      "id": "google/siglip2-so400m-patch14-384",
+      "target": "hf-cache",
+      "required": true
+    },
+    {
+      "name": "face_buffalo_l",
+      "kind": "directory",
+      "id": "buffalo_l",
+      "target": "insightface/models/buffalo_l",
+      "required": true
+    },
+    {
+      "name": "funasr_sensevoice_small",
+      "kind": "directory",
+      "id": "iic/SenseVoiceSmall",
+      "target": "funasr/models/iic--SenseVoiceSmall/snapshots/master",
+      "required": true
+    },
+    {
+      "name": "text_semantic_minilm",
+      "kind": "huggingface",
+      "id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+      "target": "text-embeddings",
+      "required": true
+    },
+    {
+      "name": "rapidocr_ppocrv6",
+      "kind": "directory",
+      "id": "PP-OCRv6",
+      "target": "rapidocr",
+      "required": true
+    },
+    {
+      "name": "rapidocr_ppocrv6_acl_om",
+      "kind": "directory",
+      "id": "PP-OCRv6-Ascend910B4",
+      "target": "rapidocr/ascend/910b4-cann9-profile",
+      "required": true
+    },
+    {
+      "name": "speaker_3dspeaker_source",
+      "kind": "source",
+      "id": "065629c313ea",
+      "target": "3D-Speaker",
+      "required": true
+    },
+    {
+      "name": "speaker_campplus_zh_en",
+      "kind": "directory",
+      "id": "iic/speech_campplus_sv_zh_en_16k-common_advanced@v1.0.0",
+      "target": "3dspeaker-cache/models/iic--speech_campplus_sv_zh_en_16k-common_advanced/snapshots/v1.0.0",
+      "required": true
+    },
+    {
+      "name": "speaker_fsmn_vad",
+      "kind": "directory",
+      "id": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch@v2.0.4",
+      "target": "3dspeaker-cache/models/iic--speech_fsmn_vad_zh-cn-16k-common-pytorch/snapshots/v2.0.4",
+      "required": true
+    }
+  ]
+}
+

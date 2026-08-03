@@ -1,7 +1,8 @@
 from fastapi.testclient import TestClient
 
-from app.db import Catalog
-from app.settings import Settings
+from app.catalog.db import Catalog
+from app.platform import context
+from app.core.settings import Settings
 
 
 def test_video_frame_bounds_timestamp_and_reuses_cached_jpeg(monkeypatch, tmp_path):
@@ -34,9 +35,9 @@ def test_video_frame_bounds_timestamp_and_reuses_cached_jpeg(monkeypatch, tmp_pa
         destination.write_bytes(b"jpeg")
         return destination
 
-    monkeypatch.setattr(main, "settings", settings)
-    monkeypatch.setattr(main, "catalog", catalog)
-    monkeypatch.setattr(main, "extract_video_frame", fake_extract)
+    monkeypatch.setattr(context, "settings", settings)
+    monkeypatch.setattr(context, "catalog", catalog)
+    monkeypatch.setattr(context, "extract_video_frame", fake_extract)
 
     with TestClient(main.app) as client:
         first = client.get("/api/videos/video-1/frame?time=99")

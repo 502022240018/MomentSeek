@@ -1,4 +1,4 @@
-from app.indexing.asr_pipeline_types import RawTranscriptItem, RetrievalChunk
+from app.indexing.modalities.asr.asr_pipeline_types import RawTranscriptItem, RetrievalChunk
 
 
 def test_raw_transcript_item_dict_roundtrip_uses_ms_fields():

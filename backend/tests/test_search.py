@@ -3,8 +3,8 @@ import json
 import numpy as np
 import pytest
 
-from app.db import Catalog
-from app.search import (
+from app.catalog.db import Catalog
+from app.retrieval.search import (
     Candidate,
     SearchEngine,
     SearchResult,
@@ -13,8 +13,8 @@ from app.search import (
     _visual_candidates,
     lexical_score,
 )
-from app.retrieval_metrics import RetrievalProfiler
-from app.settings import Settings
+from app.retrieval.retrieval_metrics import RetrievalProfiler
+from app.core.settings import Settings
 
 
 def _settings(tmp_path):
@@ -1029,18 +1029,18 @@ def test_shadow_compare_fires_without_milvus_read_routing(tmp_path):
     engine._clip = lambda model_key=None: StubClip()  # type: ignore[method-assign]
 
     with (
-        patch("app.indexing.milvus_flags.milvus_read_enabled", return_value=False),
-        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=False),
-        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
-        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch("app.vector_store.milvus.milvus_flags.milvus_read_enabled", return_value=False),
+        patch("app.vector_store.milvus.milvus_flags.should_use_milvus_for_video", return_value=False),
+        patch("app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
+        patch("app.vector_store.milvus.milvus_flags.milvus_fallback_enabled", return_value=True),
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
             engine,
             "_query_rows_for_videos",
             return_value={video_id: []},
         ),
-        patch("app.indexing.milvus_search.milvus_visual_candidates", return_value=[]),
-        patch("app.indexing.milvus_search.shadow_compare_log") as mock_shadow_log,
+        patch("app.vector_store.milvus.milvus_search.milvus_visual_candidates", return_value=[]),
+        patch("app.vector_store.milvus.milvus_search.shadow_compare_log") as mock_shadow_log,
     ):
         results = engine.search("football", None, ["visual"], [video_id])
 
@@ -1057,7 +1057,7 @@ def test_shadow_compare_fires_without_milvus_read_routing(tmp_path):
 def test_shadow_compare_milvus_error_silenced_in_shadow_only_mode(tmp_path):
     """A MilvusServiceError in shadow-only mode is swallowed; NPZ results are returned."""
     from unittest.mock import patch
-    from app.indexing.milvus_search import MilvusServiceError
+    from app.vector_store.milvus.milvus_search import MilvusServiceError
 
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
@@ -1071,17 +1071,17 @@ def test_shadow_compare_milvus_error_silenced_in_shadow_only_mode(tmp_path):
     engine._clip = lambda model_key=None: StubClip()  # type: ignore[method-assign]
 
     with (
-        patch("app.indexing.milvus_flags.milvus_read_enabled", return_value=False),
-        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=False),
-        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
-        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch("app.vector_store.milvus.milvus_flags.milvus_read_enabled", return_value=False),
+        patch("app.vector_store.milvus.milvus_flags.should_use_milvus_for_video", return_value=False),
+        patch("app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
+        patch("app.vector_store.milvus.milvus_flags.milvus_fallback_enabled", return_value=True),
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
             engine,
             "_query_rows_for_videos",
             return_value={video_id: []},
         ),
-        patch("app.indexing.milvus_search.milvus_visual_candidates",
+        patch("app.vector_store.milvus.milvus_search.milvus_visual_candidates",
               side_effect=MilvusServiceError("connection refused")),
     ):
         # Must not raise — shadow error is never surfaced to the caller
@@ -1117,11 +1117,11 @@ def test_milvus_batches_are_scored_before_next_batch_is_loaded(tmp_path):
 
     with (
         patch(
-            "app.indexing.milvus_flags.should_use_milvus_for_video",
+            "app.vector_store.milvus.milvus_flags.should_use_milvus_for_video",
             return_value=True,
         ),
         patch(
-            "app.indexing.milvus_flags.milvus_shadow_compare_enabled",
+            "app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled",
             return_value=False,
         ),
         patch.object(engine, "_prepare_query_vectors"),
@@ -1178,11 +1178,11 @@ def test_query_encoding_finishes_before_local_candidate_scoring(tmp_path):
 
     with (
         patch(
-            "app.indexing.milvus_flags.should_use_milvus_for_video",
+            "app.vector_store.milvus.milvus_flags.should_use_milvus_for_video",
             return_value=True,
         ),
         patch(
-            "app.indexing.milvus_flags.milvus_shadow_compare_enabled",
+            "app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled",
             return_value=False,
         ),
         patch.object(engine, "_get_milvus_client", return_value=object()),
@@ -1229,11 +1229,11 @@ def test_milvus_is_primary_and_npz_is_not_read_on_success(tmp_path):
 
     with (
         patch(
-            "app.indexing.milvus_flags.should_use_milvus_for_video",
+            "app.vector_store.milvus.milvus_flags.should_use_milvus_for_video",
             return_value=True,
         ),
         patch(
-            "app.indexing.milvus_flags.milvus_shadow_compare_enabled",
+            "app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled",
             return_value=False,
         ),
         patch.object(engine, "_prepare_query_vectors"),
@@ -1275,15 +1275,15 @@ def test_milvus_service_failure_falls_back_to_npz(tmp_path):
 
     with (
         patch(
-            "app.indexing.milvus_flags.should_use_milvus_for_video",
+            "app.vector_store.milvus.milvus_flags.should_use_milvus_for_video",
             return_value=True,
         ),
         patch(
-            "app.indexing.milvus_flags.milvus_shadow_compare_enabled",
+            "app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled",
             return_value=False,
         ),
         patch(
-            "app.indexing.milvus_flags.milvus_fallback_enabled",
+            "app.vector_store.milvus.milvus_flags.milvus_fallback_enabled",
             return_value=True,
         ),
         patch.object(engine, "_prepare_query_vectors"),
@@ -1325,15 +1325,15 @@ def test_milvus_service_failure_is_not_retried_for_every_video(tmp_path):
 
     with (
         patch(
-            "app.indexing.milvus_flags.should_use_milvus_for_video",
+            "app.vector_store.milvus.milvus_flags.should_use_milvus_for_video",
             return_value=True,
         ),
         patch(
-            "app.indexing.milvus_flags.milvus_shadow_compare_enabled",
+            "app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled",
             return_value=False,
         ),
         patch(
-            "app.indexing.milvus_flags.milvus_fallback_enabled",
+            "app.vector_store.milvus.milvus_flags.milvus_fallback_enabled",
             return_value=True,
         ),
         patch.object(engine, "_prepare_query_vectors"),
@@ -1376,9 +1376,9 @@ def test_milvus_empty_channel_falls_back_to_npz(tmp_path):
     )
 
     with (
-        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=True),
-        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
-        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch("app.vector_store.milvus.milvus_flags.should_use_milvus_for_video", return_value=True),
+        patch("app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
+        patch("app.vector_store.milvus.milvus_flags.milvus_fallback_enabled", return_value=True),
         patch.object(engine, "_prepare_query_vectors"),
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
@@ -1414,9 +1414,9 @@ def test_milvus_partial_coverage_only_recovers_missing_channel(tmp_path):
     npz_asr = Candidate(video_id, 6.0, 9.0, 0.7, "asr")
 
     with (
-        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=True),
-        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
-        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch("app.vector_store.milvus.milvus_flags.should_use_milvus_for_video", return_value=True),
+        patch("app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
+        patch("app.vector_store.milvus.milvus_flags.milvus_fallback_enabled", return_value=True),
         patch.object(engine, "_prepare_query_vectors"),
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
@@ -1472,9 +1472,9 @@ def test_visual_ann_does_not_bulk_fetch_rows(tmp_path):
         return {video_id: []}
 
     with (
-        patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=True),
-        patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
-        patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=False),
+        patch("app.vector_store.milvus.milvus_flags.should_use_milvus_for_video", return_value=True),
+        patch("app.vector_store.milvus.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
+        patch("app.vector_store.milvus.milvus_flags.milvus_fallback_enabled", return_value=False),
         patch.object(engine, "_prepare_query_vectors"),
         patch.object(engine, "_get_milvus_client", return_value=MagicMock()),
         patch.object(engine, "_query_rows_for_videos", side_effect=spy_query_rows),

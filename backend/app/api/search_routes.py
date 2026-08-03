@@ -5,7 +5,8 @@ import uuid
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
-from app.retrieval_orchestration import OrchestrationError
+from app.orchestration.retrieval_orchestration import OrchestrationError
+from app.platform import context
 
 
 router = APIRouter()
@@ -13,9 +14,8 @@ router = APIRouter()
 
 @router.get("/api/orchestration/profiles")
 def orchestration_profiles() -> dict:
-    from app import main as runtime
 
-    return runtime.search_orchestrator.profiles()
+    return context.search_orchestrator.profiles()
 
 
 @router.post("/api/search")
@@ -30,7 +30,6 @@ async def search(
     planner_mode: str = Form(default="auto"),
     reranker_mode: str = Form(default="auto"),
 ) -> dict:
-    from app import main as runtime
 
     selected_modalities = [item.strip() for item in modalities.split(",") if item.strip()]
     if not query_text and not query_image:
@@ -43,14 +42,14 @@ async def search(
         raise HTTPException(status_code=422, detail="reranker_mode 必须是 auto、off 或 force")
     image_path = None
     if query_image and query_image.filename:
-        image_path = runtime.settings.query_dir / (
-            f"{uuid.uuid4().hex}{runtime._safe_suffix(query_image.filename, '.jpg')}"
+        image_path = context.settings.query_dir / (
+            f"{uuid.uuid4().hex}{context._safe_suffix(query_image.filename, '.jpg')}"
         )
-        await run_in_threadpool(runtime._save_upload, query_image, image_path)
+        await run_in_threadpool(context._save_upload, query_image, image_path)
     try:
         started = time.perf_counter()
         outcome = await run_in_threadpool(
-            runtime.search_orchestrator.search,
+            context.search_orchestrator.search,
             query_text.strip() if query_text else None,
             str(image_path) if image_path else None,
             selected_modalities,

@@ -1,4 +1,4 @@
-from app.indexing.asr_text import (
+from app.indexing.modalities.asr.asr_text import (
     asr_text_profile,
     normalize_asr_text,
     normalize_search_text,

@@ -1,171 +1,202 @@
-# MomentSeek 架构
+# MomentSeek 平台架构
 
-## 总览
+> 本文是平台交付仓的权威架构文档，对应 `backend/app` 重构后的新目录结构。
+> 接口明细以运行实例的 `/docs`（OpenAPI）为准；部署流程见
+> [DEPLOYMENT_ASCEND.md](DEPLOYMENT_ASCEND.md)。
 
-MomentSeek 是一个单机文件索引的视频检索 MVP：
+## 1. 一句话定位
 
-```text
-React/Vite 前端
-  -> FastAPI 后端
-  -> SQLite catalog
-  -> runtime 文件资产和索引
-  -> 模型索引/检索 pipeline
-```
+MomentSeek 是面向私有视频素材的多通道视频片段检索平台：视频上传后按
+**visual / face / asr / speaker / ocr** 五条通道建立索引，用户用文字、图片或
+声音查询，平台返回可播放的连续时间片段及证据。
 
-主要 runtime 结构：
+## 2. 系统拓扑
 
 ```text
-runtime/
-  catalog.sqlite3
-  uploads/
-  indexes/{video_id}/
-  frame_cache/{video_id}/
-  clips/{video_id}/
+┌──────────────┐   HTTP    ┌─────────────────────────────┐
+│ React 前端    │ ────────► │ FastAPI 后端 (app.main)      │
+│ frontend/     │           │  api/ 路由层                 │
+└──────────────┘           └──────┬──────────────────────┘
+                                  │
+        ┌─────────────────────────┼──────────────────────────┐
+        ▼                         ▼                          ▼
+┌───────────────┐        ┌────────────────┐         ┌────────────────┐
+│ SQLite catalog │        │ runtime/ 文件区 │         │ Milvus 向量库   │
+│ (视频/任务/    │        │ uploads 索引NPZ │         │ (etcd + MinIO)  │
+│  人物/声纹)    │        │ 帧缓存 clip缓存 │         │ 五通道 collection│
+└───────────────┘        └────────────────┘         └────────────────┘
+                                  ▲
+                     索引阶段子进程（用完即退，释放 NPU）
+                     visual → face → asr → speaker → ocr
 ```
 
-缩略图不再随索引预存。检索命中后按最佳命中帧时间戳实时抽帧（`GET /api/videos/{id}/frame?time=`，单位为秒），结果缓存到 `frame_cache/{video_id}/{timestamp_ms}.jpg`，避免 `thumbnails/` 随视频量线性膨胀。
+关键设计：**API 常驻进程不占 NPU**。每个索引阶段运行在独立子进程中，阶段结束
+进程退出并释放显存；在线查询编码默认走 CPU，空闲时 NPU 占用为零。可选的
+daemon 模式（`INDEXER_MODE=daemon`）用常驻 warm-pool 换取免模型重载。
 
-当前 MVP 把索引保存在本地 `index_manifest.json` 和通道 `.npz` 文件中。后续如果扩展到多机或百万级片段，可以在保持 API 概念不变的前提下，把存储层替换为 pgvector、Milvus、Qdrant 等系统。
-
-## 数据流
+## 3. 仓库目录
 
 ```text
-上传视频
-  -> 写入 SQLite videos
-  -> 保存源视频到 runtime/uploads
-  -> 选择 visual / face / asr / ocr 中的一条或多条通道
-  -> 创建选择性构建或重建任务
-  -> worker / stage_runner 构建所选通道索引
-  -> search 加载索引并返回时间段、证据、缩略图、媒体和 clip URL
+├─ backend/
+│  ├─ app/                  后端平台代码（见第 4 节）
+│  ├─ requirements/         依赖锁：ascend.txt / ci.txt / dev.txt 等
+│  └─ tests/                单元测试；tests/integration 为 Milvus 集成测试
+├─ frontend/                React + TypeScript Web 前端
+├─ compose/                 compose.yml / compose.ascend.yml / compose.milvus.yml
+├─ docker/                  Dockerfile.ascend（应用镜像）
+├─ deploy/
+│  ├─ env/                  环境参数模板
+│  ├─ models/               必需模型清单（ascend.models.json）
+│  └─ orchestration/        可选 LLM 规划/重排的 provider 与 prompt 配置
+├─ scripts/                 preflight.py / verify_models.py / smoke_check.py
+├─ vendor-wheels/           Ascend ARM64 离线固定 wheels
+└─ docs/                    平台文档（本文、部署、镜像制作、验证）
 ```
 
-索引任务只覆盖本次选择通道对应的 `.npz` 和 manifest channel；同一视频未选择的既有通道继续保留。因而同一个任务可以同时“构建缺失通道”和“重建已有通道”，但同一视频不能并发运行多个索引任务。
-
-索引通道：
+## 4. backend/app 模块分层
 
 ```text
-visual -> 抽帧 -> SigLIP2/CLIP embeddings -> visual.npz
-face   -> 抽帧 -> InsightFace/ArcFace tracks -> face.npz
-asr    -> 音频 -> Whisper/FunASR chunks + 可选文本语义向量 -> asr.npz
-ocr    -> 抽帧 -> RapidOCR boxes + 可选文本语义向量 -> ocr.npz
+backend/app/
+├─ main.py                  FastAPI 组装入口：建 app、挂路由、生命周期管理
+├─ api/                     API 接口层：路由 + 请求/响应模型(schemas.py)
+│     system / video / job / entity / search / speaker / color_grading
+├─ core/                    全局基础能力（叶子层，不依赖任何上层）
+│     settings.py           全部环境配置（pydantic-settings，.env 驱动）
+│     deployment.py         release/部署元信息（/api/health 返回）
+│     model_pool.py         通用模型池（warm-pool 复用）
+│     model_sources.py      模型来源与本地缓存守卫（禁止运行时隐式下载）
+├─ catalog/                 资产元数据层
+│     db.py                 SQLite：videos / jobs / entities / speakers / 仿色任务
+├─ media/                   媒体处理层（ffmpeg 封装）
+│     media.py              探测、抽帧、抽音频、缩略图、预览 clip
+├─ indexing/                索引生产层（离线）
+│     stage_executor.py     单阶段执行入口：锁 → 建索引 → 写 Milvus → 写 manifest
+│     common / manifest / pipeline_manifest / text_semantic
+│     └─ modalities/        每条检索通道一个子包（通道名与 API modalities 一致）
+│         visual/  face/  asr/  ocr/  speaker/
+├─ retrieval/               在线检索层
+│     search.py             SearchEngine：五通道召回、阈值判定、时间段融合
+│     retrieval_metrics.py  检索性能剖析（RetrievalProfiler）
+├─ orchestration/           检索编排层（在 retrieval 之上）
+│     retrieval_orchestration.py  LLM planner/reranker（OpenAI 兼容 provider）
+├─ vector_store/            向量存储层（纯基础设施）
+│     └─ milvus/            client / schema / indexer / search / flags / 锁 / 版本
+├─ execution/               后台执行层
+│     worker.py             每任务子进程编排（subprocess 模式）
+│     stage_runner.py       阶段子进程 CLI 入口（python -m app.execution.stage_runner）
+│     indexer_daemon.py     daemon 模式的常驻队列消费者
+│     isolated_stage_workers.py  daemon 模式下按阶段隔离的常驻 worker 池
+├─ identity/                实体身份层
+│     speaker_service.py    说话人视图、声纹检索（voice search）
+├─ integrations/            外部系统集成
+│     color_grading.py      视频仿色服务（独立容器，经 APP_DATA_DIR 交换文件）
+├─ maintenance/             离线维护任务
+│     speaker_backfill.py   speaker 索引补建
+├─ platform/                预留：运行时上下文（见 README，含 context 化改造计划）
+├─ observability/           预留：日志/指标/追踪（见 README）
+└─ evaluation/              预留：随平台发布的质量回归（见 README）
 ```
 
-搜索时，可选 Planner 先根据 query、可用索引和 profile 选择通道与召回参数；各通道再独立产生
-candidates，按时间重叠或邻近关系合并。可选 Reranker 对第一阶段 Top-N 做文本或多图精排，
-最后返回可播放片段。Planner/Reranker 均通过独立 provider 配置，不要求使用同一个模型。
-通道索引协议和数组 schema 见 `docs/RETRIEVAL_CHANNELS.md`。
-编排 profile、trace 和模型替换协议见 `docs/QUERY_ORCHESTRATION.md`。
-
-## 模型生命周期
-
-生产 Ascend 部署使用一个串行调度 daemon，但每种加速运行时放在独立的常驻子进程：
+### 分层依赖规则（已按代码实测核验）
 
 ```text
-indexer daemon（只调度，不创建 NPU context）
-  -> visual worker：torch_npu / SigLIP2
-  -> face worker：ONNX Runtime CANN / InsightFace
-  -> asr worker：FunASR
-  -> ocr worker：ACL / PP-OCRv6 OM
+api ──► main（运行时单例）
+main ──► retrieval / orchestration / identity / integrations / catalog / core / media / execution
+orchestration ──► retrieval / media / catalog / core
+retrieval ──► catalog / core / indexing(共用编码器) / vector_store
+execution ──► indexing.stage_executor / core / catalog
+indexing ──► modalities / vector_store / core / media
+identity ──► catalog / modalities.speaker / vector_store
+vector_store ──► core.settings（叶子层）
+core / catalog / media ──► 不依赖上层（叶子层）
 ```
 
-同一通道的模型和 NPU context 可跨任务复用，不同通道不会在一个进程里混用 Torch-NPU、ORT CANN 和原生 ACL。这样保留热启动收益，同时避免运行时切换后出现 `107003 stream is not in current context`。任何加速器异常都会销毁该通道进程；仅上下文错误或进程意外退出允许在全新进程中重试一次。
+约定：**下层永远不 import 上层**；同层之间除标注的共用外不互相依赖。
 
-相关实现：
+## 5. 数据流
+
+### 索引（写路径）
 
 ```text
-backend/app/model_pool.py
-backend/app/indexer_daemon.py
-backend/app/isolated_stage_workers.py
+POST /api/videos 上传
+  → catalog 记录 + runtime/uploads 存原片
+POST /api/videos/{id}/index  (modalities 子集，可增量/重建)
+  → catalog 创建 job
+  → execution.worker（或 daemon）逐阶段派发子进程
+  → indexing.stage_executor：
+       media 解码抽帧/抽音频
+       modalities/<通道> 编码
+       vector_store.milvus 直写（P2 内存路径）+ NPZ 落盘
+       pipeline_manifest 写通道 manifest
+  → 阶段进程退出，释放 NPU
 ```
 
-开发和回退环境仍可使用 `NPU_WORKER_MODE=legacy`；生产必须使用 `INDEXER_MODE=daemon`、`NPU_WORKER_MODE=isolated`。检索 API 在独立的 Uvicorn 进程中，索引任务仍全局串行，避免同一 NPU 上多个重型阶段争抢资源。
-
-## 后端模块
-
-| 路径 | 职责 |
-|---|---|
-| `backend/app/main.py` | FastAPI app、API 路由、静态前端挂载 |
-| `backend/app/schemas.py` | 请求/响应校验模型 |
-| `backend/app/db.py` | SQLite catalog，管理 videos / jobs / entities |
-| `backend/app/worker.py` | 索引任务编排和 worker lock |
-| `backend/app/stage_runner.py` | 各通道索引子进程入口 |
-| `backend/app/search.py` | visual / face / ASR / OCR 召回和结果融合 |
-| `backend/app/retrieval_orchestration.py` | Planner、可插拔模型 provider、VLM 精排和 execution trace |
-| `backend/app/media.py` | 视频探测、抽帧、抽音频、缩略图、clip |
-| `backend/app/indexing/manifest.py` | v3 index manifest 读写和版本校验 |
-| `backend/app/indexing/pipeline_manifest.py` | 将索引阶段结果写入通道 manifest |
-| `backend/app/indexing/visual.py` | visual encoder 和 visual 索引构建 |
-| `backend/app/indexing/faces.py` | face encoder 和人脸 track 索引构建 |
-| `backend/app/indexing/asr.py` | Whisper / FunASR / 字幕 ASR 索引构建 |
-| `backend/app/indexing/ocr.py` | RapidOCR 索引构建 |
-| `backend/app/indexing/text_semantic.py` | ASR/OCR semantic text embedding |
-
-## 前端模块
-
-| 路径 | 职责 |
-|---|---|
-| `frontend/src/main.tsx` | 上传、建索引、搜索、播放、素材管理等主 UI |
-| `frontend/src/indexing.tsx` | 索引通道选择、分通道参数、构建/重建动作判定 |
-| `frontend/src/api.ts` | 前端 API client 和 TypeScript 类型 |
-| `frontend/src/styles.css` | 样式 |
-
-`main.tsx` 当前较大，后续应按 upload/indexing、search、assets、player、shared controls 等职责拆分。该事项记录在 `docs/ISSUES_AND_ROADMAP.md`。
-
-## 部署元信息
-
-`/api/health` 除健康和设备状态外，也返回部署元信息，便于确认当前服务是否与 release manifest 一致。关键字段包括：
+### 检索（读路径）
 
 ```text
-env_profile
-release_id
-git_commit
-image_tag
-model_manifest
+POST /api/search (文字/图片, modalities, 可选 orchestration profile)
+  → orchestration：可选 LLM planner 决定通道与参数（失败自动回退默认计划）
+  → retrieval.SearchEngine：
+       编码查询（CPU）→ 各通道独立召回（Milvus 优先，NPZ 兜底）
+       → 阈值/证据判定 → 按时间邻近融合成片段
+  → 可选 LLM reranker 重排
+  → 返回 start/end、置信度、证据、缩略图/clip URL（实时抽帧，磁盘缓存）
 ```
 
-staging/prod 验证时应把这些字段与 `docs/DEPLOYMENT.md` 中的 release manifest 和 deployment record 对齐。
-
-## API Surface
-
-运行中的 FastAPI 后端可通过 `/docs` 和 `/openapi.json` 查看自动文档。本表维护“接口到代码/前端调用”的人工索引。
-
-| Method | Path | 后端函数 | 功能 | 前端调用 | 相关模块 |
-|---|---|---|---|---|---|
-| `GET` | `/api/health` | `main.py::health` | 健康检查、设备状态和部署元信息 | smoke check | `settings.py`, `schemas.py`, `deployment.py` |
-| `POST` | `/api/videos` | `main.py::upload_video` | 上传视频和可选字幕 | `api.ts::uploadVideo` | `media.py`, `db.py`, `runtime/uploads` |
-| `GET` | `/api/videos` | `main.py::list_videos` | 视频列表 | `api.ts::videos` | `db.py` |
-| `GET` | `/api/videos/{video_id}` | `main.py::get_video` | 视频详情和任务 | 详情/轮询流程 | `db.py` |
-| `PATCH` | `/api/videos/{video_id}` | `main.py::rename_video` | 重命名视频 | `api.ts::renameVideo` | `schemas.py`, `db.py` |
-| `DELETE` | `/api/videos/{video_id}` | `main.py::delete_video` | 删除视频、索引、缩略图、任务 | `api.ts::deleteVideo` | `db.py`, runtime 清理 |
-| `GET` | `/api/videos/{video_id}/media` | `main.py::video_media` | 原视频流式播放 | 播放器/结果卡 | `runtime/uploads` |
-| `GET` | `/api/videos/{video_id}/clip` | `main.py::video_clip` | 生成/返回命中时间段 clip | 播放器/结果卡 | `media.py`, `runtime/clips` |
-| `POST` | `/api/videos/{video_id}/index` | `main.py::create_index_job` | 为指定非空 `modalities` 集合创建选择性构建/重建任务，保留未选择的既有通道 | `api.ts::indexVideo` | `schemas.py`, `db.py`, `worker.py` |
-| `GET` | `/api/jobs` | `main.py::list_jobs` | 任务列表，可按 video 过滤 | `api.ts::jobs` | `db.py` |
-| `GET` | `/api/jobs/{job_id}` | `main.py::get_job` | 任务详情、失败信息、日志上下文 | UI 轮询/详情 | `db.py` |
-| `POST` | `/api/entities` | `main.py::create_entity` | 登记人物参考图 | `api.ts::createEntity` | `faces.py`, `db.py`, `runtime/entities` |
-| `GET` | `/api/entities` | `main.py::list_entities` | 人物库列表 | `api.ts::entities` | `db.py` |
-| `GET` | `/api/entities/{entity_id}/reference` | `main.py::entity_reference` | 返回人物参考图 | entity UI | `runtime/entities` |
-| `POST` | `/api/search` | `main.py::search` | 多模态搜索 | `api.ts::search` | `search.py`, indexes, frame cache/clips |
-| `GET` | `/api/orchestration/profiles` | `main.py::orchestration_profiles` | 返回可用 Planner/Reranker 实验 profile（不暴露 endpoint/key） | Search Builder | `retrieval_orchestration.py` |
-| `GET` | `/api/videos/{video_id}/frame` | `main.py::video_frame` | 按秒级时间戳实时抽帧作缩略图（磁盘+HTTP 缓存） | 结果卡 `<img>` | `media.py::extract_video_frame`, `runtime/frame_cache` |
-| `GET` | `/` | `main.py::root` | 返回前端入口 | 浏览器 | frontend build |
-| `GET` | `/{path:path}` | `main.py::frontend` | 返回前端路由/静态资源 | 浏览器 | frontend build |
-
-## 请求模型
-
-重要请求模型在 `backend/app/schemas.py`：
-
-- `IndexRequest`：`modalities` 必须是 `visual / face / asr / ocr` 的非空子集；其余字段是各通道参数。重复通道会去重，任务按请求中的通道顺序执行。
-- `VideoRenameRequest`：校验视频名称。
-- `HealthResponse`：health 响应结构。
-
-搜索接口 `main.py::search` 使用 `multipart/form-data`，字段包括：
+## 6. 存储布局
 
 ```text
-query_text
-query_image
-modalities
-video_ids
-alpha
-limit
+runtime/                     （容器内 APP_DATA_DIR，不进 Git）
+  catalog.sqlite3            视频/任务/人物/声纹/仿色任务
+  uploads/                   原始视频与字幕 sidecar
+  indexes/{video_id}/        各通道 NPZ + index manifest（Milvus 的恢复兜底）
+  frame_cache/  clips/       检索命中的实时抽帧与预览片段缓存
+models/ → 容器内 /app/models  模型权重（部署前预缓存，运行时禁止下载）
+Milvus                       五通道向量 collection（模型版本参与主键/schema）
 ```
+
+## 7. API Surface（按路由模块）
+
+| 路由模块 | 前缀/代表接口 | 职责 |
+|---|---|---|
+| `system_routes` | `GET /api/health` | 健康、设备状态、部署元信息 |
+| `video_routes` | `POST/GET /api/videos*`、`/media`、`/clip`、`/frame`、`POST .../index` | 视频资产、播放、抽帧、索引任务创建 |
+| `job_routes` | `GET /api/jobs*`、`POST .../cancel` | 索引任务查询与取消 |
+| `entity_routes` | `/api/entities*`（含 voice-samples） | 人物库：参考脸、声纹样本 |
+| `search_routes` | `POST /api/search`、`GET /api/orchestration/profiles` | 多模态检索与编排配置 |
+| `speaker_routes` | `/api/videos/{id}/speakers*`、`POST /api/voice-search*` | 说话人视图、声音检索 |
+| `color_grading_routes` | `/api/color-grading/*` | 视频仿色任务（可选能力） |
+
+## 8. 扩展指南
+
+### 新增一条检索通道（如新 embedding 模型通道）
+
+1. `indexing/modalities/<name>/` 新建子包，实现 `build_<name>_index`（参照 visual）；
+2. `indexing/stage_executor.py` 注册 `_run_<name>` 阶段；`execution/stage_runner.py` 的
+   stage choices 加入通道名；
+3. `vector_store/milvus/milvus_schema.py` 定义 collection schema 与主键，
+   `milvus_indexer.py` 加对应 indexer；
+4. `retrieval/search.py` 增加 `_<name>_candidates` 召回与融合权重；
+5. `api/schemas.py` 的 modalities 校验、前端 `indexing.tsx` 通道选择同步扩展。
+
+### 新增一个功能模块（如仿色这类外挂能力）
+
+1. 服务逻辑放 `integrations/<name>.py`（外部系统）或独立顶层包（平台内能力）；
+2. 路由放 `api/<name>_routes.py`，在 `main.py` 的路由列表注册；
+3. 配置项进 `core/settings.py`（带 `<name>_enabled` 开关，默认关闭不影响主链路）；
+4. 前端独立页面组件（参照 `ColorGradingPage.tsx`）。
+
+## 9. 技术债登记（既定优化方向）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 运行时单例 context 化 | ✅ 已完成（2026-07-31） | `platform/context.py` 承载单例与共享辅助，路由顶部直接 import；main 只做组装 |
+| 共享编码器抽层 | ✅ 已完成（2026-07-31） | `app/encoders/{visual,face,text}.py`；retrieval 与 indexing 共同依赖，互不伸手 |
+| 拆分 `retrieval/search.py` | 待办 | 单文件约 77KB，五通道召回+融合混在一处；按通道拆分并抽出 Candidate/SearchResult 类型 |
+| 拆分前端 `main.tsx` | 待办 | 单文件约 34KB；按 upload/search/assets/player 拆组件 |
+| face 等通道升级 P2 直写 | 待办 | visual 已走 `write_modality_from_memory` 内存直写，face/asr/ocr/speaker 仍是"先 NPZ 再入 Milvus"的旧路径 |
+
+以上均为结构优化，不改变行为；每项单独改造、单独回归验证。
+
+注：`app/encoders/` 落地后，第 4 节目录树中 retrieval 对 indexing 的
+"共用编码器"依赖已不存在——两层都依赖 `encoders/`。

@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from app.indexing.visual import _hf_cached_snapshot_path, _resolve_openclip_pretrained, resolve_device
+from app.encoders.visual import _hf_cached_snapshot_path, _resolve_openclip_pretrained, resolve_device
 
 
 def test_hf_cached_snapshot_path_accepts_root_cache_layout(tmp_path):

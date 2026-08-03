@@ -8,13 +8,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.indexing.milvus_client import _COLLECTION_FOR_MODALITY
-from app.indexing.milvus_search import (
+from app.vector_store.milvus.milvus_client import _COLLECTION_FOR_MODALITY
+from app.vector_store.milvus.milvus_search import (
     _MODALITY_INDEX_TYPE,
     _MODALITY_METRIC,
     milvus_face_candidates,
 )
-from app.indexing.milvus_search_visual_v2 import _aggregate_by_segment
+from app.vector_store.milvus.milvus_search_visual_v2 import _aggregate_by_segment
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ def test_modality_metric_covers_all_modalities():
 
 def test_modality_index_type_covers_all_modalities():
     """Every modality known to the client has an entry accessible via get_modality_index_type()."""
-    from app.indexing.milvus_search import get_modality_index_type
+    from app.vector_store.milvus.milvus_search import get_modality_index_type
 
     # Verify all modalities can be queried
     for modality in _COLLECTION_FOR_MODALITY:
@@ -40,7 +40,7 @@ def test_modality_index_type_covers_all_modalities():
 
 def test_modality_metric_matches_collection_configs():
     """_MODALITY_METRIC must be in sync with _COLLECTION_CONFIGS (the index definition)."""
-    from app.indexing.milvus_client import get_collection_index_config
+    from app.vector_store.milvus.milvus_client import get_collection_index_config
 
     for modality, collection_name in _COLLECTION_FOR_MODALITY.items():
         # Get index config dynamically for visual, statically for others
@@ -55,8 +55,8 @@ def test_modality_metric_matches_collection_configs():
 
 def test_modality_index_type_matches_collection_configs():
     """get_modality_index_type() must return values matching collection configs."""
-    from app.indexing.milvus_search import get_modality_index_type
-    from app.indexing.milvus_client import get_collection_index_config
+    from app.vector_store.milvus.milvus_search import get_modality_index_type
+    from app.vector_store.milvus.milvus_client import get_collection_index_config
 
     for modality, collection_name in _COLLECTION_FOR_MODALITY.items():
         # Get index config dynamically
