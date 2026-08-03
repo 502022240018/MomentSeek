@@ -58,10 +58,10 @@ _STATIC_INDEX_CONFIGS: dict[str, dict] = {
         "metric_type": "IP",
         "params": {"M": 16, "efConstruction": 200},
     },
-    "ocr": {
+    "ocr_embeddings": {
         "index_type": "DISKANN",
         "metric_type": "IP",
-        "params": {"search_list": 200},
+        "params": {"max_degree": 56, "search_list_size": 128},
     },
     "face_embeddings": {
         "index_type": "IVF_FLAT",
