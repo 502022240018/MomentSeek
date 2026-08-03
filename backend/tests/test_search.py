@@ -8,6 +8,7 @@ from app.retrieval.search import (
     Candidate,
     SearchEngine,
     SearchResult,
+    _fuse_candidate_groups,
     _groups,
     _reserve_asr_lexical_results,
     _visual_candidates,
@@ -119,6 +120,48 @@ def test_asr_lexical_pool_preserves_primary_top3_and_reserves_next_slot():
         "lexical-reserved",
     ]
     assert reranked.index(primary[3]) < reranked.index(primary[4])
+
+
+def test_visual_priority_orders_visual_evidence_before_auxiliary_candidates():
+    candidates = [
+        Candidate("video-1", 0, 1, 0.70, "visual"),
+        Candidate("video-1", 10, 11, 0.99, "asr"),
+    ]
+    videos = [{"id": "video-1", "name": "video.mp4"}]
+
+    default_results = _fuse_candidate_groups(
+        candidates, videos, merge_gap=0, max_result_seconds=5
+    )
+    priority_results = _fuse_candidate_groups(
+        candidates,
+        videos,
+        merge_gap=0,
+        max_result_seconds=5,
+        primary_modality="visual",
+    )
+
+    assert default_results[0].modalities == ["asr"]
+    assert priority_results[0].modalities == ["visual"]
+    assert priority_results[1].modalities == ["asr"]
+
+
+def test_visual_priority_does_not_cross_threshold_tiers():
+    candidates = [
+        Candidate("video-1", 0, 1, 0.95, "visual", above_threshold=False),
+        Candidate("video-1", 10, 11, 0.40, "ocr", above_threshold=True),
+        Candidate("video-1", 20, 21, 0.90, "face", above_threshold=False),
+    ]
+    videos = [{"id": "video-1", "name": "video.mp4"}]
+
+    results = _fuse_candidate_groups(
+        candidates,
+        videos,
+        merge_gap=0,
+        max_result_seconds=5,
+        primary_modality="visual",
+    )
+
+    assert [item.modalities for item in results] == [["ocr"], ["visual"], ["face"]]
 
 
 def test_search_rejects_legacy_index_without_v3_manifest(tmp_path):

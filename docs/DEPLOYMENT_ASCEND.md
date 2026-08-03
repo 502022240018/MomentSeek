@@ -90,6 +90,28 @@ MILVUS_PORT=19530
 `127.0.0.1` 连接它。应由管理员提供容器可达地址，或把 Milvus 加入同一
 Docker 网络。
 
+### Visual ANN 与视觉结果优先级
+
+`.env` 中的下列值决定视觉通道查询行为：
+
+```dotenv
+VISUAL_USE_DISKANN=true
+VISUAL_ANN_TOP_K=500
+VISUAL_ANN_SEGMENT_TOP_N=3
+SEARCH_VISUAL_PRIORITY_ENABLED=true
+```
+
+`VISUAL_USE_DISKANN` 必须与现有 visual collection 的实际索引类型一致：
+DiskANN 使用 `true`，HNSW 使用 `false`。改变此值不会迁移已有索引；必须先
+在维护窗口重建 collection，再更新配置并启动应用。`VISUAL_ANN_TOP_K` 为每个
+子查询的 ANN 召回数量，`VISUAL_ANN_SEGMENT_TOP_N` 为一个时间段参与聚合的帧数；
+两者必须是正整数。
+
+默认开启 `SEARCH_VISUAL_PRIORITY_ENABLED`：当一次检索明确包含 `visual` 通道时，
+先按“是否超过阈值”分层，再在同一层内将含视觉证据的结果排在纯 Face、ASR 或 OCR
+证据之前。它不会让低于阈值的视觉结果越过高于阈值的辅助通道结果。设为 `false`
+可恢复为纯综合分数排序。
+
 ## 5. 自动预检
 
 ```bash

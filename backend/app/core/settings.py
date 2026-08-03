@@ -140,6 +140,9 @@ class Settings(BaseSettings):
     # so the first user request sees warm latency.
     search_prewarm_enabled: bool = False
     search_prewarm_required: bool = False
+    # When a query explicitly includes visual retrieval, keep visual-backed
+    # evidence ahead of auxiliary-only candidates within each threshold tier.
+    search_visual_priority_enabled: bool = True
 
     # Milvus is the primary vector store. SQLite remains the metadata/catalog
     # database and NPZ files are retained as a local recovery/search fallback.

@@ -1041,10 +1041,18 @@ def _fuse_candidate_groups(
     videos: list[dict],
     merge_gap: float,
     max_result_seconds: float,
+    primary_modality: str | None = None,
 ) -> list[SearchResult]:
+    """Fuse overlapping candidates and optionally prefer one requested modality.
+
+    Threshold status remains the primary ordering boundary. Within one tier,
+    results containing ``primary_modality`` are ordered before auxiliary-only
+    candidates; the modality's own score resolves ties among those results.
+    """
     names = {video["id"]: video["name"] for video in videos}
     weights = {"face": 0.55, "visual": 0.30, "ocr": 0.20, "asr": 0.15}
-    results = []
+    results: list[SearchResult] = []
+    primary_scores: dict[int, float] = {}
     for group in _groups(candidates, merge_gap, max_result_seconds):
         best_by_modality = {}
         for item in group:
@@ -1071,7 +1079,7 @@ def _fuse_candidate_groups(
         )
         start_time = min(item.start_time for item in group)
         end_time = max(item.end_time for item in group)
-        results.append(SearchResult(
+        result = SearchResult(
             video_id=video_id,
             video_name=names.get(video_id, video_id),
             start_time=start_time,
@@ -1084,8 +1092,23 @@ def _fuse_candidate_groups(
             decision=decision,
             above_threshold=any(item.above_threshold for item in group),
             evidence=[_serialize_evidence(item) for item in group],
-        ))
-    results.sort(key=lambda item: (item.above_threshold, item.score), reverse=True)
+        )
+        results.append(result)
+        if primary_modality in best_by_modality:
+            primary_scores[id(result)] = best_by_modality[primary_modality]
+
+    if primary_modality is None:
+        results.sort(key=lambda item: (item.above_threshold, item.score), reverse=True)
+    else:
+        results.sort(
+            key=lambda item: (
+                item.above_threshold,
+                primary_modality in item.modalities,
+                primary_scores.get(id(item), item.score),
+                item.score,
+            ),
+            reverse=True,
+        )
     return results
 
 
@@ -1963,7 +1986,16 @@ class SearchEngine:
         )
         with fusion_span:
             results = _fuse_candidate_groups(
-                candidates, videos, merge_gap, max_result_seconds
+                candidates,
+                videos,
+                merge_gap,
+                max_result_seconds,
+                primary_modality=(
+                    "visual"
+                    if self.settings.search_visual_priority_enabled
+                    and "visual" in modalities
+                    else None
+                ),
             )
             if set(modalities) == {"asr"} and text:
                 results = _reserve_asr_lexical_results(results, limit)

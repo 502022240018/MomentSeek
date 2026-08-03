@@ -46,6 +46,11 @@ def test_milvus_search_video_batch_size_must_be_positive():
         Settings(_env_file=None, milvus_search_video_batch_size=0)
 
 
+def test_visual_priority_is_enabled_by_default_and_can_be_disabled():
+    assert Settings(_env_file=None).search_visual_priority_enabled is True
+    assert Settings(_env_file=None, search_visual_priority_enabled=False).search_visual_priority_enabled is False
+
+
 @pytest.mark.parametrize(
     "field",
     ("visual_ann_top_k", "visual_ann_segment_top_n"),
