@@ -6,7 +6,12 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from app.api.schemas import SpeakerUpdateRequest, UtteranceUpdateRequest, VoiceSearchRequest
-from app.identity.speaker_service import video_speakers, voice_search, voice_search_vectors
+from app.identity.speaker_service import (
+    SpeakerMilvusCoverageError,
+    video_speakers,
+    voice_search,
+    voice_search_vectors,
+)
 from app.platform import context
 
 
@@ -20,6 +25,8 @@ def get_video_speakers(video_id: str) -> dict:
         raise HTTPException(status_code=404, detail="视频不存在")
     try:
         return video_speakers(context.settings.index_dir, context.catalog, video_id)
+    except SpeakerMilvusCoverageError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -56,6 +63,8 @@ def search_voice(request: VoiceSearchRequest) -> dict:
             video_ids=request.video_ids,
             limit=request.limit,
         )
+    except SpeakerMilvusCoverageError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError, IndexError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"count": len(results), "results": results}
@@ -99,6 +108,8 @@ async def search_voice_upload(
             limit=max(1, min(200, limit)),
         )
         return {"query_samples": len(vectors), "count": len(results), "results": results}
+    except SpeakerMilvusCoverageError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (OSError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:

@@ -6,6 +6,7 @@ from app.indexing.stage_executor import execute_stage
 def test_asr_speaker_postprocessing_is_identical_with_and_without_pool(monkeypatch, tmp_path):
     import app.indexing.modalities.asr.asr as asr
     import app.indexing.modalities.speaker.speaker as speaker
+    import app.indexing.stage_executor as stage_executor
 
     settings = Settings(
         _env_file=None,
@@ -13,7 +14,7 @@ def test_asr_speaker_postprocessing_is_identical_with_and_without_pool(monkeypat
         app_model_dir=tmp_path / "models",
         asr_semantic_enabled=False,
         speaker_device="cpu",
-        milvus_enabled=False,
+        milvus_enabled=True,
     )
     settings.ensure_dirs()
     video_path = settings.upload_dir / "video.mp4"
@@ -33,6 +34,7 @@ def test_asr_speaker_postprocessing_is_identical_with_and_without_pool(monkeypat
 
     monkeypatch.setattr(asr, "build_asr_index", fake_build_asr_index)
     monkeypatch.setattr(speaker, "build_speaker_index", fake_build_speaker_index)
+    monkeypatch.setattr(stage_executor, "_setup_milvus_context", lambda *args: None)
 
     process_exit_result = execute_stage("asr", video, options, settings)
     pool = ModelPool(idle_timeout=0)
@@ -44,3 +46,18 @@ def test_asr_speaker_postprocessing_is_identical_with_and_without_pool(monkeypat
     assert process_exit_result["speaker"] == {"tracks": 2}
     assert daemon_result["speaker"] == {"tracks": 2}
     assert len(speaker_calls) == 2
+
+
+def test_execute_stage_rejects_disabled_milvus(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        milvus_enabled=False,
+    )
+    video = {"id": "video-1", "file_path": str(tmp_path / "video.mp4")}
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Milvus-only indexing requires"):
+        execute_stage("visual", video, {}, settings)

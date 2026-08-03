@@ -4,17 +4,21 @@ import re
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
+from app.api import speaker_routes
 from app.catalog.db import Catalog
 from app.indexing.modalities.speaker.speaker import load_speaker_index, save_speaker_index
 from app.identity.speaker_service import (
     SpeakerMilvusCoverageError,
     _load_speaker_data,
     _speaker_data_from_milvus,
+    _texts_from_milvus,
     speaker_utterance_embedding,
     video_speakers,
     voice_search,
     voice_search_vectors,
 )
+from app.platform import context
 
 
 def _make_speaker_data(vectors: np.ndarray) -> dict:
@@ -219,6 +223,42 @@ def test_load_speaker_data_propagates_milvus_coverage_error(tmp_path):
     ):
         with pytest.raises(SpeakerMilvusCoverageError, match="incomplete"):
             _load_speaker_data(path, "video-1")
+
+
+def test_texts_from_milvus_propagates_storage_failure():
+    with patch(
+        "app.identity.speaker_service.ensure_milvus_reachable",
+        side_effect=ConnectionError("connection refused"),
+    ):
+        with pytest.raises(SpeakerMilvusCoverageError, match="ASR text is unavailable"):
+            _texts_from_milvus("video-1")
+
+
+def test_texts_from_milvus_accepts_a_successful_empty_query():
+    client = Mock()
+    client.collection_for.return_value.query.return_value = []
+    with (
+        patch("app.identity.speaker_service.ensure_milvus_reachable"),
+        patch("app.identity.speaker_service._published_asset_version", return_value="7"),
+        patch("app.identity.speaker_service.get_milvus_client", return_value=client),
+    ):
+        assert _texts_from_milvus("video-1") == []
+
+
+def test_speaker_route_returns_503_for_milvus_coverage_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(context, "catalog", Mock(get_video=Mock(return_value={"id": "video-1"})))
+    monkeypatch.setattr(context, "settings", Mock(index_dir=tmp_path / "indexes"))
+    monkeypatch.setattr(
+        speaker_routes,
+        "video_speakers",
+        Mock(side_effect=SpeakerMilvusCoverageError("ASR publication missing")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        speaker_routes.get_video_speakers("video-1")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "ASR publication missing"
 
 
 def test_voice_search_returns_only_milvus_results(tmp_path):

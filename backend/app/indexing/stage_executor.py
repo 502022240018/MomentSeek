@@ -14,6 +14,16 @@ from app.indexing.pipeline_manifest import write_stage_manifest
 logger = logging.getLogger(__name__)
 
 
+def require_milvus_writes(settings: Settings) -> None:
+    """Reject index production when its only online store is unavailable."""
+    if settings.milvus_enabled and settings.milvus_write_enabled:
+        return
+    raise RuntimeError(
+        "Milvus-only indexing requires MILVUS_ENABLED=true and "
+        "MILVUS_WRITE_ENABLED=true"
+    )
+
+
 @dataclass(frozen=True)
 class StageContext:
     video: dict
@@ -34,6 +44,7 @@ def execute_stage(
     pool: ModelPool | None = None,
 ) -> dict:
     """Execute one indexing stage with identical behavior in every worker mode."""
+    require_milvus_writes(settings)
     index_dir = settings.index_dir / video["id"]
     working_dir = index_dir / "work"
     index_dir.mkdir(parents=True, exist_ok=True)

@@ -116,8 +116,12 @@ def _texts_from_milvus(video_id: str) -> list[str]:
             limit=16_384,
             timeout=get_settings().milvus_query_timeout_seconds,
         )
-    except Exception:
-        return []
+    except SpeakerMilvusCoverageError:
+        raise
+    except Exception as exc:
+        raise SpeakerMilvusCoverageError(
+            f"Milvus ASR text is unavailable for video {video_id}: {exc}"
+        ) from exc
     if not rows:
         return []
     values = {

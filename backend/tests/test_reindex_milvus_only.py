@@ -14,6 +14,8 @@ def _catalog_with_video(tmp_path, *, source_exists: bool = True):
         _env_file=None,
         app_data_dir=tmp_path / "runtime",
         app_model_dir=tmp_path / "models",
+        milvus_enabled=True,
+        milvus_write_enabled=True,
     )
     settings.ensure_dirs()
     catalog = Catalog(settings.db_path)

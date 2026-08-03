@@ -282,6 +282,11 @@ def create_index_job(video_id: str, request: IndexRequest = Body(default_factory
     video = context.catalog.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
+    if not (context.settings.milvus_enabled and context.settings.milvus_write_enabled):
+        raise HTTPException(
+            status_code=503,
+            detail="Milvus-only 索引要求 MILVUS_ENABLED=true 且 MILVUS_WRITE_ENABLED=true",
+        )
     running = [
         job for job in context.catalog.list_jobs(video_id)
         if job["status"] in {"queued", "running"}
