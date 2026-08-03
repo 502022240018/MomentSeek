@@ -26,6 +26,9 @@ from pymilvus import Collection, connections, utility, AnnSearchRequest, Weighte
 from app.indexing.milvus_schema import create_ocr_schema
 
 
+pytestmark = pytest.mark.integration  # Mark all tests in this file as integration
+
+
 def test_ocr_e2e():
     """Test OCR v2: schema → insert → hybrid search → cleanup."""
 

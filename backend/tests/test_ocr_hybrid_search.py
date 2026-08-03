@@ -25,6 +25,9 @@ from app.indexing.milvus_search import milvus_ocr_candidates_hybrid
 from app.settings import get_settings
 
 
+pytestmark = pytest.mark.integration  # Mark all tests in this file as integration
+
+
 class TestOCRHybridSearch:
     """Test OCR hybrid search functionality."""
 

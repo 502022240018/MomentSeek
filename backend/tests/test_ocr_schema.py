@@ -57,7 +57,11 @@ class TestOCRSchema:
 
         analyzer_params = text_field.params.get("analyzer_params")
         assert analyzer_params is not None, "analyzer_params not set"
-        assert analyzer_params.get("type") == "chinese", "analyzer type should be 'chinese'"
+        # analyzer_params might be a string or dict depending on pymilvus version
+        if isinstance(analyzer_params, dict):
+            assert analyzer_params.get("type") == "chinese", "analyzer type should be 'chinese'"
+        else:
+            assert "chinese" in str(analyzer_params), "analyzer should be 'chinese'"
 
         print("✓ Text field has chinese analyzer enabled")
 
@@ -126,7 +130,9 @@ class TestOCRSchema:
 
         assert has_embedding_field is not None, "has_embedding field not found"
         assert has_embedding_field.dtype == DataType.BOOL
-        assert has_embedding_field.default_value is True
+        # default_value might be a proto object, check the value representation
+        default_val = has_embedding_field.default_value
+        assert default_val is not None and str(default_val).strip().lower() in ['true', 'bool_data: true']
 
         print("✓ has_embedding field configured correctly")
 

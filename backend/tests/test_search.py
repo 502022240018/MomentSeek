@@ -783,6 +783,7 @@ def test_asr_search_falls_back_to_lexical_when_semantic_query_model_missing(tmp_
     assert results[0]["evidence"][0]["semantic_score"] is None
 
 
+@pytest.mark.skip(reason="OCR migrated to Milvus; NPZ v3 fallback removed")
 def test_ocr_legacy_v3_requires_rebuild(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
@@ -812,6 +813,7 @@ def test_ocr_legacy_v3_requires_rebuild(tmp_path):
         SearchEngine(settings, catalog).search("FIFA", None, ["ocr"], ["video-1"])
 
 
+@pytest.mark.skip(reason="OCR migrated to Milvus; NPZ v3 fallback removed")
 def test_ocr_v3_search_groups_box_text_by_frame(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
@@ -860,6 +862,7 @@ def test_ocr_v3_search_groups_box_text_by_frame(tmp_path):
     assert results[0]["evidence"][0]["features"]["ocr_score"] == 0.95
 
 
+@pytest.mark.skip(reason="OCR migrated to Milvus; NPZ v3 fallback removed")
 def test_ocr_v3_sparse_semantic_indices_map_embeddings_to_frames(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
