@@ -169,7 +169,7 @@ class Settings(BaseSettings):
     # OCR hybrid search configuration (DiskANN + BM25)
     ocr_hybrid_recall_size: int = 100  # Dense and Sparse recall size (recommended: 50-200)
     ocr_lexical_weight: float = 0.7  # Lexical (BM25) weight; semantic weight = 1.0 - this (recommended: 0.6-0.8)
-    ocr_diskann_search_list: int = 100  # DiskANN search_list parameter (recommended: 100-200)
+    ocr_diskann_search_list: int = 100  # DiskANN search_list param for ANN search (not index building; recommended: 100-200)
 
     @field_validator("indexer_mode", mode="before")
     @classmethod

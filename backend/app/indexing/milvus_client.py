@@ -52,6 +52,8 @@ def _get_visual_index_config() -> dict:
 
 
 # Static index configs for non-visual modalities
+# Note: For collections with multiple indexes (like ocr_embeddings), this only represents
+# the primary dense vector index. The actual index creation uses _COLLECTION_CONFIGS["indexes"].
 _STATIC_INDEX_CONFIGS: dict[str, dict] = {
     "asr_embeddings": {
         "index_type": "HNSW",
@@ -61,7 +63,12 @@ _STATIC_INDEX_CONFIGS: dict[str, dict] = {
     "ocr_embeddings": {
         "index_type": "DISKANN",
         "metric_type": "IP",
-        "params": {"max_degree": 56, "search_list_size": 128},
+        "params": {
+            "max_degree": 56,
+            "search_list_size": 128,
+            "pq_code_budget_gb": 0.125,
+            "build_dram_budget_gb": 32.0,
+        },
     },
     "face_embeddings": {
         "index_type": "IVF_FLAT",

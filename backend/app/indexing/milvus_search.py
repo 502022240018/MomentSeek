@@ -516,7 +516,7 @@ def milvus_ocr_candidates_hybrid(
     from pymilvus import AnnSearchRequest, WeightedRanker
 
     if rows is not None:
-        logger.warning(
+        logger.debug(
             "milvus_ocr_candidates_hybrid: 'rows' parameter is deprecated "
             "and ignored in the hybrid search implementation."
         )
@@ -594,14 +594,14 @@ def milvus_ocr_candidates_hybrid(
                 expr=f'video_id == "{video_id}"',
             )
 
-        with (profiler.span("milvus_rpc", "ocr_hybrid") if profiler else nullcontext()):
-            results = col.hybrid_search(
-                reqs=[dense_req, sparse_req],
-                rerank=WeightedRanker(semantic_weight, lexical_weight),
-                limit=limit,
-                output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
-                              "text", "avg_box_score", "has_embedding"],
-            )
+            with (profiler.span("milvus_rpc", "ocr_hybrid") if profiler else nullcontext()):
+                results = col.hybrid_search(
+                    reqs=[dense_req, sparse_req],
+                    rerank=WeightedRanker(semantic_weight, lexical_weight),
+                    limit=limit,
+                    output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
+                                  "text", "avg_box_score", "has_embedding"],
+                )
 
     # Convert to Candidate objects (threshold will be applied globally later)
     candidates: list[Candidate] = []
