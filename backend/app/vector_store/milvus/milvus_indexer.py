@@ -34,6 +34,7 @@ from .milvus_schema import (
     face_pk,
     ocr_pk,
     speaker_pk,
+    truncate_text_for_milvus,
     visual_pk,
 )
 
@@ -302,7 +303,7 @@ class AsrMilvusIndexer:
                 "segment_idx":   chunk_idx,
                 "start_ms":      int(times[chunk_idx, 0]),
                 "end_ms":        int(times[chunk_idx, 1]),
-                "text":          texts[chunk_idx][:2000] if chunk_idx < len(texts) else "",
+                "text":          truncate_text_for_milvus(texts[chunk_idx]) if chunk_idx < len(texts) else "",
                 "embedding":     emb.tolist() if has_emb else zero_vec,
             }
             if write_has_embedding:
@@ -367,7 +368,7 @@ class OcrMilvusIndexer:
                     [float(box_scores[int(i)]) for i in mask if box_texts[int(i)].strip()]
                     if box_scores is not None else []
                 )
-                frame_text_map[fi]  = " ".join(texts_here)[:2000]
+                frame_text_map[fi]  = truncate_text_for_milvus(" ".join(texts_here))
                 frame_score_map[fi] = float(np.mean(scores_here)) if scores_here else 0.0
 
         # Build frame_idx → embedding mapping.
