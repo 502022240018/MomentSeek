@@ -9,9 +9,14 @@ export type Video = {
   height: number;
   status: string;
   indexed_modalities: IndexModality[];
+  folder_ids: string[];
+  folders: FolderRef[];
   speaker_indexed?: boolean;
   created_at: string;
 };
+
+export type FolderRef = { id: string; name: string };
+export type Folder = FolderRef & { kind: "default" | "user"; video_count: number; created_at?: string };
 
 export type Job = {
   id: string;
@@ -178,6 +183,7 @@ async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
 
 export const api = {
   videos: () => json<Video[]>("/api/videos"),
+  folders: () => json<Folder[]>("/api/folders"),
   jobs: () => json<Job[]>("/api/jobs"),
   colorGradingStatus: () =>
     json<ColorGradingCapability>("/api/color-grading/status"),
@@ -221,12 +227,17 @@ export const api = {
     form.append("limit", "50");
     return json<{ query_samples: number; count: number; results: VoiceHit[] }>("/api/voice-search/upload", { method: "POST", body: form });
   },
-  uploadVideo: (video: File, transcript?: File) => {
+  uploadVideo: (video: File, transcript?: File, folderIds: string[] = []) => {
     const form = new FormData();
     form.append("video", video);
     if (transcript) form.append("transcript", transcript);
+    if (folderIds.length) form.append("folder_ids", JSON.stringify(folderIds));
     return json<Video>("/api/videos", { method: "POST", body: form });
   },
+  createFolder: (name: string) => json<Folder>("/api/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }),
+  renameFolder: (folderId: string, name: string) => json<Folder>(`/api/folders/${folderId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }),
+  deleteFolder: (folderId: string) => json<{ status: string; id: string; released_video_count: number }>(`/api/folders/${folderId}`, { method: "DELETE" }),
+  updateVideoFolders: (videoIds: string[], folderIds: string[], operation: "add" | "remove" | "replace") => json<{ status: string }>("/api/videos/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ video_ids: videoIds, folder_ids: folderIds, operation }) }),
   indexVideo: (videoId: string, modalities: IndexModality[], options: IndexOptions = {}) => {
     const selected = new Set(modalities);
     return json<Job>(`/api/videos/${videoId}/index`, {
@@ -271,7 +282,8 @@ export const api = {
     queryText: string;
     queryImage?: File;
     modalities: string[];
-    videoIds: string[];
+    videoIds?: string[];
+    folderIds?: string[];
     alpha: number;
     limit?: number;
     orchestrationProfile?: string;
@@ -282,7 +294,8 @@ export const api = {
     if (params.queryText) form.append("query_text", params.queryText);
     if (params.queryImage) form.append("query_image", params.queryImage);
     form.append("modalities", params.modalities.join(","));
-    form.append("video_ids", JSON.stringify(params.videoIds));
+    if (params.videoIds?.length) form.append("video_ids", JSON.stringify(params.videoIds));
+    if (params.folderIds?.length) form.append("folder_ids", JSON.stringify(params.folderIds));
     form.append("alpha", String(params.alpha));
     form.append("limit", String(params.limit ?? 50));
     if (params.orchestrationProfile) form.append("orchestration_profile", params.orchestrationProfile);

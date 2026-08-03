@@ -1375,7 +1375,9 @@ class SearchEngine:
 
     def _selected_videos(self, video_ids: list[str] | None) -> list[dict]:
         videos = self.catalog.list_videos()
-        if not video_ids:
+        # An empty folder resolves to ``[]`` and must not silently expand to all
+        # assets. ``None`` alone means the established all-video scope.
+        if video_ids is None:
             return videos
         allowed = set(video_ids)
         return [video for video in videos if video["id"] in allowed]

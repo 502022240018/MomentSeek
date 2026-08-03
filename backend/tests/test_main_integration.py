@@ -10,6 +10,33 @@ from app.catalog.db import Catalog
 from app.core.settings import Settings
 
 
+def test_folder_api_deletion_keeps_asset_and_its_index(monkeypatch, tmp_path):
+    import app.main as main
+
+    settings = Settings(_env_file=None, app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models", indexer_mode="process_exit")
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    video_path = settings.upload_dir / "video-1.mp4"
+    video_path.write_bytes(b"video")
+    index_path = settings.index_dir / "video-1" / "visual.npz"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_bytes(b"index")
+    catalog.create_video({"id": "video-1", "name": "demo.mp4", "file_path": str(video_path), "duration": 1, "fps": 25, "width": 640, "height": 480, "status": "ready"})
+    monkeypatch.setattr(context, "settings", settings)
+    monkeypatch.setattr(context, "catalog", catalog)
+
+    with TestClient(main.app) as client:
+        folder = client.post("/api/folders", json={"name": "Campaign"})
+        assert folder.status_code == 201
+        folder_id = folder.json()["id"]
+        assert client.post("/api/videos/folders", json={"video_ids": ["video-1"], "folder_ids": [folder_id], "operation": "add"}).status_code == 200
+        assert client.delete(f"/api/folders/{folder_id}").json()["released_video_count"] == 1
+        assert client.get("/api/videos").json()[0]["folder_ids"] == []
+
+    assert video_path.exists()
+    assert index_path.exists()
+
+
 def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
 
     settings = Settings(
