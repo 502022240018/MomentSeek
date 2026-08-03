@@ -45,11 +45,27 @@ MODEL_VERSIONS: Dict[str, str] = {
     "speaker": "3dspeaker-campplus-zh-en-192-v1",
 }
 
-# Max varchar lengths
+# Max varchar lengths. Milvus validates VARCHAR by UTF-8 byte length.
+# Keep the existing 2,000-character product limit, and cap stored text at
+# 5 KB so multilingual OCR/ASR cannot create unexpectedly large BM25 rows.
 _PK_LEN = 512
 _VID_LEN = 255
 _VER_LEN = 64
-_TEXT_LEN = 2000
+_TEXT_LEN = 5000
+_TEXT_MAX_CHARS = 2000
+
+
+def truncate_text_for_milvus(text: str) -> str:
+    """Apply the product character limit and Milvus's UTF-8 byte limit.
+
+    Decoding with ``errors='ignore'`` discards only an incomplete final UTF-8
+    sequence, so text is never stored with a broken character.
+    """
+    candidate = text[:_TEXT_MAX_CHARS]
+    encoded = candidate.encode("utf-8")
+    if len(encoded) <= _TEXT_LEN:
+        return candidate
+    return encoded[:_TEXT_LEN].decode("utf-8", errors="ignore")
 
 
 # ---------------------------------------------------------------------------
