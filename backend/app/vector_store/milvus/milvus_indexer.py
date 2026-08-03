@@ -575,16 +575,16 @@ def write_modality_from_memory(
     arrays: dict[str, Any],
     *,
     recovery_save_fn: "Callable[[], None] | None" = None,
-) -> None:
+) -> int:
     """P2 direct-write hook: upsert in-memory arrays to Milvus; save NPZ on failure.
 
     Args:
         ctx:              MilvusWriteContext with video_id, asset_version, client.
         modality:         "visual" / "asr" / "ocr" / "face" / "speaker".
         arrays:           kwargs dict to pass to the indexer's upsert_from_memory().
-        recovery_save_fn: Optional callable that saves the NPZ to disk.  Invoked
-                          ONLY when Milvus write fails and fail_policy="warn",
-                          ensuring the data survives for manual recovery.
+        recovery_save_fn: Optional callable that saves the NPZ to disk before
+                          the failure is raised, preserving an offline recovery
+                          source without enabling runtime fallback.
 
     On success: data is flushed and immediately queryable.
     On failure: invokes recovery_save_fn (if supplied) before handling the failure.
@@ -605,6 +605,7 @@ def write_modality_from_memory(
             "Milvus direct-write OK modality=%s video=%s@%s count=%d",
             modality, ctx.video_id, ctx.asset_version, count,
         )
+        return int(count)
     except Exception as exc:
         # Save NPZ before handling failure so it's available for recovery.
         if recovery_save_fn is not None:
@@ -627,7 +628,7 @@ def write_modality_to_milvus(
     ctx: MilvusWriteContext,
     modality: str,
     npz_path: str | Path,
-) -> None:
+) -> int:
     """Legacy write hook: upsert from an already-written NPZ file.
 
     Used by:
@@ -654,6 +655,7 @@ def write_modality_to_milvus(
             "Milvus upsert OK modality=%s video=%s@%s count=%d",
             modality, ctx.video_id, ctx.asset_version, count,
         )
+        return int(count)
     except Exception as exc:
         _handle_write_failure(ctx, modality, exc)
 
@@ -663,21 +665,15 @@ def _handle_write_failure(
     modality: str,
     exc: Exception,
 ) -> None:
-    from .milvus_flags import milvus_write_fail_policy
-
-    policy = milvus_write_fail_policy()
     logger.error(
         "Milvus write failed modality=%s video=%s@%s: %s",
         modality, ctx.video_id, ctx.asset_version, exc,
     )
 
-    if policy == "raise":
-        raise RuntimeError(
-            f"Milvus write failed (policy=raise) modality={modality} "
-            f"video={ctx.video_id}: {exc}"
-        ) from exc
-
-    # policy == "warn" — logged above, indexing continues without this modality in Milvus.
+    raise RuntimeError(
+        f"Milvus write failed (fail-closed) modality={modality} "
+        f"video={ctx.video_id}: {exc}"
+    ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +689,7 @@ def reindex_from_file(
     asset_version: str,
     model_version: str,
     npz_path: str,
-) -> None:
+) -> int:
     """Manual recovery helper: re-upsert one modality from a temporary NPZ."""
     ctx = MilvusWriteContext(
         video_id=video_id,
@@ -702,5 +698,6 @@ def reindex_from_file(
         model_versions={modality: model_version},
     )
     indexer = _INDEXERS[modality]
-    indexer.upsert_from_npz(ctx, npz_path)
+    count = indexer.upsert_from_npz(ctx, npz_path)
     ctx.client.collection_for(modality).flush()
+    return int(count)

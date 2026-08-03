@@ -10,9 +10,7 @@ Coverage:
 """
 from __future__ import annotations
 
-import time
-from typing import List
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -68,22 +66,6 @@ class TestUpsertWithRetry:
             None,  # success on third try
         ]
 
-        with (
-            patch("app.vector_store.milvus.milvus_indexer.time.sleep") as mock_sleep,
-            patch(
-                "app.vector_store.milvus.milvus_indexer._upsert_with_retry.__globals__"
-                "['__builtins__']",
-                create=True,
-            ),
-            patch(
-                "app.vector_store.milvus.milvus_indexer._MilvusExc",
-                _FakeMilvusException,
-                create=True,
-            ),
-        ):
-            pass  # just verifying the import path
-
-        # Re-implement with direct pymilvus patch
         rows = [{"pk": "x"}]
         call_count = 0
         errors_before_success = 2
@@ -110,9 +92,6 @@ class TestUpsertWithRetry:
             ),
         ):
             fn = self._get_fn()
-            # Patch MilvusException inside the function's closure
-            import app.vector_store.milvus.milvus_indexer as _mod
-            orig = getattr(_mod, "_RETRYABLE_CODES", None)
             try:
                 fn(col2, rows, max_retries=3, base_delay=1.0)
             except Exception:
@@ -206,7 +185,7 @@ class TestUpsertBatched:
 
     def test_single_batch_when_rows_fit(self):
         """When rows < batch_size, exactly one upsert call is made."""
-        from app.vector_store.milvus.milvus_indexer import _upsert_batched, _MODALITY_BATCH
+        from app.vector_store.milvus.milvus_indexer import _upsert_batched
 
         col = _make_collection()
         # Use fewer rows than the speaker batch size (speaker has the largest batch)
@@ -312,13 +291,13 @@ class TestModalityBatchSizes:
 
 
 # ---------------------------------------------------------------------------
-# P0-A — _setup_milvus_context: fail_policy behaviour
+# P0-A — _setup_milvus_context: fail-closed behaviour
 # ---------------------------------------------------------------------------
 
 class TestSetupMilvusContext:
-    """P0-A: connection failure should respect fail_policy, not silently continue."""
+    """P0-A: connection failure must stop indexing, never silently continue."""
 
-    def _call(self, video_id: str, fail_client: bool, policy: str, tmp_path):
+    def _call(self, video_id: str, fail_client: bool, tmp_path):
         """Helper to invoke _setup_milvus_context with controlled stubs.
 
         _setup_milvus_context uses lazy (in-function) imports, so the correct
@@ -337,65 +316,52 @@ class TestSetupMilvusContext:
         with (
             patch("app.vector_store.milvus.milvus_client.get_milvus_client", _fake_get_client),
             patch(
-                "app.vector_store.milvus.milvus_flags.milvus_write_fail_policy",
-                return_value=policy,
-            ),
-            patch(
-                "app.vector_store.milvus.milvus_asset_version.bump_asset_version",
+                "app.vector_store.milvus.milvus_asset_version.reserve_next_attempt_version",
                 return_value="2",
-            ) as mock_bump,
+            ) as mock_reserve,
             patch(
                 "app.vector_store.milvus.milvus_indexer.MilvusWriteContext", autospec=True
             ) as ctx_cls,
         ):
             result = sr._setup_milvus_context(video_id, fake_dir)
-        return result, ctx_cls, mock_bump
+        return result, ctx_cls, mock_reserve
 
     def test_success_returns_context(self, tmp_path):
-        ctx, ctx_cls, _ = self._call("vid1", fail_client=False, policy="raise", tmp_path=tmp_path)
+        ctx, ctx_cls, _ = self._call("vid1", fail_client=False, tmp_path=tmp_path)
         assert ctx is not None
         ctx_cls.assert_called_once()
 
     def test_connection_failure_raise_policy_raises(self, tmp_path):
-        """fail_policy=raise: RuntimeError propagated, not None returned."""
+        """Connection failure is propagated, not converted to an NPZ-only run."""
         with pytest.raises(RuntimeError, match="Milvus connection failed"):
-            self._call("vid2", fail_client=True, policy="raise", tmp_path=tmp_path)
+            self._call("vid2", fail_client=True, tmp_path=tmp_path)
 
-    def test_connection_failure_warn_policy_returns_none(self, tmp_path):
-        ctx, _, _ = self._call("vid3", fail_client=True, policy="warn", tmp_path=tmp_path)
-        assert ctx is None, "warn policy should return None, not raise"
-
-    def test_asset_version_not_bumped_on_failure(self, tmp_path):
-        """bump_asset_version must NOT be called when connection fails (raise policy)."""
+    def test_asset_version_not_reserved_on_failure(self, tmp_path):
+        """A pending version is not allocated when connection fails."""
         # Patch at original definition sites (lazy imports inside _setup_milvus_context).
         with (
             patch("app.vector_store.milvus.milvus_client.get_milvus_client",
                   side_effect=ConnectionRefusedError("Milvus not available")),
-            patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy",
-                  return_value="raise"),
-            patch("app.vector_store.milvus.milvus_asset_version.bump_asset_version") as mock_bump,
+            patch("app.vector_store.milvus.milvus_asset_version.reserve_next_attempt_version") as mock_reserve,
         ):
             import app.indexing.stage_executor as sr
             fake_dir = tmp_path / "vid4"
             fake_dir.mkdir()
             with pytest.raises(RuntimeError):
                 sr._setup_milvus_context("vid4", fake_dir)
-            mock_bump.assert_not_called()
+            mock_reserve.assert_not_called()
 
-    def test_asset_version_bumped_only_after_connection_success(self, tmp_path):
-        """bump_asset_version is called exactly once, after connection succeeds."""
+    def test_asset_version_is_reserved_only_after_connection_success(self, tmp_path):
+        """The pending version is allocated only after connection succeeds."""
         with (
             patch("app.vector_store.milvus.milvus_client.get_milvus_client",
                   return_value=MagicMock()),
-            patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy",
-                  return_value="raise"),
-            patch("app.vector_store.milvus.milvus_asset_version.bump_asset_version",
-                  return_value="3") as mock_bump,
+            patch("app.vector_store.milvus.milvus_asset_version.reserve_next_attempt_version",
+                  return_value="3") as mock_reserve,
             patch("app.vector_store.milvus.milvus_indexer.MilvusWriteContext", autospec=True),
         ):
             import app.indexing.stage_executor as sr
             fake_dir = tmp_path / "vid5"
             fake_dir.mkdir()
             sr._setup_milvus_context("vid5", fake_dir)
-            mock_bump.assert_called_once()
-
+            mock_reserve.assert_called_once()

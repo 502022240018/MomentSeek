@@ -83,6 +83,8 @@ def execute_job(job_id: str, settings: Settings, catalog: Catalog, pool) -> None
                 **result,
             }
             completed.add(stage)
+            if stage == "asr" and isinstance(result.get("speaker"), dict):
+                completed.add("speaker")
             catalog.update_video(video["id"], indexed_modalities=sorted(completed))
             catalog.update_job(
                 job_id,

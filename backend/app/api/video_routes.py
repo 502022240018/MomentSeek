@@ -7,6 +7,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from app.api.schemas import IndexRequest, VideoRenameRequest
+from app.indexing.manifest import load_index_manifest
 from app.platform import context
 
 router = APIRouter()
@@ -23,6 +24,13 @@ def _parse_id_list(value: str | None, field_name: str) -> list[str] | None:
     if not isinstance(parsed, list) or any(not isinstance(item, str) or not item.strip() for item in parsed):
         raise HTTPException(status_code=422, detail=f"{field_name} 必须是非空字符串数组")
     return list(dict.fromkeys(item.strip() for item in parsed)) or None
+
+
+def _speaker_is_indexed(video_id: str) -> bool:
+    """Report online speaker availability from the published Milvus pointer."""
+    manifest = load_index_manifest(context.settings.index_dir / video_id) or {}
+    channel = (manifest.get("channels") or {}).get("speaker") or {}
+    return bool(channel.get("milvus_asset_version"))
 
 
 @router.post("/api/videos", status_code=201)
@@ -81,9 +89,7 @@ def list_videos() -> list[dict]:
 
     videos = context.catalog.list_videos()
     for video in videos:
-        video["speaker_indexed"] = (
-            context.settings.index_dir / video["id"] / "speaker.npz"
-        ).exists()
+        video["speaker_indexed"] = _speaker_is_indexed(video["id"])
     return videos
 
 
@@ -94,7 +100,7 @@ def get_video(video_id: str) -> dict:
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
     video["jobs"] = context.catalog.list_jobs(video_id)
-    video["speaker_indexed"] = (context.settings.index_dir / video_id / "speaker.npz").exists()
+    video["speaker_indexed"] = _speaker_is_indexed(video_id)
     return video
 
 
@@ -276,6 +282,11 @@ def create_index_job(video_id: str, request: IndexRequest = Body(default_factory
     video = context.catalog.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
+    if not (context.settings.milvus_enabled and context.settings.milvus_write_enabled):
+        raise HTTPException(
+            status_code=503,
+            detail="Milvus-only 索引要求 MILVUS_ENABLED=true 且 MILVUS_WRITE_ENABLED=true",
+        )
     running = [
         job for job in context.catalog.list_jobs(video_id)
         if job["status"] in {"queued", "running"}

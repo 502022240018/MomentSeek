@@ -6,9 +6,8 @@ import sys
 import time
 
 from app.catalog.db import Catalog
-from app.indexing.pipeline_manifest import write_stage_manifest
-from app.indexing.modalities.speaker.speaker import build_speaker_index
 from app.core.settings import get_settings
+from app.indexing.stage_executor import execute_stage
 
 
 def main() -> None:
@@ -23,32 +22,18 @@ def main() -> None:
     for video in catalog.list_videos():
         if args.video_ids and video["id"] not in args.video_ids:
             continue
-        if "speaker" in video["indexed_modalities"]:
-            catalog.update_video(
-                video["id"],
-                indexed_modalities=[item for item in video["indexed_modalities"] if item != "speaker"],
-            )
-        index_dir = settings.index_dir / video["id"]
-        asr_path = index_dir / "asr.npz"
-        output_path = index_dir / "speaker.npz"
-        if not asr_path.exists() or (output_path.exists() and not args.force):
+        if "speaker" in video["indexed_modalities"] and not args.force:
             continue
         started = time.perf_counter()
         print(json.dumps({"status": "started", "video_id": video["id"], "name": video["name"]}, ensure_ascii=False), flush=True)
         try:
-            result = build_speaker_index(
-                video_path=str(settings.resolve_path(video["file_path"])),
-                asr_path=str(asr_path), output_path=str(output_path),
-                working_dir=str(index_dir / "work"),
-                model_repo=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_repo)),
-                model_cache_dir=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_cache_dir)),
-                device=settings.speaker_device,
+            result = execute_stage(
+                "speaker",
+                video,
+                {"asr_speaker_enabled": True},
+                settings,
             )
-            write_stage_manifest(
-                "speaker", index_dir=index_dir, video=video,
-                options={"asr_speaker_enabled": True}, settings=settings, result=result,
-            )
-            modalities = [item for item in video["indexed_modalities"] if item != "speaker"]
+            modalities = sorted({*video["indexed_modalities"], "speaker"})
             catalog.update_video(video["id"], indexed_modalities=modalities)
             item = {"status": "completed", "video_id": video["id"], "name": video["name"], **result}
         except Exception as exc:

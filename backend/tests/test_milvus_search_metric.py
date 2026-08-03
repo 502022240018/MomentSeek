@@ -121,6 +121,7 @@ def test_visual_ann_uses_supported_retrieval_profiler_api():
             results = milvus_visual_candidates_ann(
                 client,
                 "test-video",
+                "7",
                 [np.ones(1152, dtype=np.float32)],
                 limit=10,
                 profiler=profiler,
@@ -186,7 +187,9 @@ def test_face_candidates_l2_to_cosine_conversion():
     query = np.ones(512, dtype=np.float32)
     query /= np.linalg.norm(query)
 
-    candidates = milvus_face_candidates(fake_client, "vid-test", query, limit=5, threshold=0.35)
+    candidates = milvus_face_candidates(
+        fake_client, "vid-test", query, "7", limit=5, threshold=0.35
+    )
 
     assert len(candidates) == 1
     candidate = candidates[0]

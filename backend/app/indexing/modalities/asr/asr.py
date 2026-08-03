@@ -1281,17 +1281,30 @@ def build_asr_index(
         repair_stats={**chunk_builder_stats, **decode.raw_parser_stats},
     )
 
-    _save_asr_npz(
-        output_path,
+    index_payload = _asr_index_payload(
         chunks,
         np.asarray(semantic_result["embeddings"], dtype=np.float16),
         np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32),
     )
+    milvus_rows = None
     if milvus_ctx is not None:
-        from app.vector_store.milvus.milvus_indexer import write_modality_to_milvus
+        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
 
-        write_modality_to_milvus(milvus_ctx, "asr", output_path)
-    return _asr_result_payload(decode, chunks, chunk_builder_stats, semantic_result)
+        milvus_rows = write_modality_from_memory(
+            milvus_ctx,
+            "asr",
+            {
+                "chunk_times_ms": index_payload["chunk_times_ms"],
+                "texts": [str(value) for value in index_payload["texts"].tolist()],
+                "embeddings": index_payload["embeddings"],
+                "embedding_chunk_indices": index_payload["embedding_chunk_indices"],
+            },
+        )
+    # Retained only as an offline recovery artifact; no runtime path reads it.
+    atomic_save_npz(output_path, **index_payload)
+    result = _asr_result_payload(decode, chunks, chunk_builder_stats, semantic_result)
+    result["milvus_rows"] = milvus_rows
+    return result
 
 
 def _save_asr_npz(
@@ -1300,6 +1313,17 @@ def _save_asr_npz(
     embeddings: np.ndarray,
     embedding_chunk_indices: np.ndarray,
 ) -> None:
+    atomic_save_npz(
+        output_path,
+        **_asr_index_payload(chunks, embeddings, embedding_chunk_indices),
+    )
+
+
+def _asr_index_payload(
+    chunks: list[dict],
+    embeddings: np.ndarray,
+    embedding_chunk_indices: np.ndarray,
+) -> dict[str, np.ndarray]:
     def utf8_bytes_array(values: list[str]) -> np.ndarray:
         width = max((len(value.encode("utf-8")) for value in values), default=1)
         return np.asarray(values, dtype=f"S{width}")
@@ -1319,12 +1343,11 @@ def _save_asr_npz(
     texts = np.asarray([str(chunk.get("text", "")).strip() for chunk in chunks], dtype="U")
     chunk_emotions = utf8_bytes_array([str(chunk.get("emotion", "")).strip() for chunk in chunks])
     chunk_audio_events = utf8_bytes_array([str(chunk.get("audio_event", "")).strip() for chunk in chunks])
-    atomic_save_npz(
-        output_path,
-        chunk_times_ms=chunk_times_ms,
-        texts=texts,
-        chunk_emotions=chunk_emotions,
-        chunk_audio_events=chunk_audio_events,
-        embeddings=np.asarray(embeddings, dtype=np.float16),
-        embedding_chunk_indices=np.asarray(embedding_chunk_indices, dtype=np.int32),
-    )
+    return {
+        "chunk_times_ms": chunk_times_ms,
+        "texts": texts,
+        "chunk_emotions": chunk_emotions,
+        "chunk_audio_events": chunk_audio_events,
+        "embeddings": np.asarray(embeddings, dtype=np.float16),
+        "embedding_chunk_indices": np.asarray(embedding_chunk_indices, dtype=np.int32),
+    }

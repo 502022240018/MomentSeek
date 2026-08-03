@@ -148,11 +148,17 @@ def write_stage_manifest(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     segment_seconds = float(options.get("visual_segment_seconds", settings.visual_segment_seconds))
+    payload = channel_manifest(stage, result=result, options=options, settings=settings)
+    # This is the online publication pointer.  It is deliberately stored per
+    # modality: visual, ASR, OCR, face and speaker may be rebuilt independently.
+    if result.get("milvus_asset_version") is not None:
+        payload["milvus_asset_version"] = str(result["milvus_asset_version"])
+        payload["milvus_row_count"] = int(result.get("milvus_row_count") or 0)
     return update_channel_manifest(
         index_dir,
         video_id=str(video["id"]),
         duration_seconds=float(video.get("duration") or 0),
         segment_seconds=segment_seconds,
         channel=stage,
-        channel_manifest=channel_manifest(stage, result=result, options=options, settings=settings),
+        channel_manifest=payload,
     )
