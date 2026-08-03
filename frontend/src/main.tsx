@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ColorGradingCapability, ColorGradingTask, Entity, Job, OrchestrationProfile, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
+import { api, ColorGradingCapability, ColorGradingTask, Entity, Folder, Job, OrchestrationProfile, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
 import { ColorGradingPage } from "./ColorGradingPage";
 import {
   defaultIndexConfiguration,
@@ -56,6 +56,7 @@ function statusText(status: string) {
 function App() {
   const [page, setPage] = useState<Page>("search");
   const [videos, setVideos] = useState<Video[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [entities, setEntities] = useState<Entity[]>([]);
   const [gradingStatus, setGradingStatus] = useState<ColorGradingCapability>();
@@ -66,18 +67,21 @@ function App() {
     try {
       const [
         nextVideos,
+        nextFolders,
         nextJobs,
         nextEntities,
         nextGradingStatus,
         nextGradingTasks,
       ] = await Promise.all([
         api.videos(),
+        api.folders(),
         api.jobs(),
         api.entities(),
         api.colorGradingStatus(),
         api.colorGradingTasks(),
       ]);
       setVideos(nextVideos);
+      setFolders(nextFolders);
       setJobs(nextJobs);
       setEntities(nextEntities);
       setGradingStatus(nextGradingStatus);
@@ -125,8 +129,8 @@ function App() {
         </header>
         {notice && <div className="notice" onClick={() => setNotice("")}>{notice}<span>×</span></div>}
         <section className="page-content">
-          {page === "search" && <SearchPage videos={videos} setNotice={setNotice} />}
-          {page === "assets" && <AssetsPage videos={videos} refresh={refresh} setNotice={setNotice} />}
+          {page === "search" && <SearchPage videos={videos} folders={folders} setNotice={setNotice} />}
+          {page === "assets" && <AssetsPage videos={videos} folders={folders} refresh={refresh} setNotice={setNotice} />}
           {page === "indexes" && <IndexesPage jobs={jobs} videos={videos} refresh={refresh} setNotice={setNotice} />}
           {page === "entities" && <EntitiesPage entities={entities} videos={videos} refresh={refresh} setNotice={setNotice} />}
           {page === "overview" && <Overview videos={videos} jobs={jobs} entities={entities} setPage={setPage} />}
@@ -137,9 +141,12 @@ function App() {
   );
 }
 
-function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value: string) => void }) {
+function SearchPage({ videos, folders, setNotice }: { videos: Video[]; folders: Folder[]; setNotice: (value: string) => void }) {
   const ready = videos.filter(video => video.status === "ready" || video.indexed_modalities.length);
-  const [selected, setSelected] = useState<string[]>([]);
+  const [scopeMode, setScopeMode] = useState<"all" | "custom">("all");
+  const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
+  const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
+  const [expandedFolderIds, setExpandedFolderIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [image, setImage] = useState<File>();
   const [modalities, setModalities] = useState(["visual", "face", "asr", "ocr"]);
@@ -155,7 +162,6 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
   const [rerankerMode, setRerankerMode] = useState<"auto" | "off" | "force">("auto");
   const [execution, setExecution] = useState<Record<string, any>>();
 
-  useEffect(() => { if (!selected.length && ready.length) setSelected(ready.map(video => video.id)); }, [ready.length]);
   useEffect(() => {
     api.orchestrationProfiles().then(value => {
       if (!value.enabled) {
@@ -168,14 +174,20 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
     }).catch(() => setOrchestrationStatus("编排配置加载失败，请刷新页面"));
   }, []);
   const toggleMode = (mode: string) => setModalities(value => value.includes(mode) ? value.filter(item => item !== mode) : [...value, mode]);
+  const videosInFolder = (folderId: string) => ready.filter(video => folderId === "__default__" ? !video.folder_ids.length : video.folder_ids.includes(folderId));
+  const toggleFolder = (folderId: string) => { setScopeMode("custom"); setSelectedFolderIds(value => value.includes(folderId) ? value.filter(id => id !== folderId) : [...value, folderId]); };
+  const toggleVideo = (videoId: string) => { setScopeMode("custom"); setSelectedVideoIds(value => value.includes(videoId) ? value.filter(id => id !== videoId) : [...value, videoId]); };
+  const toggleExpanded = (folderId: string) => setExpandedFolderIds(value => value.includes(folderId) ? value.filter(id => id !== folderId) : [...value, folderId]);
+  const resolvedCount = new Set([...selectedVideoIds, ...selectedFolderIds.flatMap(id => videosInFolder(id).map(video => video.id))]).size;
   const submit = async () => {
     if (!query.trim() && !image) return setNotice("请输入文字或上传参考图");
-    if (!selected.length) return setNotice("请先选择至少一个已建立索引的视频");
+    if (!ready.length) return setNotice("还没有已建立索引的视频");
+    if (scopeMode === "custom" && !selectedVideoIds.length && !selectedFolderIds.length) return setNotice("请至少选择一个文件夹或视频，或切换为全部视频");
     if (!modalities.length) return setNotice("请至少启用一个检索通道");
     setLoading(true);
     try {
       const response = await api.search({
-        queryText: query.trim(), queryImage: image, modalities, videoIds: selected, alpha,
+        queryText: query.trim(), queryImage: image, modalities, videoIds: scopeMode === "custom" ? selectedVideoIds : undefined, folderIds: scopeMode === "custom" ? selectedFolderIds : undefined, alpha,
         orchestrationProfile: orchestrationProfile || undefined, plannerMode, rerankerMode,
       });
       setResults(response.results);
@@ -194,12 +206,11 @@ function SearchPage({ videos, setNotice }: { videos: Video[]; setNotice: (value:
     <div className="query-panel panel">
       <div className="panel-label">SEARCH BUILDER</div>
       <label>检索范围</label>
-      <div className="index-select">
-        {ready.length ? ready.map(video => <label className="check-row" key={video.id}>
-          <input type="checkbox" checked={selected.includes(video.id)} onChange={() => setSelected(value => value.includes(video.id) ? value.filter(id => id !== video.id) : [...value, video.id])} />
-          <span className="video-dot" />
-          <span><b>{video.name}</b><small>{formatTime(video.duration)} · {video.indexed_modalities.join(" / ")}</small></span>
-        </label>) : <div className="empty-mini">还没有可检索的视频，请先上传并建立索引。</div>}
+      <div className="folder-scope">
+        <label className="check-row scope-all"><input type="radio" checked={scopeMode === "all"} onChange={() => setScopeMode("all")} /><span className="video-dot" /><span><b>全部可检索视频</b><small>{ready.length} 个视频</small></span></label>
+        {folders.map(folder => { const children = videosInFolder(folder.id); const selectedByFolder = selectedFolderIds.includes(folder.id); const expanded = expandedFolderIds.includes(folder.id); return <div className="folder-scope-row" key={folder.id}><div className="folder-scope-head"><button className="folder-expand" onClick={() => toggleExpanded(folder.id)}>{expanded ? "⌄" : "›"}</button><label className="check-row"><input type="checkbox" checked={selectedByFolder} onChange={() => toggleFolder(folder.id)} /><span className="folder-dot">□</span><span><b>{folder.name}</b><small>{children.length} 个可检索视频</small></span></label></div>{expanded && <div className="folder-children">{children.length ? children.map(video => <label className="check-row" key={video.id}><input type="checkbox" checked={selectedByFolder || selectedVideoIds.includes(video.id)} disabled={selectedByFolder} onChange={() => toggleVideo(video.id)} /><span className="video-dot" /><span><b>{video.name}</b><small>{formatTime(video.duration)} · {video.indexed_modalities.join(" / ")}</small></span></label>) : <div className="empty-mini">该文件夹暂无可检索视频</div>}</div>}</div>; })}
+        {!ready.length && <div className="empty-mini">还没有可检索的视频，请先上传并建立索引。</div>}
+        {scopeMode === "custom" && <small className="scope-summary">当前范围：{selectedFolderIds.length} 个文件夹、{selectedVideoIds.length} 个单独视频，共 {resolvedCount} 个可检索视频</small>}
       </div>
 
       <label>查询文字</label>
@@ -277,15 +288,18 @@ function PlayerModal({ result, onClose }: { result: SearchResult; onClose: () =>
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="player-modal" onMouseDown={event => event.stopPropagation()}><button className="close" onClick={onClose}>×</button><video ref={ref} src={sourceUrl} controls autoPlay onLoadedMetadata={() => { if (ref.current) ref.current.currentTime = sourceStart; }} onTimeUpdate={clampToSegment} /><div className="player-info"><div><span className="panel-label">MATCHED MOMENT</span><h3>{result.video_name}</h3></div><b>{formatTime(result.start_time)} — {formatTime(result.end_time)} · 仅循环播放命中片段</b></div></div></div>;
 }
 
-function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
+function AssetsPage({ videos, folders, refresh, setNotice }: { videos: Video[]; folders: Folder[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
   const [videoFile, setVideoFile] = useState<File>();
   const [transcript, setTranscript] = useState<File>();
+  const [uploadFolderIds, setUploadFolderIds] = useState<string[]>([]);
+  const [activeFolderId, setActiveFolderId] = useState("all");
+  const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
   const [indexConfiguration, setIndexConfiguration] = useState<IndexConfiguration>(defaultIndexConfiguration);
   const [uploading, setUploading] = useState(false);
   const upload = async () => {
     if (!videoFile) return setNotice("请先选择视频");
     setUploading(true);
-    try { await api.uploadVideo(videoFile, transcript); setVideoFile(undefined); setTranscript(undefined); await refresh(); setNotice("视频上传完成，可以开始建立索引"); }
+    try { await api.uploadVideo(videoFile, transcript, uploadFolderIds); setVideoFile(undefined); setTranscript(undefined); setUploadFolderIds([]); await refresh(); setNotice("视频上传完成，可以开始建立索引"); }
     catch (error) { setNotice(error instanceof Error ? error.message : "上传失败"); }
     finally { setUploading(false); }
   };
@@ -312,10 +326,17 @@ function AssetsPage({ videos, refresh, setNotice }: { videos: Video[]; refresh: 
     try { await api.deleteVideo(video.id); await refresh(); setNotice("已删除视频及其索引"); }
     catch (error) { setNotice(error instanceof Error ? error.message : "删除失败"); }
   };
-  return <div className="stack-page"><div className="upload-panel panel"><div><span className="panel-label">NEW ASSET</span><h2>添加视频素材</h2><p>上传后按需选择 Visual、Face、ASR 或 OCR 通道。</p></div><label className="file-line"><input type="file" accept="video/*" onChange={event => setVideoFile(event.target.files?.[0])} /><span>{videoFile?.name || "选择视频文件"}</span><b>浏览</b></label><label className="file-line secondary"><input type="file" accept=".json,.srt,.vtt" onChange={event => setTranscript(event.target.files?.[0])} /><span>{transcript?.name || "可选：已有字幕 JSON / SRT / VTT"}</span><b>添加</b></label><button className="primary compact" onClick={upload} disabled={uploading}>{uploading ? "正在上传…" : "上传素材"}</button></div>
+  const createFolder = async () => { const name = window.prompt("新建文件夹", ""); if (!name?.trim()) return; try { const folder = await api.createFolder(name.trim()); setActiveFolderId(folder.id); await refresh(); setNotice("文件夹已创建"); } catch (error) { setNotice(error instanceof Error ? error.message : "创建文件夹失败"); } };
+  const renameFolder = async (folder: Folder) => { const name = window.prompt("重命名文件夹", folder.name); if (!name?.trim() || name.trim() === folder.name) return; try { await api.renameFolder(folder.id, name.trim()); await refresh(); setNotice("文件夹已重命名"); } catch (error) { setNotice(error instanceof Error ? error.message : "重命名文件夹失败"); } };
+  const removeFolder = async (folder: Folder) => { if (!window.confirm(`确定删除文件夹「${folder.name}」？其中 ${folder.video_count} 个视频不会被删除。`)) return; try { await api.deleteFolder(folder.id); setActiveFolderId("all"); setSelectedVideoIds([]); await refresh(); setNotice("文件夹已删除，视频和索引均已保留"); } catch (error) { setNotice(error instanceof Error ? error.message : "删除文件夹失败"); } };
+  const assignSelected = async (folderId: string, operation: "add" | "remove" | "replace") => { if (!selectedVideoIds.length) return setNotice("请先勾选视频"); try { await api.updateVideoFolders(selectedVideoIds, folderId ? [folderId] : [], operation); setSelectedVideoIds([]); await refresh(); setNotice(operation === "add" ? "已加入文件夹" : operation === "remove" ? "已从文件夹移除" : folderId ? "已移动到文件夹" : "已移至默认文件夹"); } catch (error) { setNotice(error instanceof Error ? error.message : "更新文件夹归属失败"); } };
+  const activeFolder = folders.find(folder => folder.id === activeFolderId);
+  const visibleVideos = activeFolderId === "all" ? videos : videos.filter(video => activeFolderId === "__default__" ? !video.folder_ids.length : video.folder_ids.includes(activeFolderId));
+  const toggleVideo = (videoId: string) => setSelectedVideoIds(value => value.includes(videoId) ? value.filter(id => id !== videoId) : [...value, videoId]);
+  return <div className="asset-workspace"><aside className="folder-panel panel"><div className="section-head"><div><span className="panel-label">FOLDERS</span><h2>文件夹</h2></div><button className="outline" onClick={createFolder}>新建</button></div><button className={`folder-nav ${activeFolderId === "all" ? "active" : ""}`} onClick={() => { setActiveFolderId("all"); setSelectedVideoIds([]); }}><span>▦</span><b>全部视频</b><small>{videos.length}</small></button>{folders.map(folder => <div className={`folder-nav-wrap ${activeFolderId === folder.id ? "active" : ""}`} key={folder.id}><button className="folder-nav" onClick={() => { setActiveFolderId(folder.id); setSelectedVideoIds([]); }}><span>□</span><b>{folder.name}</b><small>{folder.video_count}</small></button>{folder.kind === "user" && activeFolderId === folder.id && <div className="folder-nav-actions"><button onClick={() => renameFolder(folder)}>重命名</button><button className="danger" onClick={() => removeFolder(folder)}>删除</button></div>}</div>)}</aside><div className="stack-page"><div className="upload-panel panel"><div><span className="panel-label">NEW ASSET</span><h2>添加视频素材</h2><p>不选文件夹即进入默认文件夹；可同时加入多个文件夹。</p></div><label className="file-line"><input type="file" accept="video/*" onChange={event => setVideoFile(event.target.files?.[0])} /><span>{videoFile?.name || "选择视频文件"}</span><b>浏览</b></label><label className="file-line secondary"><input type="file" accept=".json,.srt,.vtt" onChange={event => setTranscript(event.target.files?.[0])} /><span>{transcript?.name || "可选：已有字幕 JSON / SRT / VTT"}</span><b>添加</b></label><label className="folder-upload-select">加入文件夹<select multiple value={uploadFolderIds} onChange={event => setUploadFolderIds(Array.from(event.target.selectedOptions, option => option.value))}>{folders.filter(folder => folder.kind === "user").map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><small>按住 Ctrl / Cmd 可多选</small></label><button className="primary compact" onClick={upload} disabled={uploading}>{uploading ? "正在上传…" : "上传素材"}</button></div>
     <IndexOptionsPanel value={indexConfiguration} onChange={setIndexConfiguration} />
-    <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">LIBRARY</span><h2>视频资产</h2></div><span>{videos.length} items</span></div><div className="asset-list">{videos.map(video => <div className="asset-row" key={video.id}><div className="asset-icon">▶</div><div className="asset-main"><b>{video.name}</b><small>{formatTime(video.duration)} · {video.width}×{video.height} · {video.fps.toFixed(1)} fps</small></div><div className="chips">{video.indexed_modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}</div><span className={`status ${video.status}`}>{statusText(video.status)}</span><div className="asset-actions">{video.status !== "indexing" && <button className="outline index-action" disabled={!indexConfiguration.modalities.length} onClick={() => index(video)}>{indexActionLabel(video, indexConfiguration.modalities)}</button>}<button className="outline" onClick={() => rename(video)}>重命名</button><button className="outline danger" disabled={video.status === "indexing"} onClick={() => remove(video)}>删除</button></div></div>)}{!videos.length && <div className="empty-list">还没有视频素材</div>}</div></div>
-  </div>;
+    <div className="table-panel panel"><div className="section-head"><div><span className="panel-label">LIBRARY</span><h2>{activeFolder?.name || "视频资产"}</h2></div><div className="asset-bulk-actions"><span>{visibleVideos.length} items · 已选 {selectedVideoIds.length}</span>{activeFolder?.kind === "user" && <button className="outline" disabled={!selectedVideoIds.length} onClick={() => assignSelected(activeFolder.id, "remove")}>移出当前文件夹</button>}<select defaultValue="" disabled={!selectedVideoIds.length} onChange={event => { if (event.target.value) { assignSelected(event.target.value, "add"); event.currentTarget.value = ""; } }}><option value="">加入文件夹…</option>{folders.filter(folder => folder.kind === "user").map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><select defaultValue="" disabled={!selectedVideoIds.length} onChange={event => { if (event.target.value) { assignSelected(event.target.value, "replace"); event.currentTarget.value = ""; } }}><option value="">移动到文件夹…</option>{folders.filter(folder => folder.kind === "user").map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select><button className="outline" disabled={!selectedVideoIds.length} onClick={() => assignSelected("", "replace")}>移至默认</button></div></div><div className="asset-list">{visibleVideos.map(video => <div className="asset-row" key={video.id}><input className="asset-check" type="checkbox" checked={selectedVideoIds.includes(video.id)} onChange={() => toggleVideo(video.id)} /><div className="asset-icon">▶</div><div className="asset-main"><b>{video.name}</b><small>{formatTime(video.duration)} · {video.width}×{video.height} · {video.fps.toFixed(1)} fps</small><div className="folder-chips">{video.folders.length ? video.folders.map(folder => <span key={folder.id}>{folder.name}</span>) : <span>默认文件夹</span>}</div></div><div className="chips">{video.indexed_modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}</div><span className={`status ${video.status}`}>{statusText(video.status)}</span><div className="asset-actions">{video.status !== "indexing" && <button className="outline index-action" disabled={!indexConfiguration.modalities.length} onClick={() => index(video)}>{indexActionLabel(video, indexConfiguration.modalities)}</button>}<button className="outline" onClick={() => rename(video)}>重命名</button><button className="outline danger" disabled={video.status === "indexing"} onClick={() => remove(video)}>删除</button></div></div>)}{!visibleVideos.length && <div className="empty-list">该范围还没有视频素材</div>}</div></div>
+  </div></div>;
 }
 
 function IndexesPage({ jobs, videos, refresh, setNotice }: { jobs: Job[]; videos: Video[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
