@@ -67,7 +67,7 @@ _MODALITY_METRIC: dict[str, str] = {
 # Static index types for non-visual modalities
 _STATIC_INDEX_TYPES: dict[str, str] = {
     "asr":     "HNSW",
-    "ocr":     "HNSW",
+    "ocr":     "DISKANN",
     "face":    "IVF_FLAT",
     "speaker": "HNSW",
 }
@@ -101,27 +101,15 @@ _MODALITY_INDEX_TYPE: dict[str, str] = _STATIC_INDEX_TYPES.copy()
 _QUERY_BATCH = 2_000
 
 BULK_QUERY_FIELDS: dict[str, list[str]] = {
-    # "visual" is intentionally absent: the v2 ANN implementation
-    # (milvus_visual_candidates_ann) issues its own collection.search() call
-    # and never consumes pre-fetched rows.  Including "visual" here would
-    # trigger a full query_iterator traversal that reads every frame embedding
-    # before the ANN search runs, wasting significant I/O for no benefit.
+    # "visual" and "ocr" are intentionally absent: both use ANN/hybrid search
+    # and issue their own collection.search() calls without consuming pre-fetched rows.
+    # Including them would trigger a full query_iterator traversal that reads every
+    # frame embedding before the search runs, wasting significant I/O for no benefit.
     "asr": [
         "segment_idx",
         "start_ms",
         "end_ms",
         "text",
-        "has_embedding",
-        "embedding",
-    ],
-    "ocr": [
-        "frame_idx",
-        "region_idx",
-        "frame_ms",
-        "start_ms",
-        "end_ms",
-        "text",
-        "avg_box_score",
         "has_embedding",
         "embedding",
     ],
@@ -494,88 +482,167 @@ def milvus_asr_candidates(
 
 
 # ---------------------------------------------------------------------------
-# OCR — query-all + full-video distribution scoring
+# OCR — DiskANN + BM25 hybrid search
 # ---------------------------------------------------------------------------
 
-def milvus_ocr_candidates(
+def milvus_ocr_candidates_hybrid(
     client: MilvusClient,
     video_id: str,
     query_text: str,
-    query_embedding: np.ndarray,
+    query_embedding: np.ndarray | None,
     limit: int,
     profiler: RetrievalProfiler | None = None,
     rows: list[dict] | None = None,
 ) -> list[Candidate]:
-    """Full-video OCR recall via Milvus; functionally equivalent to the NPZ path.
+    """OCR hybrid search: DiskANN (semantic) + BM25 (lexical).
 
-    ALL OCR frames are stored in Milvus (has_embedding=False for lexical-only
-    frames, has_embedding=True for frames with real semantic vectors).  This
-    mirrors the NPZ layout exactly:
+    Uses Milvus Function Field for server-side BM25 computation and WeightedRanker
+    for result fusion. Lexical-first strategy (sparse_weight > dense_weight).
 
-      NPZ path:  _ocr_chunks_from_npz()   → all N frames (lexical base)
-                 data["embeddings"]        → sparse M embeddings
-                 data["embedding_frame_indices"] → sparse indices
-      Milvus path: ALL rows from query()  → same N frames
-                   rows with has_embedding → same M embeddings + local indices
+    When query_embedding is None, falls back to BM25-only search.
 
-    The downstream _asr_candidates(modality="ocr") call is identical in both paths.
+    Args:
+        client: Milvus client
+        video_id: Video ID
+        query_text: Query text (for BM25)
+        query_embedding: Query embedding (for DiskANN), can be None
+        limit: Number of results to return
+        profiler: Performance profiler
+        rows: DEPRECATED - ignored for compatibility
+
+    Returns:
+        List of Candidate objects with hybrid scores
     """
-    if rows is None:
-        rows = _query_all(
-            client, "ocr", video_id,
-            ["frame_idx", "region_idx", "frame_ms", "start_ms", "end_ms",
-             "text", "avg_box_score", "has_embedding", "embedding"],
-            profiler,
+    from pymilvus import AnnSearchRequest, WeightedRanker
+
+    if rows is not None:
+        logger.debug(
+            "milvus_ocr_candidates_hybrid: 'rows' parameter is deprecated "
+            "and ignored in the hybrid search implementation."
         )
-    if not rows:
-        return []
 
-    # Sort by frame_ms for correct temporal ordering.
-    rows.sort(key=lambda r: int(r.get("frame_ms") or 0))
+    settings = get_settings()
+    col = client.collection_for("ocr")
 
-    # Rebuild the complete chunks list — all frames for lexical scoring,
-    # exactly as _ocr_chunks_from_npz() provides for the NPZ path.
-    chunks: list[dict] = []
-    for idx, row in enumerate(rows):
-        frame_ms = int(row.get("frame_ms") or 0)
-        start_ms = int(row.get("start_ms") or -1)
-        end_ms   = int(row.get("end_ms")   or -1)
-        # start_ms == -1 means an older index entry without frame windows.
+    # Get configuration from settings
+    recall_size = settings.ocr_hybrid_recall_size
+    lexical_weight = settings.ocr_lexical_weight
+    semantic_weight = 1.0 - lexical_weight
+    search_list = settings.ocr_diskann_search_list
+
+    # Handle None query_embedding - use BM25-only fallback
+    if query_embedding is None:
+        logger.info(
+            "No semantic embedding for OCR, using BM25-only search: video_id=%s",
+            video_id
+        )
+        if not query_text or not query_text.strip():
+            logger.warning("Empty query for OCR with no semantic embedding, returning empty results: video_id=%s", video_id)
+            return []
+
+        with (profiler.span("milvus_rpc", "ocr_bm25_only") if profiler else nullcontext()):
+            results = col.search(
+                data=[query_text.strip()],
+                anns_field="sparse_embedding",
+                param={"metric_type": "BM25"},
+                limit=limit,
+                expr=f'video_id == "{video_id}"',
+                output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
+                              "text", "avg_box_score", "has_embedding"],
+            )
+    else:
+        # Normalize query embedding for semantic search
+        query_norm = normalize(np.asarray(query_embedding, dtype=np.float32))
+
+        # Empty query: dense-only fallback
+        if not query_text or not query_text.strip():
+            logger.warning(
+                "Empty query_text for OCR, falling back to dense-only: video_id=%s",
+                video_id
+            )
+            with (profiler.span("milvus_rpc", "ocr_dense_only") if profiler else nullcontext()):
+                results = col.search(
+                    data=[query_norm.tolist()],
+                    anns_field="embedding",
+                    param={
+                        "metric_type": "IP",
+                        "params": {"search_list": search_list},
+                    },
+                    limit=limit,
+                    expr=f'video_id == "{video_id}" AND has_embedding == True',
+                    output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
+                                  "text", "avg_box_score", "has_embedding"],
+                )
+        else:
+            # Hybrid search: Dense + Sparse
+            dense_req = AnnSearchRequest(
+                data=[query_norm.tolist()],
+                anns_field="embedding",
+                param={
+                    "metric_type": "IP",
+                    "params": {"search_list": search_list},
+                },
+                limit=recall_size,
+                expr=f'video_id == "{video_id}" AND has_embedding == True',
+            )
+
+            sparse_req = AnnSearchRequest(
+                data=[query_text.strip()],
+                anns_field="sparse_embedding",
+                param={"metric_type": "BM25"},
+                limit=recall_size,
+                expr=f'video_id == "{video_id}"',
+            )
+
+            with (profiler.span("milvus_rpc", "ocr_hybrid") if profiler else nullcontext()):
+                results = col.hybrid_search(
+                    reqs=[dense_req, sparse_req],
+                    rerank=WeightedRanker(semantic_weight, lexical_weight),
+                    limit=limit,
+                    output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
+                                  "text", "avg_box_score", "has_embedding"],
+                )
+
+    # Convert to Candidate objects (threshold will be applied globally later)
+    candidates: list[Candidate] = []
+    for hit in results[0]:
+        hybrid_score = float(hit.score)
+        # Note: above_threshold will be set to True initially and updated globally later
+        # in search.py after collecting all candidates from all videos
+        above_threshold = True
+        frame_ms = int(hit.entity.get("frame_ms") or 0)
+        start_ms = int(hit.entity.get("start_ms") or -1)
+        end_ms = int(hit.entity.get("end_ms") or -1)
+        text = str(hit.entity.get("text") or "")
+
+        # Handle legacy data without frame windows
         if start_ms < 0:
             start_ms = max(0, frame_ms - 500)
-            end_ms   = frame_ms + 500
-        chunks.append({
-            "chunk_id":  idx,
-            "start_ms":  start_ms,
-            "end_ms":    end_ms,
-            "frame_ms":  frame_ms,
-            "text":      str(row.get("text") or ""),
-            "score":     float(row.get("avg_box_score") or 0.0),
-        })
+            end_ms = frame_ms + 500
 
-    # Rebuild sparse semantic arrays — only rows with real embeddings.
-    # has_embedding defaults to True for rows from old schema (all had real vectors).
-    semantic_local_indices = [
-        i for i, r in enumerate(rows)
-        if r.get("has_embedding", True)
-    ]
-    if semantic_local_indices and query_embedding is not None:
-        semantic_embeddings     = np.array(
-            [rows[i]["embedding"] for i in semantic_local_indices], dtype=np.float32
-        )
-        # Local positions into the chunks list — matches the NPZ path contract.
-        embedding_chunk_indices = np.array(semantic_local_indices, dtype=np.int32)
-    else:
-        semantic_embeddings     = None
-        embedding_chunk_indices = None
+        evidence_text = f"[ocr_hybrid] {text[:100]} · hybrid={hybrid_score:.3f}"
+        # Note: "低于阈值" suffix will be added later after global threshold calculation
 
-    return _asr_candidates(
-        chunks, query_text, video_id, limit,
-        modality="ocr",
-        semantic_embeddings=semantic_embeddings,
-        embedding_chunk_indices=embedding_chunk_indices,
-        semantic_query=query_embedding,
-    )
+        candidates.append(Candidate(
+            video_id=video_id,
+            start_time=_seconds(start_ms),
+            end_time=_seconds(end_ms),
+            score=hybrid_score,
+            modality="ocr",
+            evidence=evidence_text,
+            above_threshold=above_threshold,
+            best_time=_seconds(frame_ms),
+            unit_type="frame",
+            unit_id=int(hit.entity.get("frame_idx") or 0),
+            best_ms=frame_ms,
+            text=text,
+            features={
+                "ocr_confidence": float(hit.entity.get("avg_box_score") or 0.0),
+                "has_embedding": bool(hit.entity.get("has_embedding", True)),
+            },
+        ))
+
+    return candidates
 
 
 # ---------------------------------------------------------------------------

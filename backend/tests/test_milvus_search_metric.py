@@ -76,7 +76,7 @@ def test_modality_index_type_matches_collection_configs():
 @pytest.mark.parametrize("modality,expected_metric,expected_index", [
     ("visual",  "COSINE",   None),  # Visual uses dynamic config (DISKANN or HNSW)
     ("asr",     "IP",       "HNSW"),
-    ("ocr",     "IP",       "HNSW"),
+    ("ocr",     "IP",       "DISKANN"),  # OCR now uses DISKANN
     ("face",    "L2",       "IVF_FLAT"),
     ("speaker", "COSINE",   "HNSW"),
 ])
