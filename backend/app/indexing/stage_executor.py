@@ -94,16 +94,17 @@ def _setup_milvus_context(
     ):
         return None
     try:
-        from app.vector_store.milvus.milvus_asset_version import next_asset_version
+        from app.vector_store.milvus.milvus_asset_version import reserve_next_attempt_version
         from app.vector_store.milvus.milvus_client import get_milvus_client
         from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
 
         client = get_milvus_client()
         return MilvusWriteContext(
             video_id=video_id,
-            # Do not advance the reader-visible version until rows are written
-            # and their stage manifest is safely published.
-            asset_version=next_asset_version(index_dir),
+            # Reserve before writing so an interrupted attempt is never reused.
+            # Online readers keep using the per-stage manifest until
+            # _write_manifest validates and publishes this version.
+            asset_version=reserve_next_attempt_version(index_dir),
             client=client,
         )
     except Exception as exc:

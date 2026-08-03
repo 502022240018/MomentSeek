@@ -352,6 +352,70 @@ def test_asset_version_bump_handles_non_integer_legacy(tmp_path):
     assert bump_asset_version(tmp_path) == "2"
 
 
+def test_interrupted_attempt_uses_a_new_version_and_preserves_reader_pointer(tmp_path):
+    """A failed v2 write cannot contaminate a v3 retry or replace published v1."""
+    from types import SimpleNamespace
+
+    from app.indexing.manifest import load_index_manifest, update_channel_manifest
+    from app.indexing.stage_executor import StageContext, _write_manifest
+    from app.vector_store.milvus.milvus_asset_version import (
+        current_asset_version,
+        current_attempt_version,
+        publish_asset_version,
+        reserve_next_attempt_version,
+    )
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
+
+    update_channel_manifest(
+        tmp_path,
+        video_id="vid_retry",
+        duration_seconds=1,
+        segment_seconds=1,
+        channel="visual",
+        channel_manifest={"milvus_asset_version": "1", "milvus_row_count": 3},
+    )
+    publish_asset_version(tmp_path, "1")
+
+    failed_version = reserve_next_attempt_version(tmp_path)
+    assert failed_version == "2"
+    assert current_asset_version(tmp_path) == "1"
+    assert load_index_manifest(tmp_path)["channels"]["visual"]["milvus_asset_version"] == "1"
+
+    # Simulate an interrupted v2 attempt that left only part of its rows behind.
+    failed_client = MagicMock()
+    failed_client.count_video_modality_version.return_value = 1
+    failed_context = StageContext(
+        video={"id": "vid_retry", "duration": 1}, options={},
+        settings=SimpleNamespace(visual_model="siglip2-test", visual_sample_fps=1.0, visual_segment_seconds=1.0),
+        pool=None, video_path="unused", index_dir=tmp_path, working_dir=tmp_path,
+        milvus_ctx=MilvusWriteContext(video_id="vid_retry", asset_version=failed_version, client=failed_client),
+    )
+    with pytest.raises(RuntimeError, match="Milvus verification failed"):
+        _write_manifest("visual", failed_context, {"milvus_rows": 2})
+    assert load_index_manifest(tmp_path)["channels"]["visual"]["milvus_asset_version"] == "1"
+
+    retry_version = reserve_next_attempt_version(tmp_path)
+    assert retry_version == "3"
+    assert current_attempt_version(tmp_path) == "3"
+
+    successful_client = MagicMock()
+    successful_client.count_video_modality_version.return_value = 2
+    successful_client.delete_video_modality_except_version.return_value = 4
+    successful_context = StageContext(
+        video={"id": "vid_retry", "duration": 1}, options={},
+        settings=SimpleNamespace(visual_model="siglip2-test", visual_sample_fps=1.0, visual_segment_seconds=1.0),
+        pool=None, video_path="unused", index_dir=tmp_path, working_dir=tmp_path,
+        milvus_ctx=MilvusWriteContext(video_id="vid_retry", asset_version=retry_version, client=successful_client),
+    )
+    _write_manifest("visual", successful_context, {"milvus_rows": 2})
+
+    assert load_index_manifest(tmp_path)["channels"]["visual"]["milvus_asset_version"] == "3"
+    assert current_asset_version(tmp_path) == "3"
+    successful_client.delete_video_modality_except_version.assert_called_once_with(
+        "vid_retry", "visual", "3"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 15. Stale write-queue jobs are cancelled on re-index  (隐患 2)
 # ---------------------------------------------------------------------------

@@ -316,15 +316,15 @@ class TestSetupMilvusContext:
         with (
             patch("app.vector_store.milvus.milvus_client.get_milvus_client", _fake_get_client),
             patch(
-                "app.vector_store.milvus.milvus_asset_version.next_asset_version",
+                "app.vector_store.milvus.milvus_asset_version.reserve_next_attempt_version",
                 return_value="2",
-            ) as mock_next,
+            ) as mock_reserve,
             patch(
                 "app.vector_store.milvus.milvus_indexer.MilvusWriteContext", autospec=True
             ) as ctx_cls,
         ):
             result = sr._setup_milvus_context(video_id, fake_dir)
-        return result, ctx_cls, mock_next
+        return result, ctx_cls, mock_reserve
 
     def test_success_returns_context(self, tmp_path):
         ctx, ctx_cls, _ = self._call("vid1", fail_client=False, tmp_path=tmp_path)
@@ -342,26 +342,26 @@ class TestSetupMilvusContext:
         with (
             patch("app.vector_store.milvus.milvus_client.get_milvus_client",
                   side_effect=ConnectionRefusedError("Milvus not available")),
-            patch("app.vector_store.milvus.milvus_asset_version.next_asset_version") as mock_next,
+            patch("app.vector_store.milvus.milvus_asset_version.reserve_next_attempt_version") as mock_reserve,
         ):
             import app.indexing.stage_executor as sr
             fake_dir = tmp_path / "vid4"
             fake_dir.mkdir()
             with pytest.raises(RuntimeError):
                 sr._setup_milvus_context("vid4", fake_dir)
-            mock_next.assert_not_called()
+            mock_reserve.assert_not_called()
 
     def test_asset_version_is_reserved_only_after_connection_success(self, tmp_path):
         """The pending version is allocated only after connection succeeds."""
         with (
             patch("app.vector_store.milvus.milvus_client.get_milvus_client",
                   return_value=MagicMock()),
-            patch("app.vector_store.milvus.milvus_asset_version.next_asset_version",
-                  return_value="3") as mock_next,
+            patch("app.vector_store.milvus.milvus_asset_version.reserve_next_attempt_version",
+                  return_value="3") as mock_reserve,
             patch("app.vector_store.milvus.milvus_indexer.MilvusWriteContext", autospec=True),
         ):
             import app.indexing.stage_executor as sr
             fake_dir = tmp_path / "vid5"
             fake_dir.mkdir()
             sr._setup_milvus_context("vid5", fake_dir)
-            mock_next.assert_called_once()
+            mock_reserve.assert_called_once()
