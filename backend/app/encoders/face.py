@@ -87,4 +87,3 @@ class FaceEncoder:
         face = max(faces, key=lambda item: float(np.prod(item.bbox[2:] - item.bbox[:2])))
         return normalize(face.normed_embedding)
 
-

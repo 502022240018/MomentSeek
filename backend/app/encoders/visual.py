@@ -276,7 +276,6 @@ class OpenClipEncoder:
     def encode_query(self, text: str | None, image_path: str | None, alpha: float = 0.5) -> np.ndarray:
         return self.encode_queries([text] if text else [], image_path, alpha=alpha)[0]
 
-
 class HfVisualEncoder:
     def __init__(
         self,

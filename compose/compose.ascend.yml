@@ -12,7 +12,7 @@ services:
       MODEL_MANIFEST: /app/deploy/models/runtime.models.json
       NPU_DEVICE_ID: "${NPU_DEVICE_ID:-0}"
       ASCEND_VISIBLE_DEVICES: "${ASCEND_VISIBLE_DEVICES:?请设置宿主机物理 NPU 卡号}"
-      ASCEND_RT_VISIBLE_DEVICES: "${ASCEND_RT_VISIBLE_DEVICES:?请设置宿主机物理 NPU 卡号}"
+      ASCEND_RT_VISIBLE_DEVICES: "${ASCEND_RT_VISIBLE_DEVICES:?请设置容器内逻辑 NPU 卡号（单卡映射时为 0）}"
       TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
     devices:
       - "/dev/davinci${HOST_NPU_DEVICE_ID:?请设置 HOST_NPU_DEVICE_ID}:/dev/davinci${HOST_NPU_DEVICE_ID:?请设置 HOST_NPU_DEVICE_ID}"

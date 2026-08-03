@@ -399,4 +399,3 @@ class TestSetupMilvusContext:
             sr._setup_milvus_context("vid5", fake_dir)
             mock_bump.assert_called_once()
 
-

@@ -74,4 +74,3 @@ class TextEmbeddingEncoder:
         )
         return np.asarray(vectors, dtype=np.float32)
 
-
