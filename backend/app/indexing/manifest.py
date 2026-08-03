@@ -57,6 +57,27 @@ def update_channel_manifest(
     return payload
 
 
+def publish_recovery_channel_version(
+    index_dir: str | Path,
+    *,
+    channel: str,
+    asset_version: str,
+    row_count: int,
+) -> dict[str, Any]:
+    """Publish an offline-rebuilt Milvus version without changing channel metadata."""
+    path = manifest_path(index_dir)
+    payload = load_index_manifest(index_dir)
+    if payload is None:
+        raise ValueError(f"cannot publish recovery data without {path.name}")
+    channel_manifest = (payload.get("channels") or {}).get(channel)
+    if not isinstance(channel_manifest, dict):
+        raise ValueError(f"cannot publish recovery data: missing {channel} channel")
+    channel_manifest["milvus_asset_version"] = str(asset_version)
+    channel_manifest["milvus_row_count"] = int(row_count)
+    atomic_save_json(path, payload)
+    return payload
+
+
 def require_channel_manifest(index_dir: str | Path, video_name: str, channel: str) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest = load_index_manifest(index_dir)
     if manifest is None:

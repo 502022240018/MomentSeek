@@ -48,14 +48,15 @@ def rebuild_ocr_assets(index_root: Path, *, dry_run: bool = False) -> int:
 
     # Discovery and dry runs should also work in a lightweight development
     # environment that does not install the optional Milvus client package.
-    from .milvus_asset_version import current_asset_version
+    from app.indexing.manifest import publish_recovery_channel_version
+    from .milvus_asset_version import next_asset_version, publish_asset_version
     from .milvus_client import get_milvus_client
     from .milvus_indexer import reindex_from_file
     from .milvus_schema import MODEL_VERSIONS
 
     client = get_milvus_client()
     for position, asset in enumerate(assets, start=1):
-        asset_version = current_asset_version(asset.index_dir)
+        asset_version = next_asset_version(asset.index_dir)
         logger.info(
             "Rebuilding OCR %d/%d video=%s asset_version=%s from %s",
             position,
@@ -64,7 +65,7 @@ def rebuild_ocr_assets(index_root: Path, *, dry_run: bool = False) -> int:
             asset_version,
             asset.npz_path,
         )
-        reindex_from_file(
+        written_rows = reindex_from_file(
             client=client,
             modality="ocr",
             video_id=asset.video_id,
@@ -72,6 +73,27 @@ def rebuild_ocr_assets(index_root: Path, *, dry_run: bool = False) -> int:
             model_version=MODEL_VERSIONS["ocr"],
             npz_path=str(asset.npz_path),
         )
+        persisted_rows = client.count_video_modality_version(
+            asset.video_id, "ocr", asset_version
+        )
+        if persisted_rows != written_rows:
+            raise RuntimeError(
+                f"OCR recovery verification failed for {asset.video_id}: "
+                f"expected={written_rows} persisted={persisted_rows}"
+            )
+        # Readers switch only after the replacement rows are fully visible.
+        publish_recovery_channel_version(
+            asset.index_dir,
+            channel="ocr",
+            asset_version=asset_version,
+            row_count=persisted_rows,
+        )
+        deleted = client.delete_video_modality_except_version(
+            asset.video_id, "ocr", asset_version
+        )
+        if deleted < 0:
+            logger.warning("OCR recovery published but old rows could not be cleaned: %s", asset.video_id)
+        publish_asset_version(asset.index_dir, asset_version)
     return len(assets)
 
 

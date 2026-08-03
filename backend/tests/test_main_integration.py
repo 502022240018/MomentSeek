@@ -187,6 +187,7 @@ def test_create_index_job_queues_only_requested_modalities(monkeypatch, tmp_path
         app_data_dir=tmp_path / "runtime",
         app_model_dir=tmp_path / "models",
         indexer_mode="process_exit",
+        milvus_enabled=False,
     )
     settings.ensure_dirs()
     catalog = Catalog(settings.db_path)
@@ -300,6 +301,7 @@ def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
         asr_model="turbo",
         asr_language="auto",
         asr_semantic_enabled=False,
+        milvus_enabled=False,
     )
     settings.ensure_dirs()
     catalog = Catalog(settings.db_path)

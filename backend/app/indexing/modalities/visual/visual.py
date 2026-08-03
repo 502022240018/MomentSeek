@@ -434,11 +434,22 @@ def build_visual_index(
         sample_fps=sample_fps,
         explicit_segment_times=explicit_segment_times,
     )
-    atomic_save_npz(output_path, **payload)
+    milvus_rows = None
     if milvus_ctx is not None:
-        from app.vector_store.milvus.milvus_indexer import write_modality_to_milvus
+        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
 
-        write_modality_to_milvus(milvus_ctx, "visual", output_path)
+        milvus_rows = write_modality_from_memory(
+            milvus_ctx,
+            "visual",
+            {
+                "embeddings": payload["frame_embeddings"],
+                "frame_times_ms": payload["frame_times_ms"],
+                "segment_frame_offsets": payload["segment_frame_offsets"],
+                "segment_times_ms": payload.get("segment_times_ms"),
+            },
+        )
+    # Retained only as an offline recovery artifact; no runtime path reads it.
+    atomic_save_npz(output_path, **payload)
     return {
         "segments_total": segments_total,
         "segments_with_frames": segments_with_frames,
@@ -452,4 +463,5 @@ def build_visual_index(
         "segment_strategy": active_strategy,
         "segment_times": segment_time_source,
         "shot_detector": active_detector,
+        "milvus_rows": milvus_rows,
     }

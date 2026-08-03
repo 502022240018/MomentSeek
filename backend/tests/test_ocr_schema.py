@@ -1,6 +1,8 @@
 """Unit tests for the OCR hybrid schema and legacy-schema guard."""
 from __future__ import annotations
 
+import sys
+
 from types import SimpleNamespace
 
 import pytest

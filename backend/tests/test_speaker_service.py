@@ -79,7 +79,6 @@ def test_video_speakers_applies_mutable_sqlite_overlay(tmp_path):
     catalog.upsert_utterance_override("a", 1, 0, False)
 
     with (
-        patch("app.identity.speaker_service.milvus_read_enabled", return_value=True),
         patch("app.identity.speaker_service._speaker_data_from_milvus", return_value=speaker_data),
         patch("app.identity.speaker_service._texts_from_milvus", return_value=_ASR_TEXTS),
     ):
@@ -166,9 +165,9 @@ def test_voice_search_matches_individual_utterances(tmp_path):
     mock_collection.search.side_effect = mock_search_side_effect
 
     with (
-        patch("app.identity.speaker_service.milvus_read_enabled", return_value=True),
         patch("app.identity.speaker_service._speaker_data_from_milvus", side_effect=_mock_speaker),
         patch("app.identity.speaker_service._texts_from_milvus", return_value=_ASR_TEXTS),
+        patch("app.identity.speaker_service._published_asset_version", return_value="7"),
         patch("app.vector_store.milvus.milvus_client.ensure_milvus_reachable", return_value=None),
         patch("app.vector_store.milvus.milvus_client.get_milvus_client", return_value=mock_client),
     ):
@@ -212,57 +211,21 @@ def test_speaker_data_from_milvus_checks_expected_utterance_count():
             _speaker_data_from_milvus("video-1", expected_utterances=2)
 
 
-def test_load_speaker_data_falls_back_after_invalid_milvus_rows(tmp_path):
-    path = save_video_speaker_index(
-        tmp_path,
-        "video-1",
-        np.asarray([[1, 0], [0, 1]], dtype=np.float32),
-    )
-    with (
-        patch("app.identity.speaker_service.milvus_read_enabled", return_value=True),
-        patch("app.identity.speaker_service.milvus_fallback_enabled", return_value=True),
-        patch(
-            "app.identity.speaker_service._speaker_data_from_milvus",
-            side_effect=SpeakerMilvusCoverageError("incomplete"),
-        ),
-    ):
-        data = _load_speaker_data(path, "video-1")
-
-    assert len(data["utterance_embeddings"]) == 2
-
-
-def test_load_speaker_data_honors_disabled_fallback(tmp_path):
+def test_load_speaker_data_propagates_milvus_coverage_error(tmp_path):
     path = tmp_path / "video-1" / "speaker.npz"
-    with (
-        patch("app.identity.speaker_service.milvus_read_enabled", return_value=True),
-        patch("app.identity.speaker_service.milvus_fallback_enabled", return_value=False),
-        patch(
-            "app.identity.speaker_service._speaker_data_from_milvus",
-            side_effect=RuntimeError("Milvus unavailable"),
-        ),
-        patch("app.identity.speaker_service.load_speaker_index") as load_npz,
+    with patch(
+        "app.identity.speaker_service._speaker_data_from_milvus",
+        side_effect=SpeakerMilvusCoverageError("incomplete"),
     ):
-        with pytest.raises(RuntimeError, match="Milvus unavailable"):
+        with pytest.raises(SpeakerMilvusCoverageError, match="incomplete"):
             _load_speaker_data(path, "video-1")
 
-    load_npz.assert_not_called()
 
-
-def test_voice_search_uses_npz_only_for_uncovered_milvus_videos(tmp_path):
+def test_voice_search_returns_only_milvus_results(tmp_path):
     catalog = Catalog(tmp_path / "catalog.sqlite3")
     make_video(catalog, "a", np.asarray([[1, 0], [0, 1]], dtype=np.float32))
     make_video(catalog, "b", np.asarray([[1, 0], [0, 1]], dtype=np.float32))
     index_root = tmp_path / "indexes"
-    save_video_speaker_index(
-        index_root,
-        "a",
-        np.asarray([[1, 0], [0, 1]], dtype=np.float32),
-    )
-    save_video_speaker_index(
-        index_root,
-        "b",
-        np.asarray([[0.95, 0.05], [0, 1]], dtype=np.float32),
-    )
     milvus_hit = {
         "video_id": "a",
         "video_name": "a",
@@ -277,14 +240,10 @@ def test_voice_search_uses_npz_only_for_uncovered_milvus_videos(tmp_path):
     }
 
     with (
-        patch("app.identity.speaker_service.milvus_read_enabled", return_value=True),
-        patch("app.identity.speaker_service.milvus_fallback_enabled", return_value=True),
         patch(
             "app.identity.speaker_service._voice_search_vectors_milvus",
             return_value=([milvus_hit], {"a"}),
         ),
-        patch("app.identity.speaker_service._speaker_data_from_milvus", return_value=None),
-        patch("app.identity.speaker_service._texts_for_video", return_value=["first", "second"]),
     ):
         hits = voice_search_vectors(
             index_root,
@@ -294,39 +253,4 @@ def test_voice_search_uses_npz_only_for_uncovered_milvus_videos(tmp_path):
             limit=5,
         )
 
-    assert {hit["video_id"] for hit in hits} == {"a", "b"}
-    assert sum(hit["video_id"] == "a" for hit in hits) == 1
-
-
-def test_voice_search_rejects_coverage_gap_when_fallback_is_disabled(tmp_path):
-    catalog = Catalog(tmp_path / "catalog.sqlite3")
-    make_video(catalog, "a", np.asarray([[1, 0], [0, 1]], dtype=np.float32))
-    make_video(catalog, "b", np.asarray([[1, 0], [0, 1]], dtype=np.float32))
-    index_root = tmp_path / "indexes"
-    save_video_speaker_index(
-        index_root,
-        "a",
-        np.asarray([[1, 0], [0, 1]], dtype=np.float32),
-    )
-    save_video_speaker_index(
-        index_root,
-        "b",
-        np.asarray([[1, 0], [0, 1]], dtype=np.float32),
-    )
-
-    with (
-        patch("app.identity.speaker_service.milvus_read_enabled", return_value=True),
-        patch("app.identity.speaker_service.milvus_fallback_enabled", return_value=False),
-        patch(
-            "app.identity.speaker_service._voice_search_vectors_milvus",
-            return_value=([], {"a"}),
-        ),
-    ):
-        with pytest.raises(SpeakerMilvusCoverageError, match="video\\(s\\): b"):
-            voice_search_vectors(
-                index_root,
-                catalog,
-                query_vectors=np.asarray([[1, 0]], dtype=np.float32),
-                video_ids=["a", "b"],
-                limit=5,
-            )
+    assert hits == [milvus_hit]

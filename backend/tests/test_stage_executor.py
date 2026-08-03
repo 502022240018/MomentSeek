@@ -13,6 +13,7 @@ def test_asr_speaker_postprocessing_is_identical_with_and_without_pool(monkeypat
         app_model_dir=tmp_path / "models",
         asr_semantic_enabled=False,
         speaker_device="cpu",
+        milvus_enabled=False,
     )
     settings.ensure_dirs()
     video_path = settings.upload_dir / "video.mp4"

@@ -1,15 +1,12 @@
-"""Asset-version management for Milvus dual-write.
+"""Asset-version management for Milvus versioned publication.
 
 Every video in Milvus carries an ``asset_version`` string that is
 incremented each time the video is re-indexed.  This provides two
 safety guarantees:
 
-1. **Stale retry isolation** — write-queue jobs enqueued during a
-   previous index run carry the version that was current *then*.
-   After a re-index the version is bumped, so a stale retry writes
-   to different PKs and cannot silently overwrite fresh data.
-   ``cancel_pending_for_video()`` on the write-queue should be called
-   *before* bumping so that stale retries are discarded entirely.
+1. **Stale-write isolation** — a previous or interrupted index run writes
+   to a different version and cannot silently overwrite a newly published
+   generation.
 
 2. **Version-scoped deletion** — ``delete_video_version()`` on the
    client can remove exactly one generation of data without touching
@@ -46,8 +43,33 @@ def current_asset_version(index_dir: Path) -> str:
     return "1"
 
 
+def next_asset_version(index_dir: Path) -> str:
+    """Return the next version without publishing it.
+
+    A re-index must write and validate its new rows before changing the
+    version visible to online readers.  Keeping this operation side-effect
+    free is what makes a failed build harmless to the currently published
+    index.
+    """
+    old = current_asset_version(index_dir)
+    try:
+        return str(int(old) + 1)
+    except ValueError:
+        return "2"
+
+
+def publish_asset_version(index_dir: Path, version: str) -> None:
+    """Persist a version only after its modality has been published."""
+    meta_path = index_dir / _META_FILE
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(
+        json.dumps({"asset_version": str(version)}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 def bump_asset_version(index_dir: Path) -> str:
-    """Increment the stored asset_version and return the **new** value.
+    """Compatibility helper for offline recovery tools.
 
     The caller is responsible for holding the per-video stage lock before
     calling this function to avoid races in multi-process environments.
@@ -56,16 +78,8 @@ def bump_asset_version(index_dir: Path) -> str:
     stored value is not a parseable integer (legacy migration edge-case)
     the counter restarts at ``"2"``.
     """
-    meta_path = index_dir / _META_FILE
     old = current_asset_version(index_dir)
-    try:
-        new = str(int(old) + 1)
-    except ValueError:
-        new = "2"  # non-integer legacy value — restart from 2
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.write_text(
-        json.dumps({"asset_version": new}, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    new = next_asset_version(index_dir)
+    publish_asset_version(index_dir, new)
     logger.debug("asset_version bumped %s → %s in %s", old, new, index_dir)
     return new

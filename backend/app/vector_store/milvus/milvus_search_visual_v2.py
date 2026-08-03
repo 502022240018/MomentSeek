@@ -52,6 +52,7 @@ def _reset_index_verification() -> None:
 def milvus_visual_candidates_ann(
     client: MilvusClient,
     video_id: str,
+    asset_version: str,
     query_texts: list[np.ndarray],
     limit: int = 20,
     profile: str = "balanced",
@@ -87,7 +88,7 @@ def milvus_visual_candidates_ann(
 
     # ANN recall of candidate frames (multi-query batch)
     ann_results = _ann_recall_multi_query(
-        client, video_id, query_values, ann_top_k,
+        client, video_id, asset_version, query_values, ann_top_k,
         settings.visual_use_diskann, profiler
     )
 
@@ -167,6 +168,7 @@ def _verify_index_type(client: MilvusClient, expect_diskann: bool) -> None:
 def _ann_recall_multi_query(
     client: MilvusClient,
     video_id: str,
+    asset_version: str,
     query_values: np.ndarray,
     top_k: int,
     use_diskann: bool,
@@ -211,7 +213,7 @@ def _ann_recall_multi_query(
                 anns_field="embedding",
                 param=search_params,
                 limit=top_k,
-                expr=f'video_id == "{video_id}"',
+                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
                 output_fields=[
                     "frame_idx",
                     "timestamp_ms",

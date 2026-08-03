@@ -144,25 +144,16 @@ class Settings(BaseSettings):
     # evidence ahead of auxiliary-only candidates within each threshold tier.
     search_visual_priority_enabled: bool = True
 
-    # Milvus is the primary vector store. SQLite remains the metadata/catalog
-    # database and NPZ files are retained as a local recovery/search fallback.
+    # Milvus is the only online vector store. SQLite remains metadata/catalog;
+    # retained NPZ files are offline recovery artifacts only.
     milvus_enabled: bool = True
     milvus_host: str = "milvus"
     milvus_port: int = 19530
-    # Bound fail-open retrieval latency. A request stops retrying Milvus after
-    # its first failed operation and serves remaining videos from NPZ.
+    # Bound Milvus retrieval latency. Requests fail explicitly after a failed
+    # operation; retained NPZ artifacts are never queried online.
     milvus_query_timeout_seconds: float = 3.0
-    milvus_read_enabled: bool = True
     milvus_write_enabled: bool = True
-    milvus_shadow_compare_enabled: bool = False
-    milvus_rollout_percent: int = 100
     milvus_search_video_batch_size: int = 8
-    # Local NPZ is written before Milvus, so "warn" preserves service
-    # availability and leaves a recoverable artifact for later backfill.
-    milvus_write_fail_policy: Literal["raise", "warn"] = "warn"
-    # Fail open to local NPZ indexes when Milvus is unavailable or temporarily
-    # rebuilding an index. This applies to every retrieval modality.
-    milvus_fallback_enabled: bool = True
 
     # Visual ANN search configuration
     visual_use_diskann: bool = True  # Index type: True=DiskANN (disk), False=HNSW (memory)
@@ -186,13 +177,6 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_npu_worker_mode(cls, value: object) -> object:
         return value.strip().casefold() if isinstance(value, str) else value
-
-    @field_validator("milvus_rollout_percent")
-    @classmethod
-    def validate_milvus_rollout_percent(cls, value: int) -> int:
-        if not 0 <= value <= 100:
-            raise ValueError("milvus_rollout_percent 必须在 0 到 100 之间")
-        return value
 
     @field_validator("milvus_query_timeout_seconds")
     @classmethod
