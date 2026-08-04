@@ -71,23 +71,6 @@ class SearchResult:
         return value
 
 
-def normalize_text(text: str) -> str:
-    return normalize_search_text(text)
-
-
-def lexical_score(query: str, text: str) -> float:
-    query_value, text_value = normalize_text(query), normalize_text(text)
-    if not query_value or not text_value:
-        return 0
-    if query_value in text_value:
-        return 1
-    size = 2 if len(query_value) > 1 else 1
-    query_grams = {query_value[index:index + size] for index in range(max(1, len(query_value) - size + 1))}
-    text_grams = {text_value[index:index + size] for index in range(max(1, len(text_value) - size + 1))}
-    coverage = len(query_grams & text_grams) / max(1, len(query_grams))
-    return float(coverage)
-
-
 def robust_distribution(scores: np.ndarray) -> dict:
     """Return per-query/per-video robust z-scores and empirical percentiles."""
     values = np.asarray(scores, dtype=np.float32)
@@ -132,11 +115,6 @@ def face_confidence(cosine: float) -> float:
     return float(1.0 / (1.0 + np.exp(-12.0 * (cosine - 0.45))))
 
 
-def asr_semantic_confidence(cosine: float) -> float:
-    """Map normalized text embedding cosine to a useful [0,1] ASR score."""
-    return float(1.0 / (1.0 + np.exp(-10.0 * (cosine - 0.35))))
-
-
 def visual_confidence(cosine: float) -> float:
     """Map visual raw cosine to a cross-video ranking score."""
     return float(np.clip((cosine + 1.0) / 2.0, 0, 1))
@@ -144,20 +122,6 @@ def visual_confidence(cosine: float) -> float:
 
 def _seconds(ms: int | float) -> float:
     return float(ms) / 1000.0
-
-
-def _decode_text_array(values: np.ndarray) -> list[str]:
-    return [str(item) for item in values.tolist()]
-
-
-def _semantic_arrays(data) -> tuple[np.ndarray | None, np.ndarray | None]:
-    if "embeddings" not in data.files or "embedding_chunk_indices" not in data.files:
-        return None, None
-    embeddings = data["embeddings"]
-    indices = data["embedding_chunk_indices"].astype(np.int32)
-    if embeddings.ndim != 2 or not len(embeddings) or not len(indices):
-        return None, None
-    return np.asarray(embeddings, dtype=np.float32), indices
 
 
 def _visual_index_arrays(data) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
@@ -423,253 +387,6 @@ def _face_candidates(data, query: np.ndarray, video_id: str, limit: int, thresho
             features={"face_cosine": cosine},
         ))
     return candidates
-
-
-def _semantic_chunk_scores(
-    chunk_count: int,
-    semantic_embeddings: np.ndarray | None,
-    embedding_chunk_indices: np.ndarray | None,
-    semantic_query: np.ndarray | None,
-    limit: int,
-) -> tuple[np.ndarray, np.ndarray, set[int]]:
-    scores = np.zeros(chunk_count, dtype=np.float32)
-    cosines_by_chunk = np.full(chunk_count, np.nan, dtype=np.float32)
-    if (
-        semantic_embeddings is None
-        or embedding_chunk_indices is None
-        or semantic_query is None
-        or not len(semantic_embeddings)
-        or not len(embedding_chunk_indices)
-    ):
-        return scores, cosines_by_chunk, set()
-    cosines = semantic_embeddings @ normalize(semantic_query)
-    percentiles = robust_distribution(cosines)["percentiles"]
-    for local_index, chunk_index in enumerate(embedding_chunk_indices):
-        chunk_index = int(chunk_index)
-        if not 0 <= chunk_index < chunk_count:
-            continue
-        cosine = float(cosines[local_index])
-        percentile = float(percentiles[local_index]) if len(percentiles) else 0.0
-        cosines_by_chunk[chunk_index] = cosine
-        scores[chunk_index] = 0.7 * asr_semantic_confidence(cosine) + 0.3 * percentile
-    order = np.argsort(scores)[::-1]
-    return scores, cosines_by_chunk, set(int(index) for index in order[:min(len(order), limit)])
-
-
-def _text_candidate_decision(lexical: float, semantic: float) -> tuple[str, bool]:
-    semantic_hit = semantic >= 0.55
-    lexical_hit = lexical >= 0.25
-    if semantic_hit and lexical_hit:
-        return "semantic_lexical_hit", True
-    if semantic_hit:
-        return "semantic_hit", True
-    if lexical_hit:
-        return "lexical_hit", True
-    return "weak", False
-
-
-def _text_candidate_evidence(detail: str, lexical: float, semantic: float, cosine: float | None) -> str:
-    metrics = [f"lexical={lexical:.3f}"]
-    if cosine is None:
-        metrics.append("semantic=unavailable")
-    else:
-        metrics.extend((f"semantic={semantic:.3f}", f"semantic_cosine={cosine:.3f}"))
-    return f"{detail} · {' · '.join(metrics)}"
-
-
-def _asr_candidates(
-    chunks: list[dict],
-    query_text: str,
-    video_id: str,
-    limit: int,
-    modality: str = "asr",
-    semantic_embeddings: np.ndarray | None = None,
-    embedding_chunk_indices: np.ndarray | None = None,
-    semantic_query: np.ndarray | None = None,
-) -> list[Candidate]:
-    if not chunks:
-        return []
-
-    lexical_scores = np.asarray([lexical_score(query_text, chunk.get("text", "")) for chunk in chunks], dtype=np.float32)
-    semantic_scores, semantic_cosines, semantic_top_indices = _semantic_chunk_scores(
-        len(chunks), semantic_embeddings, embedding_chunk_indices, semantic_query, limit
-    )
-
-    combined_scores = np.maximum(lexical_scores, 0.65 * semantic_scores + 0.35 * lexical_scores)
-    candidate_indices = [
-        int(index) for index in np.argsort(combined_scores)[::-1]
-        if lexical_scores[index] > 0 or index in semantic_top_indices
-    ][:limit]
-
-    candidates: list[Candidate] = []
-    for index in candidate_indices:
-        chunk = chunks[index]
-        lexical = float(lexical_scores[index])
-        semantic = float(semantic_scores[index])
-        semantic_cosine = None if np.isnan(semantic_cosines[index]) else float(semantic_cosines[index])
-        score = float(combined_scores[index])
-        decision, above = _text_candidate_decision(lexical, semantic)
-
-        detail = str(chunk.get("text", "")).strip()
-        display_features = {}
-
-        if modality == "ocr":
-            detail, display_features = _ocr_display_text(query_text, chunk)
-
-        evidence = _text_candidate_evidence(detail, lexical, semantic, semantic_cosine)
-        start_ms = int(chunk.get("start_ms", round(float(chunk.get("start_time", 0)) * 1000)))
-        end_ms = int(chunk.get("end_ms", round(float(chunk.get("end_time", 0)) * 1000)))
-        # OCR chunks carry the sampled frame timestamp; ASR is audio-only so we fall
-        # back to the chunk start. Either way the thumbnail is fetched on demand.
-        best_ms = int(chunk.get("frame_ms", start_ms))
-        features = {
-            "lexical_score": lexical,
-            "semantic_score": semantic if semantic_cosine is not None else None,
-            "semantic_cosine": semantic_cosine,
-        }
-        features.update(display_features)
-        if "score" in chunk:
-            features[f"{modality}_score"] = float(chunk["score"])
-        candidates.append(Candidate(
-            video_id=video_id,
-            start_time=_seconds(start_ms),
-            end_time=_seconds(end_ms),
-            score=score,
-            modality=modality,
-            evidence=evidence if above else evidence + " · 低于阈值",
-            raw_score=score,
-            decision=decision,
-            above_threshold=above,
-            lexical_score=lexical,
-            semantic_score=semantic if semantic_cosine is not None else None,
-            semantic_cosine=semantic_cosine,
-            best_time=_seconds(best_ms),
-            unit_type="chunk",
-            unit_id=int(chunk.get("chunk_id", index)),
-            best_ms=best_ms,
-            text=detail,
-            features=features,
-        ))
-    return candidates
-
-
-def _asr_chunks_from_npz(data) -> list[dict]:
-    if "chunk_times_ms" not in data.files or "texts" not in data.files:
-        raise ValueError("asr v3 索引缺少必要数组，请重跑 ASR 索引")
-    times = data["chunk_times_ms"].astype(np.int32)
-    texts = _decode_text_array(data["texts"])
-    if times.shape != (len(texts), 2):
-        raise ValueError("asr v3 chunk_times_ms/texts 长度不一致，请重跑 ASR 索引")
-    return [
-        {
-            "chunk_id": index,
-            "start_ms": int(row[0]),
-            "end_ms": int(row[1]),
-            "text": texts[index],
-        }
-        for index, row in enumerate(times)
-    ]
-
-
-def _limit_text(value: str, max_chars: int) -> str:
-    text = str(value or "").strip()
-    if len(text) <= max_chars:
-        return text
-    return text[:max(0, max_chars - 3)].rstrip() + "..."
-
-
-def _ocr_display_text(
-    query_text: str,
-    chunk: dict,
-    max_boxes: int = 3,
-    max_chars: int = 120,
-    max_frame_chars: int = 500,
-) -> tuple[str, dict]:
-    """
-    为 OCR evidence 选择更适合展示的文本。
-
-    检索仍然基于整帧 OCR 文本；
-    展示优先显示和 query 词面最相关的 box 文本；
-    如果找不到明确相关 box，则回退到整帧 OCR 文本。
-    """
-    frame_text = str(chunk.get("text", "")).strip()
-
-    box_texts = [
-        str(value).strip()
-        for value in chunk.get("ocr_box_texts", [])
-        if str(value).strip()
-    ]
-
-    box_scores = [
-        float(value)
-        for value in chunk.get("ocr_box_scores", [])
-    ]
-
-    frame_context = _limit_text(frame_text, max_frame_chars)
-
-    if not box_texts:
-        return _limit_text(frame_text, max_chars), {
-            "ocr_display_mode": "frame_text",
-            "ocr_frame_text": frame_context,
-            "ocr_box_count": 0,
-        }
-
-    scored: list[tuple[float, float, float, int, str]] = []
-
-    for index, text in enumerate(box_texts):
-        box_lexical = lexical_score(query_text, text)
-        box_confidence = box_scores[index] if index < len(box_scores) else 0.0
-
-        # 展示排序：query 相关性为主，OCR 置信度为辅。
-        display_score = 0.85 * float(box_lexical) + 0.15 * float(box_confidence)
-
-        scored.append((
-            display_score,
-            float(box_lexical),
-            float(box_confidence),
-            index,
-            text,
-        ))
-
-    scored.sort(reverse=True)
-
-    selected: list[str] = []
-    selected_box_scores: list[float] = []
-    selected_box_lexical_scores: list[float] = []
-
-    for _display_score, box_lexical, box_confidence, _index, text in scored:
-        # 只展示和 query 有词面相关性的 box。
-        # 如果是纯语义命中但没有明确 box 词面命中，则回退整帧文本。
-        if box_lexical <= 0:
-            continue
-
-        selected.append(text)
-        selected_box_scores.append(box_confidence)
-        selected_box_lexical_scores.append(box_lexical)
-
-        if len(selected) >= max_boxes:
-            break
-
-    if not selected:
-        return _limit_text(frame_text, max_chars), {
-            "ocr_display_mode": "frame_text",
-            "ocr_frame_text": frame_context,
-            "ocr_box_count": len(box_texts),
-        }
-
-    display_text = _limit_text(" / ".join(selected), max_chars)
-
-    return display_text, {
-        "ocr_display_mode": "matched_boxes",
-        "ocr_frame_text": frame_context,
-        "ocr_box_count": len(box_texts),
-        "ocr_matched_box_texts": selected,
-        "ocr_matched_box_scores": selected_box_scores,
-        "ocr_matched_box_lexical_scores": selected_box_lexical_scores,
-    }
-
-
-
 
 
 def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict, Path]:
@@ -956,84 +673,6 @@ def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -
         groups.append([candidate])
 
     return groups
-
-
-_ASR_LEXICAL_RESERVE_POOL_SIZE = 50
-_ASR_LEXICAL_RESERVE_MIN_SCORE = 0.50
-_ASR_LEXICAL_RESERVE_INITIAL_PRIMARY = 3
-_ASR_LEXICAL_RESERVE_PRIMARY_RUN = 8
-
-
-def _asr_result_lexical_score(result: SearchResult) -> float:
-    return max(
-        (
-            float(item.get("lexical_score") or 0.0)
-            for item in result.evidence
-            if item.get("modality") == "asr"
-        ),
-        default=0.0,
-    )
-
-
-def _reserve_asr_lexical_results(results: list[SearchResult], limit: int) -> list[SearchResult]:
-    """Reserve sparse result slots for strong lexical hits without rewriting confidence scores."""
-    above = [result for result in results if result.above_threshold]
-    below = [result for result in results if not result.above_threshold]
-    pool_size = max(_ASR_LEXICAL_RESERVE_POOL_SIZE, limit)
-    primary = above[:pool_size]
-    lexical = sorted(
-        (
-            result
-            for result in above
-            if _asr_result_lexical_score(result) >= _ASR_LEXICAL_RESERVE_MIN_SCORE
-        ),
-        key=lambda result: (_asr_result_lexical_score(result), result.score),
-        reverse=True,
-    )[:pool_size]
-    if not lexical:
-        return results
-
-    reranked: list[SearchResult] = []
-    emitted: set[int] = set()
-    primary_position = 0
-    lexical_position = 0
-
-    def emit(result: SearchResult) -> bool:
-        identity = id(result)
-        if identity in emitted:
-            return False
-        emitted.add(identity)
-        reranked.append(result)
-        return True
-
-    while (
-        primary_position < len(primary)
-        and primary_position < _ASR_LEXICAL_RESERVE_INITIAL_PRIMARY
-    ):
-        emit(primary[primary_position])
-        primary_position += 1
-
-    while primary_position < len(primary) or lexical_position < len(lexical):
-        while lexical_position < len(lexical):
-            candidate = lexical[lexical_position]
-            lexical_position += 1
-            if emit(candidate):
-                break
-
-        taken = 0
-        while (
-            primary_position < len(primary)
-            and taken < _ASR_LEXICAL_RESERVE_PRIMARY_RUN
-        ):
-            candidate = primary[primary_position]
-            primary_position += 1
-            if emit(candidate):
-                taken += 1
-
-    remaining_above = [result for result in above if id(result) not in emitted]
-    return reranked + remaining_above + below
-
-
 
 
 def _fuse_candidate_groups(
@@ -1461,33 +1100,6 @@ class SearchEngine:
             or self.settings.asr_semantic_model
         )
 
-    def _asr_for_video(
-        self,
-        video: dict,
-        text: str,
-        limit: int,
-        semantic_queries: dict[str, np.ndarray | None],
-    ) -> list[Candidate]:
-        index_dir = self.settings.index_dir / video["id"]
-        _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "asr")
-        with np.load(index_file, allow_pickle=False) as data:
-            embeddings, indices = _semantic_arrays(data)
-            model_name = self._semantic_model_for_channel(channel_manifest)
-            return _asr_candidates(
-                _asr_chunks_from_npz(data),
-                text,
-                video["id"],
-                limit,
-                semantic_embeddings=embeddings,
-                embedding_chunk_indices=indices,
-                semantic_query=(
-                    semantic_queries.get(model_name)
-                    if model_name is not None
-                    else None
-                ),
-            )
-
-
     def _candidates_for_video(
         self,
         video: dict,
@@ -1512,13 +1124,9 @@ class SearchEngine:
             ))
         if "face" in modalities and face_query is not None and "face" in indexed:
             candidates.extend(self._face_for_video(video, face_query, channel_limits["face"]))
-        if "asr" in modalities and text and "asr" in indexed:
-            candidates.extend(self._asr_for_video(
-                video,
-                text,
-                channel_limits["asr"],
-                semantic_queries,
-            ))
+        # ASR now uses Milvus DiskANN + BM25 hybrid search exclusively
+        # (see milvus_asr_candidates_hybrid). The NPZ full-scan path has been
+        # removed; ASR candidates are produced only via _milvus_candidates_for_video.
         return candidates
 
     def _milvus_candidates_for_video(
@@ -1537,7 +1145,7 @@ class SearchEngine:
         prefetched_rows: dict[str, list[dict]] | None = None,
     ) -> list[Candidate]:
         from app.vector_store.milvus.milvus_search import (
-            milvus_asr_candidates,
+            milvus_asr_candidates_hybrid,
             milvus_face_candidates,
             milvus_ocr_candidates_hybrid,
             milvus_visual_candidates,
@@ -1586,14 +1194,13 @@ class SearchEngine:
                 if model_name is not None
                 else None
             )
-            candidates.extend(milvus_asr_candidates(
+            candidates.extend(milvus_asr_candidates_hybrid(
                 client,
                 video_id,
                 text,
                 semantic_query,
                 channel_limits["asr"],
                 profiler,
-                rows=prefetched_rows.get("asr"),
             ))
         if "ocr" in modalities and text and "ocr" in indexed:
             _manifest, channel_manifest, _index_file = _channel_manifest_for(
@@ -1979,6 +1586,20 @@ class SearchEngine:
                 if not candidate.above_threshold and " · 低于阈值" not in candidate.evidence:
                     candidate.evidence += " · 低于阈值"
 
+        # Apply global dynamic threshold to ASR candidates across all videos.
+        # Hybrid scores (dense IP + unbounded BM25) are not in [0,1], so the
+        # threshold must be derived from the observed score distribution rather
+        # than hard-coded — mirrors the OCR block above.
+        asr_candidates = [c for c in candidates if c.modality == "asr"]
+        if asr_candidates:
+            global_top_score = max(float(c.score) for c in asr_candidates)
+            global_threshold = max(0.10, global_top_score * 0.3)  # At least 0.10, or 30% of global top score
+
+            for candidate in asr_candidates:
+                candidate.above_threshold = float(candidate.score) >= global_threshold
+                if not candidate.above_threshold and " · 低于阈值" not in candidate.evidence:
+                    candidate.evidence += " · 低于阈值"
+
         fusion_span = (
             profiler.span("local_processing", "fusion")
             if profiler
@@ -1997,7 +1618,5 @@ class SearchEngine:
                     else None
                 ),
             )
-            if set(modalities) == {"asr"} and text:
-                results = _reserve_asr_lexical_results(results, limit)
         result_limit = 500 if visual_profile == "recall" else limit
         return [item.to_dict() for item in results[:result_limit]]

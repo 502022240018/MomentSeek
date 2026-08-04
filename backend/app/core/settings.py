@@ -174,6 +174,12 @@ class Settings(BaseSettings):
     ocr_lexical_weight: float = 0.7  # Lexical (BM25) weight; semantic weight = 1.0 - this (recommended: 0.6-0.8)
     ocr_diskann_search_list: int = 100  # DiskANN search_list param for ANN search (not index building; recommended: 100-200)
 
+    # ASR hybrid search configuration (DiskANN + BM25)
+    # ASR is semantic-first (longer transcripts, richer semantics) vs OCR's lexical-first.
+    asr_hybrid_recall_size: int = 100  # Dense and Sparse recall size (recommended: 50-200)
+    asr_semantic_weight: float = 0.65  # Semantic (dense) weight; lexical weight = 1.0 - this (recommended: 0.55-0.75)
+    asr_diskann_search_list: int = 100  # DiskANN search_list param for ANN search (not index building; recommended: 100-200)
+
     @field_validator("indexer_mode", mode="before")
     @classmethod
     def normalize_indexer_mode(cls, value: object) -> object:
@@ -220,6 +226,20 @@ class Settings(BaseSettings):
     def validate_ocr_lexical_weight(cls, value: float) -> float:
         if not 0.0 <= value <= 1.0:
             raise ValueError("ocr_lexical_weight must be between 0.0 and 1.0")
+        return value
+
+    @field_validator("asr_hybrid_recall_size", "asr_diskann_search_list")
+    @classmethod
+    def validate_asr_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("ASR hybrid search parameters must be greater than 0")
+        return value
+
+    @field_validator("asr_semantic_weight")
+    @classmethod
+    def validate_asr_semantic_weight(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("asr_semantic_weight must be between 0.0 and 1.0")
         return value
 
     @field_validator("milvus_search_video_batch_size")

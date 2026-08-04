@@ -7,12 +7,9 @@ from app.catalog.db import Catalog
 from app.retrieval.search import (
     Candidate,
     SearchEngine,
-    SearchResult,
     _fuse_candidate_groups,
     _groups,
-    _reserve_asr_lexical_results,
     _visual_candidates,
-    lexical_score,
 )
 from app.retrieval.retrieval_metrics import RetrievalProfiler
 from app.core.settings import Settings
@@ -77,49 +74,6 @@ def test_asr_adjacent_segments_can_merge():
     assert len(groups) == 1
     assert min(item.start_time for item in groups[0]) == 10
     assert max(item.end_time for item in groups[0]) == 17
-
-
-def test_cjk_lexical_score_keeps_bigram_coverage_on_entity_extension():
-    text = "说实话,我们天山不好进的,一般都去昆仑。"
-
-    assert lexical_score("昆仑山", text) == pytest.approx(1 / 2)
-    assert lexical_score("昆仑山", "今天去昆明旅游") == 0
-
-
-def test_asr_lexical_pool_preserves_primary_top3_and_reserves_next_slot():
-    def result(name: str, score: float, lexical: float) -> SearchResult:
-        return SearchResult(
-            video_id=name,
-            video_name=name,
-            start_time=0,
-            end_time=1,
-            score=score,
-            modalities=["asr"],
-            thumbnail_url=None,
-            media_url="",
-            clip_url="",
-            decision="semantic_hit",
-            evidence=[{"modality": "asr", "lexical_score": lexical}],
-        )
-
-    primary = [
-        result("lexical-top", 0.99, 0.5),
-        result("semantic-1", 0.98, 0.0),
-        result("semantic-2", 0.97, 0.0),
-        result("semantic-3", 0.96, 0.0),
-        result("weak-lexical", 0.95, 0.4),
-        result("lexical-reserved", 0.50, 0.5),
-    ]
-
-    reranked = _reserve_asr_lexical_results(primary, limit=5)
-
-    assert [item.video_id for item in reranked[:4]] == [
-        "lexical-top",
-        "semantic-1",
-        "semantic-2",
-        "lexical-reserved",
-    ]
-    assert reranked.index(primary[3]) < reranked.index(primary[4])
 
 
 def test_visual_priority_orders_visual_evidence_before_auxiliary_candidates():
@@ -714,6 +668,7 @@ def test_query_model_status_reads_encoder_maps_under_lock(tmp_path):
     assert status["text_models"] == ["text-a"]
 
 
+@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
 def test_asr_v3_lexical_search_uses_chunk_times_and_texts(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
@@ -756,6 +711,8 @@ def test_asr_v3_lexical_search_uses_chunk_times_and_texts(tmp_path):
     assert results[0]["evidence"][0]["unit_type"] == "chunk"
 
 
+@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
+@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
 def test_asr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
@@ -792,6 +749,8 @@ def test_asr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
     assert results[0]["evidence"][0]["unit_id"] == 0
 
 
+@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
+@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
 def test_asr_search_falls_back_to_lexical_when_semantic_query_model_missing(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
