@@ -402,7 +402,7 @@ def milvus_asr_candidates_hybrid(
                 anns_field="sparse_embedding",
                 param={"metric_type": "BM25"},
                 limit=limit,
-                expr=f'video_id == "{video_id}"',
+                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
                 output_fields=output_fields,
             )
     else:
@@ -423,7 +423,11 @@ def milvus_asr_candidates_hybrid(
                         "params": {"search_list": search_list},
                     },
                     limit=limit,
-                    expr=f'video_id == "{video_id}" AND has_embedding == True',
+                    expr=(
+                        f'video_id == "{video_id}" '
+                        f'and asset_version == "{asset_version}" '
+                        f'and has_embedding == True'
+                    ),
                     output_fields=output_fields,
                 )
         else:
@@ -436,7 +440,11 @@ def milvus_asr_candidates_hybrid(
                     "params": {"search_list": search_list},
                 },
                 limit=recall_size,
-                expr=f'video_id == "{video_id}" AND has_embedding == True',
+                expr=(
+                    f'video_id == "{video_id}" '
+                    f'and asset_version == "{asset_version}" '
+                    f'and has_embedding == True'
+                ),
             )
 
             sparse_req = AnnSearchRequest(
@@ -444,7 +452,7 @@ def milvus_asr_candidates_hybrid(
                 anns_field="sparse_embedding",
                 param={"metric_type": "BM25"},
                 limit=recall_size,
-                expr=f'video_id == "{video_id}"',
+                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
             )
 
             with (profiler.span("milvus_rpc", "asr_hybrid") if profiler else nullcontext()):

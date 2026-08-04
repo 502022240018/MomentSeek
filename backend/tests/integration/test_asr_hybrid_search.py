@@ -23,6 +23,7 @@ pytestmark = pytest.mark.integration
 
 _DIM = EMBEDDING_DIMS["asr"]  # 384
 _VIDEO_ID = "asr-hybrid-video"
+_ASSET_VERSION = "1"
 
 
 @dataclass
@@ -114,6 +115,7 @@ def test_bm25_only_retrieves_lexical_only_chunk(asr_collection):
     candidates = milvus_asr_candidates_hybrid(
         asr_collection,
         _VIDEO_ID,
+        _ASSET_VERSION,
         "人工智能",
         None,
         limit=10,
@@ -134,6 +136,7 @@ def test_dense_only_excludes_lexical_only_chunk(asr_collection):
     candidates = milvus_asr_candidates_hybrid(
         asr_collection,
         _VIDEO_ID,
+        _ASSET_VERSION,
         "",
         query,
         limit=10,
@@ -151,6 +154,7 @@ def test_hybrid_search_combines_dense_and_bm25(asr_collection):
     candidates = milvus_asr_candidates_hybrid(
         asr_collection,
         _VIDEO_ID,
+        _ASSET_VERSION,
         "人工智能",
         query,
         limit=10,
@@ -166,6 +170,7 @@ def test_empty_query_and_no_embedding_returns_empty(asr_collection):
     candidates = milvus_asr_candidates_hybrid(
         asr_collection,
         _VIDEO_ID,
+        _ASSET_VERSION,
         "",
         None,
         limit=10,
