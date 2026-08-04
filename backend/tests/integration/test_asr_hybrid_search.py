@@ -144,7 +144,10 @@ def test_dense_only_excludes_lexical_only_chunk(asr_collection):
 
     assert candidates
     assert all(c.features["has_embedding"] for c in candidates)
-    assert candidates[0].text == "语义匹配样本"
+    texts = {c.text for c in candidates}
+    # The dense semantic chunk surfaces; the lexical-only chunk is filtered out.
+    assert "语义匹配样本" in texts
+    assert "今天我们讨论人工智能的未来" not in texts
 
 
 def test_hybrid_search_combines_dense_and_bm25(asr_collection):
@@ -186,6 +189,7 @@ def test_candidates_are_above_threshold_before_global_pass(asr_collection):
     candidates = milvus_asr_candidates_hybrid(
         asr_collection,
         _VIDEO_ID,
+        _ASSET_VERSION,
         "人工智能",
         query,
         limit=20,
@@ -194,3 +198,57 @@ def test_candidates_are_above_threshold_before_global_pass(asr_collection):
     assert candidates
     assert all(c.above_threshold for c in candidates)
     assert all("hybrid_score" in (c.features or {}) for c in candidates)
+
+
+def test_limit_is_respected(asr_collection):
+    """limit=1 must cap results to 1 even when multiple chunks match."""
+    query = np.zeros(_DIM, dtype=np.float32)
+    query[0] = 1.0
+    candidates = milvus_asr_candidates_hybrid(
+        asr_collection,
+        _VIDEO_ID,
+        _ASSET_VERSION,
+        "人工智能",
+        query,
+        limit=1,
+    )
+
+    assert len(candidates) == 1
+
+
+def test_row_without_has_embedding_defaults_to_true(asr_collection):
+    """A row inserted without has_embedding (schema default_value=True) must appear
+    in dense-only results because the dense filter is ``has_embedding == True``."""
+    col = asr_collection.collection
+
+    default_vec = np.zeros(_DIM, dtype=np.float32)
+    default_vec[0] = 1.0  # same direction as the semantic query used in other tests
+
+    col.insert([{
+        "pk": "asr-hybrid-nohas",
+        "video_id": _VIDEO_ID,
+        "asset_version": _ASSET_VERSION,
+        "model_version": "test",
+        "segment_idx": 99,
+        "start_ms": 9000,
+        "end_ms": 10000,
+        "text": "无has_embedding字段的样本",
+        "embedding": default_vec.tolist(),
+        # has_embedding intentionally absent — schema default_value=True must apply
+    }])
+    col.flush()
+
+    candidates = milvus_asr_candidates_hybrid(
+        asr_collection,
+        _VIDEO_ID,
+        _ASSET_VERSION,
+        "",        # empty text → dense-only path
+        default_vec,
+        limit=10,
+    )
+
+    texts = {c.text for c in candidates}
+    assert "无has_embedding字段的样本" in texts, (
+        "Row written without has_embedding should surface in dense-only search; "
+        "schema default_value=True was not applied by Milvus"
+    )

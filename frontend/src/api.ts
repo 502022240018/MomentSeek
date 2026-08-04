@@ -110,9 +110,6 @@ export type Evidence = {
   visual_top1?: number | null;
   visual_top3?: number | null;
   visual_mean?: number | null;
-  lexical_score?: number | null;
-  semantic_score?: number | null;
-  semantic_cosine?: number | null;
 };
 
 export type SearchResult = {

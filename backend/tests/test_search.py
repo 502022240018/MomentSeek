@@ -10,8 +10,6 @@ from app.retrieval.search import (
     _fuse_candidate_groups,
     _groups,
     _visual_candidates,
-    _reserve_asr_lexical_results,
-    lexical_score,
 )
 from app.retrieval.retrieval_metrics import RetrievalProfiler
 from app.core.settings import Settings

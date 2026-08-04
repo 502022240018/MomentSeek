@@ -124,7 +124,7 @@ def probe_embedding_dim(modality: str, actual_dim: int) -> None:
 # Collection schemas
 # ---------------------------------------------------------------------------
 
-def _common_fields(modality: str) -> list[FieldSchema]:
+def _common_fields() -> list[FieldSchema]:
     """Fields shared by all collections."""
     return [
         FieldSchema("pk",            DataType.VARCHAR, max_length=_PK_LEN, is_primary=True),
@@ -135,7 +135,7 @@ def _common_fields(modality: str) -> list[FieldSchema]:
 
 
 def create_visual_schema() -> CollectionSchema:
-    fields = _common_fields("visual") + [
+    fields = _common_fields() + [
         FieldSchema("frame_idx",        DataType.INT64),
         FieldSchema("timestamp_ms",     DataType.INT64),
         # segment_id: which segment this frame belongs to.
@@ -163,7 +163,7 @@ def create_asr_schema() -> CollectionSchema:
     """
     from pymilvus import Function, FunctionType
 
-    fields = _common_fields("asr") + [
+    fields = _common_fields() + [
         # Metadata fields (unchanged — Speaker depends on segment_idx stability)
         FieldSchema("segment_idx",   DataType.INT64),
         FieldSchema("start_ms",      DataType.INT64),
@@ -212,7 +212,7 @@ def create_ocr_schema() -> CollectionSchema:
     """
     from pymilvus import Function, FunctionType
 
-    fields = _common_fields("ocr") + [
+    fields = _common_fields() + [
         # Metadata fields
         FieldSchema("frame_idx",     DataType.INT64),
         FieldSchema("region_idx",    DataType.INT64),
@@ -254,7 +254,7 @@ def create_ocr_schema() -> CollectionSchema:
 
 
 def create_face_schema() -> CollectionSchema:
-    fields = _common_fields("face") + [
+    fields = _common_fields() + [
         FieldSchema("track_idx",    DataType.INT64),
         FieldSchema("start_ms",     DataType.INT64),
         FieldSchema("end_ms",       DataType.INT64),
@@ -265,7 +265,7 @@ def create_face_schema() -> CollectionSchema:
 
 
 def create_speaker_schema() -> CollectionSchema:
-    fields = _common_fields("speaker") + [
+    fields = _common_fields() + [
         FieldSchema("utterance_idx",  DataType.INT64),
         FieldSchema("start_ms",       DataType.INT64),
         FieldSchema("end_ms",         DataType.INT64),

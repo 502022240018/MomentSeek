@@ -29,11 +29,11 @@ def create_asr_schema() -> CollectionSchema:
         FieldSchema("segment_idx", DataType.INT64),
         FieldSchema("start_ms", DataType.INT64),
         FieldSchema("end_ms", DataType.INT64),
-        FieldSchema("text", DataType.VARCHAR, max_length=2000,
+        FieldSchema("text", DataType.VARCHAR, max_length=_TEXT_LEN,  # 5000
                     enable_analyzer=True,
                     analyzer_params={"type": "chinese"}),
         FieldSchema("has_embedding", DataType.BOOL, default_value=True),
-        FieldSchema("embedding", DataType.FLOAT_VECTOR, dim=512),
+        FieldSchema("embedding", DataType.FLOAT_VECTOR, dim=EMBEDDING_DIMS["asr"]),  # 384
         FieldSchema("sparse_embedding", DataType.SPARSE_FLOAT_VECTOR,
                     is_function_output=True),
     ]

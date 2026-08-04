@@ -37,9 +37,6 @@ class Candidate:
     visual_top1: float | None = None
     visual_top3: float | None = None
     visual_mean: float | None = None
-    lexical_score: float | None = None
-    semantic_score: float | None = None
-    semantic_cosine: float | None = None
     unit_type: str | None = None
     unit_id: int | None = None
     best_ms: int | None = None
@@ -438,9 +435,6 @@ def _serialize_evidence(item: Candidate) -> dict:
         "visual_top1": _round_optional(item.visual_top1, 4),
         "visual_top3": _round_optional(item.visual_top3, 4),
         "visual_mean": _round_optional(item.visual_mean, 4),
-        "lexical_score": _round_optional(item.lexical_score, 4),
-        "semantic_score": _round_optional(item.semantic_score, 4),
-        "semantic_cosine": _round_optional(item.semantic_cosine, 4),
         "unit_type": item.unit_type,
         "unit_id": item.unit_id,
         "best_ms": item.best_ms,
