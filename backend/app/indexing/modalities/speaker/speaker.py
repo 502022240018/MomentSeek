@@ -214,21 +214,19 @@ def build_speaker_index(
     *, video_path: str, asr_path: str, output_path: str, working_dir: str,
     model_repo: str, model_cache_dir: str, device: str = "cuda",
     milvus_ctx: "MilvusWriteContext | None" = None,
+    asr_asset_version: str | None = None,
 ) -> dict:
     started = time.perf_counter()
     _asr_file = Path(asr_path)
-    if not _asr_file.exists() or _asr_file.stat().st_size == 0:
-        # asr.npz was removed after Milvus ingestion (Milvus-only mode).
-        # Read chunk times and texts from the ASR collection instead.
-        if milvus_ctx is None:
-            raise RuntimeError(
-                "asr.npz is absent but no milvus_ctx provided; "
-                "cannot read ASR data for speaker indexing"
-            )
-        from app.vector_store.milvus.milvus_client import get_milvus_client
-        _client = get_milvus_client()
-        _rows = _client.collection_for("asr").query(
-            expr=f'video_id == "{milvus_ctx.video_id}"',
+    if milvus_ctx is not None:
+        # Online indexing reads the ASR source of truth from Milvus.  The NPZ
+        # file is only retained for offline recovery tools that call this
+        # builder without a Milvus write context.
+        if not asr_asset_version:
+            raise RuntimeError("Milvus speaker build requires the published ASR asset version")
+        _rows = milvus_ctx.client.collection_for("asr").query(
+            expr=(f'video_id == "{milvus_ctx.video_id}" and '
+                  f'asset_version == "{asr_asset_version}"'),
             output_fields=["segment_idx", "start_ms", "end_ms", "text"],
         )
         # Deduplicate by segment_idx and rebuild arrays preserving original ordering.
@@ -250,6 +248,8 @@ def build_speaker_index(
             times = np.empty((0, 2), dtype=np.int32)
             texts = []
     else:
+        if not _asr_file.exists() or _asr_file.stat().st_size == 0:
+            raise RuntimeError("缺少离线恢复所需的 asr.npz")
         with np.load(asr_path, allow_pickle=True) as asr:
             times = asr["chunk_times_ms"].astype(np.int32)
             texts = [str(value) for value in asr["texts"]]
@@ -258,13 +258,26 @@ def build_speaker_index(
         if bounds[1] > bounds[0] and _meaningful(text)
     ], dtype=np.int32)
     if not len(eligible):
-        # ASR 中无有效人声片段（纯背景音乐/无音频），跳过 speaker 索引
-        # 不写入任何文件（包括 NPZ），直接返回空结果
-        return {
+        # Publish an explicit empty version so the catalog and manifest never
+        # advertise a stale speaker index from an earlier ASR run.
+        result = {
             "utterances": 0,
             "tracks": 0,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
         }
+        if milvus_ctx is not None:
+            from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
+
+            result["milvus_rows"] = write_modality_from_memory(
+                milvus_ctx,
+                "speaker",
+                {
+                    "utterance_embeddings": np.empty((0, EMBEDDING_DIM), dtype=np.float32),
+                    "utterance_times_ms": np.empty((0, 2), dtype=np.int32),
+                    "utterance_refs": np.empty((0, 2), dtype=np.int32),
+                },
+            )
+        return result
 
     module = _load_3dspeaker(Path(model_repo))
     pipeline = module.Diarization3Dspeaker(device=device, model_cache_dir=model_cache_dir)
@@ -316,7 +329,7 @@ def build_speaker_index(
             np.asarray(chunk_indices, dtype=np.int32),
             np.asarray(track_indices, dtype=np.int32),
         ))
-        write_modality_from_memory(
+        final["milvus_rows"] = write_modality_from_memory(
             milvus_ctx, "speaker",
             {
                 "utterance_embeddings": norm_emb,

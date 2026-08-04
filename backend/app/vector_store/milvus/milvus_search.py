@@ -6,7 +6,7 @@ Visual / ASR / OCR rely on *distribution-aware* scoring: robust z-scores and
 empirical percentiles are computed over ALL embeddings in the video, not just the
 top-k ANN hits.  A top-k ANN search would give the wrong distribution sample, so
 these three modalities use collection.query() to fetch every row for the video,
-then compute dot-products in Python — exactly as the NPZ path does.
+then compute dot-products in Python.
 
 Face and Speaker use absolute-threshold scoring (no distribution normalization
 needed), so ANN search is appropriate and efficient for them.
@@ -14,12 +14,12 @@ needed), so ANN search is appropriate and efficient for them.
 All functions return identical list[Candidate] types so the existing fusion,
 grouping, and ranking code in search.py needs no changes.
 
-Fallback contract
------------------
+Failure contract
+----------------
 MilvusServiceError is raised *only* on connection / timeout failures.
 "Milvus returned 0 results" is NOT a failure — it is a valid empty answer.
-The caller (SearchEngine.search) decides whether to fall back to NPZ on
-MilvusServiceError, controlled by MILVUS_FALLBACK_ENABLED.
+The Milvus-only request path propagates connection and timeout failures
+explicitly; it never falls back to retained NPZ artifacts.
 """
 from __future__ import annotations
 
@@ -145,6 +145,7 @@ def query_rows_for_videos(
     client: MilvusClient,
     modality: str,
     video_ids: list[str],
+    asset_versions: dict[str, str],
     output_fields: list[str],
     profiler: RetrievalProfiler | None = None,
 ) -> dict[str, list[dict]]:
@@ -161,7 +162,15 @@ def query_rows_for_videos(
         raise MilvusServiceError(
             f"Milvus collection for modality={modality} has no video_id field"
         )
-    expr = f"video_id in {json.dumps(unique_ids, ensure_ascii=False)}"
+    missing = [video_id for video_id in unique_ids if not asset_versions.get(video_id)]
+    if missing:
+        raise MilvusServiceError(
+            f"Missing published asset_version for modality={modality}: {missing}"
+        )
+    expr = " or ".join(
+        f'(video_id == {json.dumps(video_id)} and asset_version == {json.dumps(asset_versions[video_id])})'
+        for video_id in unique_ids
+    )
     timeout = get_settings().milvus_query_timeout_seconds
     row_count = 0
     try:
@@ -226,6 +235,7 @@ def _ann_search(
     client: MilvusClient,
     modality: str,
     video_id: str,
+    asset_version: str,
     query: list[float],
     limit: int,
     output_fields: list[str],
@@ -253,7 +263,7 @@ def _ann_search(
                 anns_field="embedding",
                 param=sp,
                 limit=limit,
-                expr=f'video_id == "{video_id}"',
+                expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}"'),
                 output_fields=output_fields,
                 timeout=get_settings().milvus_query_timeout_seconds,
             )
@@ -281,6 +291,7 @@ def milvus_visual_candidates(
     client: MilvusClient,
     video_id: str,
     query: np.ndarray,
+    asset_version: str,
     duration_ms: int | None = None,
     segment_ms: int | None = None,
     profile: str = "balanced",
@@ -312,7 +323,7 @@ def milvus_visual_candidates(
     query_texts = [query] if query.ndim == 1 else list(query)
 
     return milvus_visual_candidates_ann(
-        client, video_id, query_texts, limit, profile, profiler
+        client, video_id, asset_version, query_texts, limit, profile, profiler
     )
 
 
@@ -323,6 +334,7 @@ def milvus_visual_candidates(
 def milvus_asr_candidates_hybrid(
     client: MilvusClient,
     video_id: str,
+    asset_version: str,
     query_text: str,
     query_embedding: np.ndarray | None,
     limit: int,
@@ -487,6 +499,7 @@ def milvus_asr_candidates_hybrid(
 def milvus_ocr_candidates_hybrid(
     client: MilvusClient,
     video_id: str,
+    asset_version: str,
     query_text: str,
     query_embedding: np.ndarray | None,
     limit: int,
@@ -545,7 +558,7 @@ def milvus_ocr_candidates_hybrid(
                 anns_field="sparse_embedding",
                 param={"metric_type": "BM25"},
                 limit=limit,
-                expr=f'video_id == "{video_id}"',
+                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
                 output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
                               "text", "avg_box_score", "has_embedding"],
             )
@@ -568,7 +581,8 @@ def milvus_ocr_candidates_hybrid(
                         "params": {"search_list": search_list},
                     },
                     limit=limit,
-                    expr=f'video_id == "{video_id}" AND has_embedding == True',
+                    expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}" '
+                          "AND has_embedding == True"),
                     output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
                                   "text", "avg_box_score", "has_embedding"],
                 )
@@ -582,7 +596,8 @@ def milvus_ocr_candidates_hybrid(
                     "params": {"search_list": search_list},
                 },
                 limit=recall_size,
-                expr=f'video_id == "{video_id}" AND has_embedding == True',
+                expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}" '
+                      "AND has_embedding == True"),
             )
 
             sparse_req = AnnSearchRequest(
@@ -590,7 +605,7 @@ def milvus_ocr_candidates_hybrid(
                 anns_field="sparse_embedding",
                 param={"metric_type": "BM25"},
                 limit=recall_size,
-                expr=f'video_id == "{video_id}"',
+                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
             )
 
             with (profiler.span("milvus_rpc", "ocr_hybrid") if profiler else nullcontext()):
@@ -652,6 +667,7 @@ def milvus_face_candidates(
     client: MilvusClient,
     video_id: str,
     query: np.ndarray,
+    asset_version: str,
     limit: int,
     threshold: float = 0.35,
     profiler: RetrievalProfiler | None = None,
@@ -674,7 +690,7 @@ def milvus_face_candidates(
     # Expand recall to guard against ANN miss-rate at the threshold boundary.
     ann_limit = min(limit * 2, 16_384)
     hits = _ann_search(
-        client, "face", video_id, query_norm.tolist(),
+        client, "face", video_id, asset_version, query_norm.tolist(),
         ann_limit,
         ["track_idx", "start_ms", "end_ms", "best_ms", "embedding"],
         profiler,
@@ -736,6 +752,7 @@ def milvus_speaker_candidates(
     client: MilvusClient,
     video_id: str,
     query: np.ndarray,
+    asset_version: str,
     limit: int,
     threshold: float = 0.50,
     profiler: RetrievalProfiler | None = None,
@@ -754,7 +771,7 @@ def milvus_speaker_candidates(
     query_norm = normalize(np.asarray(query, dtype=np.float32))
     ann_limit  = min(limit * 2, 16_384)
     hits = _ann_search(
-        client, "speaker", video_id, query_norm.tolist(),
+        client, "speaker", video_id, asset_version, query_norm.tolist(),
         ann_limit,
         ["utterance_idx", "start_ms", "end_ms", "track_id", "asr_chunk_idx", "embedding"],
         profiler,
@@ -800,47 +817,3 @@ def milvus_speaker_candidates(
             },
         ))
     return candidates
-
-
-# ---------------------------------------------------------------------------
-# Shadow compare helper
-# ---------------------------------------------------------------------------
-
-def shadow_compare_log(
-    video_id: str,
-    modality: str,
-    npz_candidates: list[Candidate],
-    milvus_candidates: list[Candidate],
-    top_k: int = 5,
-) -> None:
-    """Log top-k divergence between NPZ and Milvus results for the same video+modality.
-
-    Only above-threshold candidates are compared.  The Jaccard overlap on the
-    top-k time intervals is reported as a single INFO log line.
-    """
-    def _top_intervals(cands: list[Candidate]) -> set[tuple[float, float]]:
-        above = sorted(
-            [c for c in cands if c.above_threshold],
-            key=lambda c: c.score, reverse=True,
-        )[:top_k]
-        return {(round(c.start_time, 1), round(c.end_time, 1)) for c in above}
-
-    npz_top    = _top_intervals(npz_candidates)
-    milvus_top = _top_intervals(milvus_candidates)
-    union      = npz_top | milvus_top
-    inter      = npz_top & milvus_top
-    jaccard    = len(inter) / max(1, len(union)) if union else 1.0
-    logger.info(
-        "shadow_compare video=%s modality=%s npz_total=%d milvus_total=%d "
-        "npz_above=%d milvus_above=%d top_k=%d jaccard=%.2f "
-        "only_npz=%s only_milvus=%s",
-        video_id, modality,
-        len(npz_candidates), len(milvus_candidates),
-        len(npz_top), len(milvus_top),
-        top_k, jaccard,
-        sorted(npz_top - milvus_top),
-        sorted(milvus_top - npz_top),
-    )
-
-
-

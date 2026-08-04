@@ -25,9 +25,7 @@ Production OCR requests do not fall back to NPZ. Set:
 
 ```bash
 MILVUS_ENABLED=true
-MILVUS_READ_ENABLED=true
 MILVUS_WRITE_ENABLED=true
-MILVUS_FALLBACK_ENABLED=false
 ```
 
 The relevant tuning settings are:

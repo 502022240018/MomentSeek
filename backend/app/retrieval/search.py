@@ -389,14 +389,252 @@ def _face_candidates(data, query: np.ndarray, video_id: str, limit: int, thresho
     return candidates
 
 
+def _semantic_chunk_scores(
+    chunk_count: int,
+    semantic_embeddings: np.ndarray | None,
+    embedding_chunk_indices: np.ndarray | None,
+    semantic_query: np.ndarray | None,
+    limit: int,
+) -> tuple[np.ndarray, np.ndarray, set[int]]:
+    scores = np.zeros(chunk_count, dtype=np.float32)
+    cosines_by_chunk = np.full(chunk_count, np.nan, dtype=np.float32)
+    if (
+        semantic_embeddings is None
+        or embedding_chunk_indices is None
+        or semantic_query is None
+        or not len(semantic_embeddings)
+        or not len(embedding_chunk_indices)
+    ):
+        return scores, cosines_by_chunk, set()
+    cosines = semantic_embeddings @ normalize(semantic_query)
+    percentiles = robust_distribution(cosines)["percentiles"]
+    for local_index, chunk_index in enumerate(embedding_chunk_indices):
+        chunk_index = int(chunk_index)
+        if not 0 <= chunk_index < chunk_count:
+            continue
+        cosine = float(cosines[local_index])
+        percentile = float(percentiles[local_index]) if len(percentiles) else 0.0
+        cosines_by_chunk[chunk_index] = cosine
+        scores[chunk_index] = 0.7 * asr_semantic_confidence(cosine) + 0.3 * percentile
+    order = np.argsort(scores)[::-1]
+    return scores, cosines_by_chunk, set(int(index) for index in order[:min(len(order), limit)])
+
+
+def _text_candidate_decision(lexical: float, semantic: float) -> tuple[str, bool]:
+    semantic_hit = semantic >= 0.55
+    lexical_hit = lexical >= 0.25
+    if semantic_hit and lexical_hit:
+        return "semantic_lexical_hit", True
+    if semantic_hit:
+        return "semantic_hit", True
+    if lexical_hit:
+        return "lexical_hit", True
+    return "weak", False
+
+
+def _text_candidate_evidence(detail: str, lexical: float, semantic: float, cosine: float | None) -> str:
+    metrics = [f"lexical={lexical:.3f}"]
+    if cosine is None:
+        metrics.append("semantic=unavailable")
+    else:
+        metrics.extend((f"semantic={semantic:.3f}", f"semantic_cosine={cosine:.3f}"))
+    return f"{detail} · {' · '.join(metrics)}"
+
+
+def _asr_candidates(
+    chunks: list[dict],
+    query_text: str,
+    video_id: str,
+    limit: int,
+    modality: str = "asr",
+    semantic_embeddings: np.ndarray | None = None,
+    embedding_chunk_indices: np.ndarray | None = None,
+    semantic_query: np.ndarray | None = None,
+) -> list[Candidate]:
+    if not chunks:
+        return []
+
+    lexical_scores = np.asarray([lexical_score(query_text, chunk.get("text", "")) for chunk in chunks], dtype=np.float32)
+    semantic_scores, semantic_cosines, semantic_top_indices = _semantic_chunk_scores(
+        len(chunks), semantic_embeddings, embedding_chunk_indices, semantic_query, limit
+    )
+
+    combined_scores = np.maximum(lexical_scores, 0.65 * semantic_scores + 0.35 * lexical_scores)
+    candidate_indices = [
+        int(index) for index in np.argsort(combined_scores)[::-1]
+        if lexical_scores[index] > 0 or index in semantic_top_indices
+    ][:limit]
+
+    candidates: list[Candidate] = []
+    for index in candidate_indices:
+        chunk = chunks[index]
+        lexical = float(lexical_scores[index])
+        semantic = float(semantic_scores[index])
+        semantic_cosine = None if np.isnan(semantic_cosines[index]) else float(semantic_cosines[index])
+        score = float(combined_scores[index])
+        decision, above = _text_candidate_decision(lexical, semantic)
+
+        detail = str(chunk.get("text", "")).strip()
+        display_features = {}
+
+        if modality == "ocr":
+            detail, display_features = _ocr_display_text(query_text, chunk)
+
+        evidence = _text_candidate_evidence(detail, lexical, semantic, semantic_cosine)
+        start_ms = int(chunk.get("start_ms", round(float(chunk.get("start_time", 0)) * 1000)))
+        end_ms = int(chunk.get("end_ms", round(float(chunk.get("end_time", 0)) * 1000)))
+        # OCR chunks carry the sampled frame timestamp; ASR is audio-only so we fall
+        # back to the chunk start. Either way the thumbnail is fetched on demand.
+        best_ms = int(chunk.get("frame_ms", start_ms))
+        features = {
+            "lexical_score": lexical,
+            "semantic_score": semantic if semantic_cosine is not None else None,
+            "semantic_cosine": semantic_cosine,
+        }
+        features.update(display_features)
+        if "score" in chunk:
+            features[f"{modality}_score"] = float(chunk["score"])
+        candidates.append(Candidate(
+            video_id=video_id,
+            start_time=_seconds(start_ms),
+            end_time=_seconds(end_ms),
+            score=score,
+            modality=modality,
+            evidence=evidence if above else evidence + " · 低于阈值",
+            raw_score=score,
+            decision=decision,
+            above_threshold=above,
+            lexical_score=lexical,
+            semantic_score=semantic if semantic_cosine is not None else None,
+            semantic_cosine=semantic_cosine,
+            best_time=_seconds(best_ms),
+            unit_type="chunk",
+            unit_id=int(chunk.get("chunk_id", index)),
+            best_ms=best_ms,
+            text=detail,
+            features=features,
+        ))
+    return candidates
+
+
+def _limit_text(value: str, max_chars: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _ocr_display_text(
+    query_text: str,
+    chunk: dict,
+    max_boxes: int = 3,
+    max_chars: int = 120,
+    max_frame_chars: int = 500,
+) -> tuple[str, dict]:
+    """
+    为 OCR evidence 选择更适合展示的文本。
+
+    检索仍然基于整帧 OCR 文本；
+    展示优先显示和 query 词面最相关的 box 文本；
+    如果找不到明确相关 box，则回退到整帧 OCR 文本。
+    """
+    frame_text = str(chunk.get("text", "")).strip()
+
+    box_texts = [
+        str(value).strip()
+        for value in chunk.get("ocr_box_texts", [])
+        if str(value).strip()
+    ]
+
+    box_scores = [
+        float(value)
+        for value in chunk.get("ocr_box_scores", [])
+    ]
+
+    frame_context = _limit_text(frame_text, max_frame_chars)
+
+    if not box_texts:
+        return _limit_text(frame_text, max_chars), {
+            "ocr_display_mode": "frame_text",
+            "ocr_frame_text": frame_context,
+            "ocr_box_count": 0,
+        }
+
+    scored: list[tuple[float, float, float, int, str]] = []
+
+    for index, text in enumerate(box_texts):
+        box_lexical = lexical_score(query_text, text)
+        box_confidence = box_scores[index] if index < len(box_scores) else 0.0
+
+        # 展示排序：query 相关性为主，OCR 置信度为辅。
+        display_score = 0.85 * float(box_lexical) + 0.15 * float(box_confidence)
+
+        scored.append((
+            display_score,
+            float(box_lexical),
+            float(box_confidence),
+            index,
+            text,
+        ))
+
+    scored.sort(reverse=True)
+
+    selected: list[str] = []
+    selected_box_scores: list[float] = []
+    selected_box_lexical_scores: list[float] = []
+
+    for _display_score, box_lexical, box_confidence, _index, text in scored:
+        # 只展示和 query 有词面相关性的 box。
+        # 如果是纯语义命中但没有明确 box 词面命中，则回退整帧文本。
+        if box_lexical <= 0:
+            continue
+
+        selected.append(text)
+        selected_box_scores.append(box_confidence)
+        selected_box_lexical_scores.append(box_lexical)
+
+        if len(selected) >= max_boxes:
+            break
+
+    if not selected:
+        return _limit_text(frame_text, max_chars), {
+            "ocr_display_mode": "frame_text",
+            "ocr_frame_text": frame_context,
+            "ocr_box_count": len(box_texts),
+        }
+
+    display_text = _limit_text(" / ".join(selected), max_chars)
+
+    return display_text, {
+        "ocr_display_mode": "matched_boxes",
+        "ocr_frame_text": frame_context,
+        "ocr_box_count": len(box_texts),
+        "ocr_matched_box_texts": selected,
+        "ocr_matched_box_scores": selected_box_scores,
+        "ocr_matched_box_lexical_scores": selected_box_lexical_scores,
+    }
+
+
+
+
+
 def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict, Path]:
     manifest, channel_manifest = require_channel_manifest(index_dir, str(video.get("name") or video["id"]), channel)
-    default_files = {"visual": "visual.npz", "face": "face.npz", "asr": "asr.npz", "ocr": "ocr.npz"}
-    file_name = str(channel_manifest.get("file") or default_files[channel])
+    file_name = str(channel_manifest.get("file") or "")
     index_file = index_dir / file_name
-    if not index_file.exists():
-        raise ValueError(f"视频 {video.get('name') or video['id']} 缺少 {channel} v3 索引文件，请重跑该通道")
+    # The manifest selects model/version metadata.  Its NPZ file is an offline
+    # recovery artifact and must never gate the online Milvus read path.
     return manifest, channel_manifest, index_file
+
+
+def _published_asset_version(channel_manifest: dict, video_name: str, channel: str) -> str:
+    """Return the only Milvus version that online retrieval may read."""
+    value = channel_manifest.get("milvus_asset_version")
+    if value is None or not str(value).strip():
+        raise ValueError(
+            f"视频 {video_name} 的 {channel} 索引尚未发布到 Milvus，请重跑该通道"
+        )
+    return str(value)
 
 
 def _round_optional(value: float | None, digits: int) -> float | None:
@@ -992,6 +1230,7 @@ class SearchEngine:
         client,
         modality: str,
         video_ids: list[str],
+        asset_versions: dict[str, str],
         output_fields: list[str],
         profiler: RetrievalProfiler | None,
     ) -> dict[str, list[dict]]:
@@ -1002,6 +1241,7 @@ class SearchEngine:
             client,
             modality,
             video_ids,
+            asset_versions,
             output_fields,
             profiler,
         )
@@ -1014,7 +1254,9 @@ class SearchEngine:
 
     def _selected_videos(self, video_ids: list[str] | None) -> list[dict]:
         videos = self.catalog.list_videos()
-        if not video_ids:
+        # An empty folder resolves to ``[]`` and must not silently expand to all
+        # assets. ``None`` alone means the established all-video scope.
+        if video_ids is None:
             return videos
         allowed = set(video_ids)
         return [video for video in videos if video["id"] in allowed]
@@ -1028,38 +1270,6 @@ class SearchEngine:
         if entity and entity.get("embedding_path") and Path(entity["embedding_path"]).exists():
             return np.load(entity["embedding_path"])["embedding"]
         return None
-
-    def _visual_for_video(
-        self,
-        video: dict,
-        profile: str,
-        limit: int,
-        visual_queries: dict[str, np.ndarray],
-    ) -> list[Candidate]:
-        index_dir = self.settings.index_dir / video["id"]
-        manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "visual")
-        with np.load(index_file, allow_pickle=False) as data:
-            visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
-            if visual_model not in visual_queries:
-                raise RuntimeError(
-                    f"visual query vector was not prepared for model={visual_model}"
-                )
-            return _visual_candidates(
-                data,
-                visual_queries[visual_model],
-                video["id"],
-                int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
-                int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
-                profile,
-                limit,
-                str(channel_manifest.get("segment_strategy") or "fixed"),
-            )
-
-    def _face_for_video(self, video: dict, face_query: np.ndarray, limit: int) -> list[Candidate]:
-        index_dir = self.settings.index_dir / video["id"]
-        _manifest, _channel_manifest, index_file = _channel_manifest_for(video, index_dir, "face")
-        with np.load(index_file, allow_pickle=False) as data:
-            return _face_candidates(data, face_query, video["id"], limit, 0.35)
 
     def _semantic_query(
         self,
@@ -1162,6 +1372,9 @@ class SearchEngine:
             manifest, channel_manifest, _index_file = _channel_manifest_for(
                 video, index_dir, "visual"
             )
+            asset_version = _published_asset_version(
+                channel_manifest, str(video.get("name") or video_id), "visual"
+            )
             visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
             if visual_model not in visual_queries:
                 raise RuntimeError(
@@ -1171,15 +1384,22 @@ class SearchEngine:
                 client,
                 video_id,
                 visual_queries[visual_model],
+                asset_version,
                 profile=visual_profile,
                 limit=channel_limits["visual"],
                 profiler=profiler,
             ))
         if "face" in modalities and face_query is not None and "face" in indexed:
+            _manifest, channel_manifest, _index_file = _channel_manifest_for(
+                video, index_dir, "face"
+            )
             candidates.extend(milvus_face_candidates(
                 client,
                 video_id,
                 face_query,
+                _published_asset_version(
+                    channel_manifest, str(video.get("name") or video_id), "face"
+                ),
                 channel_limits["face"],
                 0.35,
                 profiler,
@@ -1197,6 +1417,9 @@ class SearchEngine:
             candidates.extend(milvus_asr_candidates_hybrid(
                 client,
                 video_id,
+                _published_asset_version(
+                    channel_manifest, str(video.get("name") or video_id), "asr"
+                ),
                 text,
                 semantic_query,
                 channel_limits["asr"],
@@ -1215,6 +1438,9 @@ class SearchEngine:
             candidates.extend(milvus_ocr_candidates_hybrid(
                 client,
                 video_id,
+                _published_asset_version(
+                    channel_manifest, str(video.get("name") or video_id), "ocr"
+                ),
                 text,
                 semantic_query,
                 channel_limits["ocr"],
@@ -1232,13 +1458,7 @@ class SearchEngine:
         modalities: list[str],
         face_query: np.ndarray | None,
     ) -> set[str]:
-        """Return channels that should have produced candidates for this query.
-
-        This mirrors the routing guards in both storage backends.  Keeping the
-        set explicit lets a partially populated Milvus deployment fall back one
-        channel at a time instead of discarding successful Milvus results from
-        the other channels.
-        """
+        """Return channels that should produce candidates from Milvus."""
         indexed = set(video.get("indexed_modalities") or [])
         requested: set[str] = set()
         if "visual" in modalities and bool(text or image_path) and "visual" in indexed:
@@ -1340,21 +1560,8 @@ class SearchEngine:
                 if "face" in modalities
                 else None
             )
-        from app.vector_store.milvus.milvus_flags import (
-            milvus_fallback_enabled,
-            milvus_shadow_compare_enabled,
-            should_use_milvus_for_video,
-        )
-        from app.vector_store.milvus.milvus_search import (
-            BULK_QUERY_FIELDS,
-            shadow_compare_log,
-        )
+        from app.vector_store.milvus.milvus_search import BULK_QUERY_FIELDS
 
-        shadow = milvus_shadow_compare_enabled()
-        use_milvus_by_video = {
-            video["id"]: should_use_milvus_for_video(video["id"])
-            for video in videos
-        }
         requested_by_video = {
             video["id"]: self._requested_indexed_modalities(
                 video,
@@ -1380,17 +1587,11 @@ class SearchEngine:
             video["id"]
             for video in videos
             if requested_by_video[video["id"]]
-            and (use_milvus_by_video[video["id"]] or shadow)
         ]
         milvus_video_id_set = set(milvus_video_ids)
-        milvus_errors: dict[str, Exception] = {}
         milvus_client = None
         if milvus_video_ids:
-            try:
-                milvus_client = self._get_milvus_client()
-            except Exception as exc:
-                for modality in set(modalities):
-                    milvus_errors[modality] = exc
+            milvus_client = self._get_milvus_client()
 
         batch_size = self.settings.milvus_search_video_batch_size
         for batch_offset in range(0, len(videos), batch_size):
@@ -1404,8 +1605,6 @@ class SearchEngine:
             modality_rows: dict[str, list[dict]] = {}
             if milvus_client is not None and batch_video_ids:
                 for modality, output_fields in BULK_QUERY_FIELDS.items():
-                    if modality in milvus_errors:
-                        continue
                     eligible_ids = [
                         video_id
                         for video_id in batch_video_ids
@@ -1413,162 +1612,62 @@ class SearchEngine:
                     ]
                     if not eligible_ids:
                         continue
-                    try:
-                        modality_rows = self._query_rows_for_videos(
-                            milvus_client,
-                            modality,
-                            eligible_ids,
-                            output_fields,
-                            profiler,
+                    asset_versions = {}
+                    for video in batch_videos:
+                        video_id = video["id"]
+                        if video_id not in eligible_ids:
+                            continue
+                        _manifest, channel_manifest, _index_file = _channel_manifest_for(
+                            video, self.settings.index_dir / video_id, modality
                         )
-                    except Exception as exc:
-                        milvus_errors[modality] = exc
-                        logger.warning(
-                            "Milvus batch search failed for modality=%s; "
-                            "using per-modality NPZ fallback: %s",
+                        asset_versions[video_id] = _published_asset_version(
+                            channel_manifest,
+                            str(video.get("name") or video_id),
                             modality,
-                            exc,
                         )
-                    else:
-                        for video_id in eligible_ids:
-                            prefetched_rows[(video_id, modality)] = modality_rows.get(
-                                video_id, []
-                            )
+                    modality_rows = self._query_rows_for_videos(
+                        milvus_client,
+                        modality,
+                        eligible_ids,
+                        asset_versions,
+                        output_fields,
+                        profiler,
+                    )
+                    for video_id in eligible_ids:
+                        prefetched_rows[(video_id, modality)] = modality_rows.get(
+                            video_id, []
+                        )
 
             for video in batch_videos:
                 video_id = video["id"]
-                use_milvus = use_milvus_by_video[video_id]
                 requested_modalities = requested_by_video[video_id]
-                milvus_candidates: list[Candidate] = []
-                npz_modalities = (
-                    set(requested_modalities)
-                    if (not use_milvus or shadow)
-                    else set()
-                )
-                recovery_modalities: set[str] = set()
-
-                if use_milvus or shadow:
-                    for modality in sorted(requested_modalities):
-                        if modality in milvus_errors:
-                            if use_milvus and not milvus_fallback_enabled():
-                                raise milvus_errors[modality]
-                            npz_modalities.add(modality)
-                            recovery_modalities.add(modality)
-                            continue
-                        try:
-                            scoring_span = (
-                                profiler.span(
-                                    "local_processing",
-                                    f"{modality}_scoring",
-                                )
-                                if profiler and modality != "face"
-                                else nullcontext()
-                            )
-                            with scoring_span:
-                                modality_candidates = (
-                                    self._milvus_candidates_for_video(
-                                        video,
-                                        text=text,
-                                        modalities=[modality],
-                                        visual_profile=visual_profile,
-                                        visual_queries=visual_queries,
-                                        face_query=face_query,
-                                        channel_limits=resolved_channel_limits,
-                                        semantic_queries=semantic_queries,
-                                        profiler=profiler,
-                                        client=milvus_client,
-                                        prefetched_rows={
-                                            modality: prefetched_rows.get(
-                                                (video_id, modality), []
-                                            )
-                                        }
-                                        if modality in BULK_QUERY_FIELDS
-                                        else None,
-                                    )
-                                )
-                        except Exception as exc:
-                            if use_milvus and not milvus_fallback_enabled():
-                                raise
-                            milvus_errors[modality] = exc
-                            npz_modalities.add(modality)
-                            recovery_modalities.add(modality)
-                            logger.warning(
-                                "Milvus search failed for video=%s modality=%s; "
-                                "using NPZ fallback: %s",
-                                video_id,
-                                modality,
-                                exc,
-                            )
-                        else:
-                            modality_candidates = [
-                                item
-                                for item in modality_candidates
-                                if item.modality == modality
-                            ]
-                            milvus_candidates.extend(modality_candidates)
-                            if (
-                                use_milvus
-                                and milvus_fallback_enabled()
-                                and not modality_candidates
-                            ):
-                                npz_modalities.add(modality)
-                                recovery_modalities.add(modality)
-
-                npz_candidates: list[Candidate] = []
-                if npz_modalities:
-                    fallback_span = (
-                        profiler.span("npz_fallback", "search")
-                        if profiler and use_milvus
+                for modality in sorted(requested_modalities):
+                    scoring_span = (
+                        profiler.span("local_processing", f"{modality}_scoring")
+                        if profiler and modality != "face"
                         else nullcontext()
                     )
-                    with fallback_span:
-                        npz_candidates = self._candidates_for_video(
+                    with scoring_span:
+                        modality_candidates = self._milvus_candidates_for_video(
                             video,
                             text=text,
-                            modalities=sorted(npz_modalities),
-                            limit=limit,
+                            modalities=[modality],
                             visual_profile=visual_profile,
                             visual_queries=visual_queries,
                             face_query=face_query,
                             channel_limits=resolved_channel_limits,
                             semantic_queries=semantic_queries,
+                            profiler=profiler,
+                            client=milvus_client,
+                            prefetched_rows={
+                                modality: prefetched_rows.get((video_id, modality), [])
+                            }
+                            if modality in BULK_QUERY_FIELDS
+                            else None,
                         )
-
-                if use_milvus and recovery_modalities:
-                    recovered = [
-                        item
-                        for item in npz_candidates
-                        if item.modality in recovery_modalities
-                    ]
-                    if recovered:
-                        logger.warning(
-                            "Milvus coverage/failure recovery video=%s "
-                            "modalities=%s; recovered %d NPZ candidates",
-                            video_id,
-                            sorted(recovery_modalities),
-                            len(recovered),
-                        )
-                        milvus_candidates.extend(recovered)
-
-                if shadow:
-                    for modality in requested_modalities:
-                        shadow_compare_log(
-                            video_id,
-                            modality,
-                            [
-                                item
-                                for item in npz_candidates
-                                if item.modality == modality
-                            ],
-                            [
-                                item
-                                for item in milvus_candidates
-                                if item.modality == modality
-                            ],
-                        )
-                candidates.extend(
-                    milvus_candidates if use_milvus else npz_candidates
-                )
+                    candidates.extend(
+                        item for item in modality_candidates if item.modality == modality
+                    )
             # Raw embeddings for this batch become unreachable before the next
             # Milvus query, bounding peak memory by video batch size.
             prefetched_rows.clear()

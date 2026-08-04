@@ -11,7 +11,9 @@ def test_pool_caches_by_key():
     pool = ModelPool(idle_timeout=999, reap_interval=999)
     try:
         calls = []
-        factory = lambda: (calls.append(1), object())[1]
+        def factory():
+            calls.append(1)
+            return object()
         a = pool.get("clip", factory)
         b = pool.get("clip", factory)
         assert a is b

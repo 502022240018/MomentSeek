@@ -14,6 +14,16 @@ from app.indexing.pipeline_manifest import write_stage_manifest
 logger = logging.getLogger(__name__)
 
 
+def require_milvus_writes(settings: Settings) -> None:
+    """Reject index production when its only online store is unavailable."""
+    if settings.milvus_enabled and settings.milvus_write_enabled:
+        return
+    raise RuntimeError(
+        "Milvus-only indexing requires MILVUS_ENABLED=true and "
+        "MILVUS_WRITE_ENABLED=true"
+    )
+
+
 @dataclass(frozen=True)
 class StageContext:
     video: dict
@@ -34,6 +44,7 @@ def execute_stage(
     pool: ModelPool | None = None,
 ) -> dict:
     """Execute one indexing stage with identical behavior in every worker mode."""
+    require_milvus_writes(settings)
     index_dir = settings.index_dir / video["id"]
     working_dir = index_dir / "work"
     index_dir.mkdir(parents=True, exist_ok=True)
@@ -53,11 +64,13 @@ def execute_stage(
     if settings.milvus_enabled and settings.milvus_write_enabled:
         from app.vector_store.milvus.milvus_stage_lock import video_stage_lock
 
-        lock = video_stage_lock(index_dir, video_id=video["id"], stage=stage)
+        # A stage publication updates the shared per-video manifest.  Serialise
+        # all Milvus-backed stages of one video, not merely identical stages,
+        # so independent rebuild requests cannot overwrite each other's
+        # publication pointer.
+        lock = video_stage_lock(index_dir, video_id=video["id"], stage="publish")
     with lock:
         milvus_ctx = _setup_milvus_context(video["id"], index_dir, settings)
-        if milvus_ctx is not None:
-            _pre_delete_modality(milvus_ctx, video["id"], stage)
         context = StageContext(
             video=video,
             options=options,
@@ -81,47 +94,42 @@ def _setup_milvus_context(
     ):
         return None
     try:
-        from app.vector_store.milvus.milvus_asset_version import bump_asset_version
+        from app.vector_store.milvus.milvus_asset_version import reserve_next_attempt_version
         from app.vector_store.milvus.milvus_client import get_milvus_client
         from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
 
         client = get_milvus_client()
         return MilvusWriteContext(
             video_id=video_id,
-            asset_version=bump_asset_version(index_dir),
+            # Reserve before writing so an interrupted attempt is never reused.
+            # Online readers keep using the per-stage manifest until
+            # _write_manifest validates and publishes this version.
+            asset_version=reserve_next_attempt_version(index_dir),
             client=client,
         )
     except Exception as exc:
-        from app.vector_store.milvus.milvus_flags import milvus_write_fail_policy
-
-        if milvus_write_fail_policy() == "raise":
-            raise RuntimeError(
-                f"Milvus connection failed，索引已中止: video={video_id}: {exc}"
-            ) from exc
-        logger.warning(
-            "Milvus unavailable for video=%s; retaining NPZ-only recovery copy: %s",
-            video_id,
-            exc,
-        )
-        return None
-
-
-def _pre_delete_modality(milvus_ctx, video_id: str, modality: str) -> None:
-    deleted = milvus_ctx.client.delete_video_modality(video_id, modality)
-    if deleted >= 0:
-        return
-    from app.vector_store.milvus.milvus_flags import milvus_write_fail_policy
-
-    message = (
-        f"Pre-index Milvus cleanup failed for video={video_id} "
-        f"modality={modality}"
-    )
-    if milvus_write_fail_policy() == "raise":
-        raise RuntimeError(message)
-    logger.warning(message)
+        raise RuntimeError(
+            f"Milvus connection failed，索引已中止: video={video_id}: {exc}"
+        ) from exc
 
 
 def _write_manifest(stage: str, context: StageContext, result: dict) -> None:
+    if context.milvus_ctx is not None:
+        written_rows = result.get("milvus_rows")
+        if written_rows is None:
+            raise RuntimeError(
+                f"Milvus stage={stage} did not report its written row count; refusing publish"
+            )
+        persisted_rows = context.milvus_ctx.client.count_video_modality_version(
+            context.video["id"], stage, context.milvus_ctx.asset_version
+        )
+        if persisted_rows != int(written_rows):
+            raise RuntimeError(
+                f"Milvus verification failed stage={stage} video={context.video['id']}: "
+                f"expected={written_rows} persisted={persisted_rows}"
+            )
+        result["milvus_asset_version"] = context.milvus_ctx.asset_version
+        result["milvus_row_count"] = persisted_rows
     write_stage_manifest(
         stage,
         index_dir=context.index_dir,
@@ -130,6 +138,20 @@ def _write_manifest(stage: str, context: StageContext, result: dict) -> None:
         settings=context.settings,
         result=result,
     )
+    if context.milvus_ctx is not None:
+        # The manifest is the per-modality publication pointer.  Only after it
+        # points at the fully verified new version can older rows be reclaimed.
+        deleted = context.milvus_ctx.client.delete_video_modality_except_version(
+            context.video["id"], stage, context.milvus_ctx.asset_version
+        )
+        if deleted < 0:
+            logger.warning(
+                "published stage=%s video=%s but deferred old-version cleanup failed",
+                stage, context.video["id"],
+            )
+        from app.vector_store.milvus.milvus_asset_version import publish_asset_version
+
+        publish_asset_version(context.index_dir, context.milvus_ctx.asset_version)
 
 
 def _run_visual(context: StageContext) -> dict:
@@ -268,22 +290,28 @@ def _run_asr(context: StageContext) -> dict:
 
 def _run_speaker(context: StageContext) -> dict:
     from app.indexing.modalities.speaker.speaker import build_speaker_index
+    from app.indexing.manifest import load_index_manifest
 
     settings = context.settings
+    asr_asset_version = None
     if context.milvus_ctx is not None:
-        _pre_delete_modality(context.milvus_ctx, context.video["id"], "speaker")
-    asr_path = context.index_dir / "asr.npz"
-    if not asr_path.exists():
-        raise RuntimeError("Speaker 索引依赖 ASR，请先构建或在同一任务中选择 ASR")
+        manifest = load_index_manifest(context.index_dir) or {}
+        asr_channel = (manifest.get("channels") or {}).get("asr") or {}
+        asr_asset_version = asr_channel.get("milvus_asset_version")
+        if not asr_asset_version:
+            raise RuntimeError("Milvus speaker build requires a published ASR stage")
     result = build_speaker_index(
         video_path=context.video_path,
-        asr_path=str(asr_path),
+        # The online source of truth is the ASR Milvus collection.  Keep the
+        # path only for explicit offline recovery invocations of the builder.
+        asr_path=str(context.index_dir / "asr.npz"),
         output_path=str(context.index_dir / "speaker.npz"),
         working_dir=str(context.working_dir),
         model_repo=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_repo)),
         model_cache_dir=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_cache_dir)),
         device=settings.speaker_device,
         milvus_ctx=context.milvus_ctx,
+        asr_asset_version=str(asr_asset_version) if asr_asset_version else None,
     )
     _write_manifest("speaker", context, result)
     return result

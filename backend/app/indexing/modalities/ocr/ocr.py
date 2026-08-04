@@ -737,16 +737,26 @@ def build_ocr_index(
     )
     semantic_elapsed = time.perf_counter() - semantic_started
     save_started = time.perf_counter()
-    _save_ocr_npz(
-        output_path,
-        chunks,
-        embeddings,
-        embedding_frame_indices,
-    )
+    index_payload = _ocr_index_payload(chunks, embeddings, embedding_frame_indices)
+    milvus_rows = None
     if milvus_ctx is not None:
-        from app.vector_store.milvus.milvus_indexer import write_modality_to_milvus
+        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
 
-        write_modality_to_milvus(milvus_ctx, "ocr", output_path)
+        milvus_rows = write_modality_from_memory(
+            milvus_ctx,
+            "ocr",
+            {
+                "frame_times_ms": index_payload["frame_times_ms"],
+                "frame_windows_ms": index_payload["frame_windows_ms"],
+                "embeddings": index_payload["embeddings"],
+                "embedding_frame_indices": index_payload["embedding_frame_indices"],
+                "box_frame_indices": index_payload["box_frame_indices"],
+                "box_texts": [str(value) for value in index_payload["box_texts"].tolist()],
+                "box_scores": index_payload["box_scores"],
+            },
+        )
+    # Retained only as an offline recovery artifact; no runtime path reads it.
+    atomic_save_npz(output_path, **index_payload)
     save_elapsed = time.perf_counter() - save_started
 
     result.update(semantic_result)
@@ -754,6 +764,7 @@ def build_ocr_index(
         "semantic_elapsed_seconds": round(semantic_elapsed, 3),
         "index_save_elapsed_seconds": round(save_elapsed, 3),
         "total_elapsed_seconds": round(time.perf_counter() - started, 3),
+        "milvus_rows": milvus_rows,
     })
     return result
 
@@ -773,6 +784,17 @@ def _save_ocr_npz(
     embeddings: np.ndarray,
     embedding_frame_indices: np.ndarray,
 ) -> None:
+    atomic_save_npz(
+        output_path,
+        **_ocr_index_payload(chunks, embeddings, embedding_frame_indices),
+    )
+
+
+def _ocr_index_payload(
+    chunks: list[dict],
+    embeddings: np.ndarray,
+    embedding_frame_indices: np.ndarray,
+) -> dict[str, np.ndarray]:
     box_frame_indices: list[int] = []
     box_texts: list[str] = []
     box_scores: list[float] = []
@@ -794,14 +816,13 @@ def _save_ocr_npz(
             box_texts.append(str(item.get("text", "")).strip())
             box_scores.append(float(item.get("score", 0.0)))
             boxes.append(_normalized_box(item.get("box"), frame_shape))
-    atomic_save_npz(
-        output_path,
-        frame_times_ms=np.asarray(frame_times_ms, dtype=np.int32),
-        frame_windows_ms=np.asarray(frame_windows_ms, dtype=np.int32).reshape((-1, 2)),
-        embeddings=np.asarray(embeddings, dtype=np.float16),
-        embedding_frame_indices=np.asarray(embedding_frame_indices, dtype=np.int32).reshape((-1,)),
-        box_frame_indices=np.asarray(box_frame_indices, dtype=np.int32),
-        box_texts=np.asarray(box_texts, dtype="U"),
-        box_scores=np.asarray(box_scores, dtype=np.float32),
-        boxes=np.stack(boxes).astype(np.float32) if boxes else np.empty((0, 4, 2), dtype=np.float32),
-    )
+    return {
+        "frame_times_ms": np.asarray(frame_times_ms, dtype=np.int32),
+        "frame_windows_ms": np.asarray(frame_windows_ms, dtype=np.int32).reshape((-1, 2)),
+        "embeddings": np.asarray(embeddings, dtype=np.float16),
+        "embedding_frame_indices": np.asarray(embedding_frame_indices, dtype=np.int32).reshape((-1,)),
+        "box_frame_indices": np.asarray(box_frame_indices, dtype=np.int32),
+        "box_texts": np.asarray(box_texts, dtype="U"),
+        "box_scores": np.asarray(box_scores, dtype=np.float32),
+        "boxes": np.stack(boxes).astype(np.float32) if boxes else np.empty((0, 4, 2), dtype=np.float32),
+    }

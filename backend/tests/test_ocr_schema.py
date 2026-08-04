@@ -1,13 +1,20 @@
 """Unit tests for the OCR hybrid schema and legacy-schema guard."""
 from __future__ import annotations
 
+import sys
+
 from types import SimpleNamespace
 
 import pytest
 
 from pymilvus import DataType, FunctionType
 from app.vector_store.milvus.milvus_client import _validate_existing_ocr_collection
-from app.vector_store.milvus.milvus_schema import EMBEDDING_DIMS, create_ocr_schema
+from app.vector_store.milvus.milvus_schema import (
+    EMBEDDING_DIMS,
+    _TEXT_LEN,
+    create_ocr_schema,
+    truncate_text_for_milvus,
+)
 
 
 class TestOCRSchema:
@@ -59,6 +66,14 @@ class TestOCRSchema:
             assert "chinese" in str(analyzer_params), "analyzer should be 'chinese'"
 
         print("✓ Text field has chinese analyzer enabled")
+
+    def test_text_limit_is_utf8_safe_and_bounded(self):
+        """The 5 KB Milvus cap must not split a multibyte character."""
+        assert _TEXT_LEN == 5000
+        result = truncate_text_for_milvus("中" * 2000)
+        assert len(result.encode("utf-8")) <= _TEXT_LEN
+        assert result == "中" * 1666
+        assert truncate_text_for_milvus("a" * 3000) == "a" * 2000
 
     def test_sparse_embedding_field(self):
         """Test that sparse_embedding field is configured correctly."""

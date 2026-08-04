@@ -151,21 +151,33 @@ def build_face_index(
     embeddings, track_times_ms = _face_track_arrays(finished)
 
     dimension = len(embeddings[0]) if embeddings else 512
+    embedding_array = (
+        np.stack(embeddings).astype(np.float32)
+        if embeddings else np.empty((0, dimension), np.float32)
+    )
+    track_times_array = np.asarray(track_times_ms, dtype=np.int32).reshape((-1, 3))
+    milvus_rows = None
+    if milvus_ctx is not None:
+        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
+
+        milvus_rows = write_modality_from_memory(
+            milvus_ctx,
+            "face",
+            {"embeddings": embedding_array, "track_times_ms": track_times_array},
+        )
+    # Retained only as an offline recovery artifact; no runtime path reads it.
     atomic_save_npz(
         output_path,
-        embeddings=np.stack(embeddings).astype(np.float32) if embeddings else np.empty((0, dimension), np.float32),
-        track_times_ms=np.asarray(track_times_ms, dtype=np.int32).reshape((-1, 3)),
+        embeddings=embedding_array,
+        track_times_ms=track_times_array,
     )
-    if milvus_ctx is not None:
-        from app.vector_store.milvus.milvus_indexer import write_modality_to_milvus
-
-        write_modality_to_milvus(milvus_ctx, "face", output_path)
     return {
         "tracks": len(embeddings),
         "detections": detections,
         "provider": encoder.provider,
         "schema_version": 3,
         "decode_status": "complete" if embeddings else "empty",
+        "milvus_rows": milvus_rows,
     }
 
 

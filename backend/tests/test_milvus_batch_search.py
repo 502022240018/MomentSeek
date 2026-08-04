@@ -64,6 +64,7 @@ def test_query_rows_for_videos_uses_one_iterator_and_groups_rows():
         FakeClient(collection),
         "visual",
         ["v1", "v2"],
+        {"v1": "2", "v2": "3"},
         ["frame_idx", "embedding"],
         profiler,
     )
@@ -71,7 +72,10 @@ def test_query_rows_for_videos_uses_one_iterator_and_groups_rows():
     assert [row["frame_idx"] for row in grouped["v1"]] == [0, 1]
     assert [row["frame_idx"] for row in grouped["v2"]] == [0]
     assert len(collection.calls) == 1
-    assert collection.calls[0]["expr"] == 'video_id in ["v1", "v2"]'
+    assert collection.calls[0]["expr"] == (
+        '(video_id == "v1" and asset_version == "2") or '
+        '(video_id == "v2" and asset_version == "3")'
+    )
     assert collection.iterator.closed is True
     snapshot = profiler.snapshot()
     assert snapshot["counters"]["milvus"]["visual_requests"] == 1

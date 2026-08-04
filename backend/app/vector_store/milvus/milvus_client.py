@@ -473,6 +473,40 @@ class MilvusClient:
             )
             return -1
 
+    def delete_video_modality_except_version(
+        self, video_id: str, modality: str, keep_asset_version: str
+    ) -> int:
+        """Remove superseded rows only after *keep_asset_version* is published."""
+        name = _COLLECTION_FOR_MODALITY[modality]
+        try:
+            if not utility.has_collection(name):
+                return 0
+            col = Collection(name)
+            expr = (
+                f'video_id == "{video_id}" and '
+                f'asset_version != "{keep_asset_version}"'
+            )
+            result = col.delete(expr)
+            col.flush()
+            return int(getattr(result, "delete_count", 0))
+        except Exception as exc:
+            logger.warning(
+                "superseded-version cleanup failed video=%s modality=%s keep=%s: %s",
+                video_id, modality, keep_asset_version, exc,
+            )
+            return -1
+
+    def count_video_modality_version(
+        self, video_id: str, modality: str, asset_version: str
+    ) -> int:
+        """Return the persisted rows for one published modality version."""
+        name = _COLLECTION_FOR_MODALITY[modality]
+        rows = Collection(name).query(
+            expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}"'),
+            output_fields=["count(*)"],
+        )
+        return int(rows[0].get("count(*)", 0)) if rows else 0
+
     def count_video_modality(self, video_id: str, modality: str) -> int:
         """Return the persisted row count for one video and modality."""
         name = _COLLECTION_FOR_MODALITY[modality]

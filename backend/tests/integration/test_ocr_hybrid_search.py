@@ -111,6 +111,7 @@ def test_bm25_only_retrieves_lexical_only_frame(ocr_collection):
     candidates = milvus_ocr_candidates_hybrid(
         ocr_collection,
         "ocr-hybrid-video",
+        "1",
         "工资",
         None,
         limit=10,
@@ -126,6 +127,7 @@ def test_dense_only_excludes_lexical_only_frame(ocr_collection):
     candidates = milvus_ocr_candidates_hybrid(
         ocr_collection,
         "ocr-hybrid-video",
+        "1",
         "",
         query,
         limit=10,
@@ -142,6 +144,7 @@ def test_hybrid_search_combines_dense_and_bm25(ocr_collection):
     candidates = milvus_ocr_candidates_hybrid(
         ocr_collection,
         "ocr-hybrid-video",
+        "1",
         "工资",
         query,
         limit=10,

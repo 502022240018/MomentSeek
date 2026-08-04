@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,6 +22,19 @@ CREATE TABLE IF NOT EXISTS videos (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS folders (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS video_folders (
+  video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(video_id, folder_id)
+);
+CREATE INDEX IF NOT EXISTS video_folders_folder_video_idx ON video_folders(folder_id, video_id);
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
@@ -117,6 +131,8 @@ CREATE TABLE IF NOT EXISTS milvus_cleanup_queue (
 
 
 class Catalog:
+    DEFAULT_FOLDER_ID = "__default__"
+    DEFAULT_FOLDER_NAME = "默认文件夹"
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,13 +199,108 @@ class Catalog:
 
     def list_videos(self) -> list[dict]:
         with self.connect() as connection:
-            rows = connection.execute("SELECT * FROM videos ORDER BY created_at DESC").fetchall()
-        return [self._decode_video(row) for row in rows]
+            rows = connection.execute("SELECT * FROM videos ORDER BY created_at DESC, id ASC").fetchall()
+            videos = [self._decode_video(row) for row in rows]
+            self._attach_video_folders(connection, videos)
+        return videos
 
     def get_video(self, video_id: str) -> dict | None:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
-        return self._decode_video(row) if row else None
+            if not row:
+                return None
+            video = self._decode_video(row)
+            self._attach_video_folders(connection, [video])
+        return video
+
+    def list_folders(self) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT f.*, COUNT(vf.video_id) AS video_count
+                   FROM folders f LEFT JOIN video_folders vf ON vf.folder_id=f.id
+                   GROUP BY f.id ORDER BY f.created_at DESC, f.id DESC"""
+            ).fetchall()
+            default_count = connection.execute(
+                """SELECT COUNT(*) AS count FROM videos v WHERE NOT EXISTS
+                   (SELECT 1 FROM video_folders vf WHERE vf.video_id=v.id)"""
+            ).fetchone()["count"]
+        return [{"id": self.DEFAULT_FOLDER_ID, "name": self.DEFAULT_FOLDER_NAME,
+                 "kind": "default", "video_count": default_count},
+                *[{**dict(row), "kind": "user"} for row in rows]]
+
+    def create_folder(self, name: str) -> dict:
+        folder_id = uuid.uuid4().hex
+        with self.connect() as connection:
+            connection.execute("INSERT INTO folders(id,name) VALUES(?,?)", (folder_id, name))
+        return self.get_folder(folder_id)
+
+    def get_folder(self, folder_id: str) -> dict | None:
+        if folder_id == self.DEFAULT_FOLDER_ID:
+            return self.list_folders()[0]
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT f.*, COUNT(vf.video_id) AS video_count FROM folders f
+                   LEFT JOIN video_folders vf ON vf.folder_id=f.id WHERE f.id=? GROUP BY f.id""", (folder_id,)
+            ).fetchone()
+        return {**dict(row), "kind": "user"} if row else None
+
+    def rename_folder(self, folder_id: str, name: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute("UPDATE folders SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (name, folder_id))
+        return cursor.rowcount > 0
+
+    def delete_folder(self, folder_id: str) -> int | None:
+        with self.connect() as connection:
+            if not connection.execute("SELECT 1 FROM folders WHERE id=?", (folder_id,)).fetchone():
+                return None
+            count = connection.execute("SELECT COUNT(*) AS count FROM video_folders WHERE folder_id=?", (folder_id,)).fetchone()["count"]
+            connection.execute("DELETE FROM video_folders WHERE folder_id=?", (folder_id,))
+            connection.execute("DELETE FROM folders WHERE id=?", (folder_id,))
+        return count
+
+    def update_video_folders(self, video_ids: list[str], folder_ids: list[str], operation: str) -> None:
+        video_ids, folder_ids = list(dict.fromkeys(video_ids)), list(dict.fromkeys(folder_ids))
+        if not video_ids:
+            raise ValueError("请至少选择一个视频")
+        if any(folder_id == self.DEFAULT_FOLDER_ID for folder_id in folder_ids):
+            raise ValueError("默认文件夹无需手动加入")
+        with self.connect() as connection:
+            marks = ",".join("?" for _ in video_ids)
+            found = connection.execute(f"SELECT COUNT(*) AS count FROM videos WHERE id IN ({marks})", video_ids).fetchone()["count"]
+            if found != len(video_ids):
+                raise ValueError("包含不存在的视频")
+            if folder_ids:
+                folder_marks = ",".join("?" for _ in folder_ids)
+                found = connection.execute(f"SELECT COUNT(*) AS count FROM folders WHERE id IN ({folder_marks})", folder_ids).fetchone()["count"]
+                if found != len(folder_ids):
+                    raise ValueError("包含不存在的文件夹")
+            if operation == "replace":
+                connection.execute(f"DELETE FROM video_folders WHERE video_id IN ({marks})", video_ids)
+            elif operation == "remove":
+                if folder_ids:
+                    folder_marks = ",".join("?" for _ in folder_ids)
+                    connection.execute(f"DELETE FROM video_folders WHERE video_id IN ({marks}) AND folder_id IN ({folder_marks})", [*video_ids, *folder_ids])
+                return
+            if operation not in {"add", "replace"}:
+                raise ValueError("不支持的文件夹操作")
+            connection.executemany("INSERT OR IGNORE INTO video_folders(video_id,folder_id) VALUES(?,?)", [(video_id, folder_id) for video_id in video_ids for folder_id in folder_ids])
+
+    def resolve_video_scope(self, video_ids: list[str] | None, folder_ids: list[str] | None) -> list[str] | None:
+        if video_ids is None and folder_ids is None:
+            return None
+        selected = list(dict.fromkeys(video_ids or []))
+        requested = list(dict.fromkeys(folder_ids or []))
+        with self.connect() as connection:
+            user_ids = [item for item in requested if item != self.DEFAULT_FOLDER_ID]
+            if user_ids:
+                marks = ",".join("?" for _ in user_ids)
+                found = connection.execute(f"SELECT COUNT(*) AS count FROM folders WHERE id IN ({marks})", user_ids).fetchone()["count"]
+                if found != len(user_ids):
+                    raise ValueError("包含不存在的文件夹")
+                selected.extend(row["video_id"] for row in connection.execute(f"SELECT video_id FROM video_folders WHERE folder_id IN ({marks})", user_ids).fetchall())
+            if self.DEFAULT_FOLDER_ID in requested:
+                selected.extend(row["id"] for row in connection.execute("SELECT v.id FROM videos v WHERE NOT EXISTS (SELECT 1 FROM video_folders vf WHERE vf.video_id=v.id)").fetchall())
+        return list(dict.fromkeys(selected))
 
     def update_video(self, video_id: str, **values) -> None:
         allowed = {"name", "status", "indexed_modalities", "duration", "fps", "width", "height"}
@@ -210,6 +321,7 @@ class Catalog:
         # not fire; delete the video's jobs explicitly in the same transaction.
         with self.connect() as connection:
             connection.execute("DELETE FROM jobs WHERE video_id=?", (video_id,))
+            connection.execute("DELETE FROM video_folders WHERE video_id=?", (video_id,))
             cursor = connection.execute("DELETE FROM videos WHERE id=?", (video_id,))
             return cursor.rowcount > 0
 
@@ -544,6 +656,24 @@ class Catalog:
                 "SELECT * FROM voice_samples WHERE entity_id=? ORDER BY created_at", (entity_id,)
             ).fetchall()
         return [self._strip(dict(row), self._VOICE_SAMPLE_BLOB_FIELDS) for row in rows]
+
+    @staticmethod
+    def _attach_video_folders(connection: sqlite3.Connection, videos: list[dict]) -> None:
+        if not videos:
+            return
+        ids = [video["id"] for video in videos]
+        marks = ",".join("?" for _ in ids)
+        rows = connection.execute(
+            f"""SELECT vf.video_id, f.id, f.name FROM video_folders vf
+                JOIN folders f ON f.id=vf.folder_id WHERE vf.video_id IN ({marks})
+                ORDER BY f.name COLLATE NOCASE""", ids
+        ).fetchall()
+        grouped: dict[str, list[dict]] = {video_id: [] for video_id in ids}
+        for row in rows:
+            grouped[row["video_id"]].append({"id": row["id"], "name": row["name"]})
+        for video in videos:
+            video["folders"] = grouped[video["id"]]
+            video["folder_ids"] = [folder["id"] for folder in video["folders"]]
 
     @staticmethod
     def _decode_video(row: sqlite3.Row) -> dict:
