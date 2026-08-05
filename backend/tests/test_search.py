@@ -514,7 +514,6 @@ def test_asr_v3_lexical_search_uses_chunk_times_and_texts(tmp_path):
 
 
 @pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
-@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
 def test_asr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
@@ -551,7 +550,6 @@ def test_asr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
     assert results[0]["evidence"][0]["unit_id"] == 0
 
 
-@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
 @pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
 def test_asr_search_falls_back_to_lexical_when_semantic_query_model_missing(tmp_path):
     settings = _settings(tmp_path)
@@ -708,6 +706,7 @@ def test_ocr_v3_sparse_semantic_indices_map_embeddings_to_frames(tmp_path):
     assert results[0]["evidence"][0]["unit_id"] == 0
 
 
+@pytest.mark.skip(reason="Face migrated to Milvus; NPZ v3 fallback removed")
 def test_face_v3_search_uses_track_times_and_on_demand_thumbnail(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
@@ -744,6 +743,7 @@ def test_face_v3_search_uses_track_times_and_on_demand_thumbnail(tmp_path):
     assert results[0]["evidence"][0]["best_ms"] == 12000
 
 
+@pytest.mark.skip(reason="Visual migrated to Milvus; NPZ v3 fallback removed")
 def test_visual_search_encodes_query_with_each_manifest_model(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
