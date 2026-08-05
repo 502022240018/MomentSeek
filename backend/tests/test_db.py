@@ -67,6 +67,32 @@ def test_rename_and_delete_video_removes_jobs(tmp_path):
     assert catalog.delete_video("video-1") is False
 
 
+def test_video_folder_memberships_are_many_to_many_and_non_destructive(tmp_path):
+    catalog = Catalog(tmp_path / "catalog.sqlite3")
+    for video_id in ("video-1", "video-2"):
+        catalog.create_video({"id": video_id, "name": f"{video_id}.mp4", "file_path": str(tmp_path / f"{video_id}.mp4"), "duration": 5, "fps": 25, "width": 640, "height": 480, "status": "uploaded"})
+    campaign, interview = catalog.create_folder("Campaign"), catalog.create_folder("Interview")
+    catalog.update_video_folders(["video-1"], [campaign["id"], interview["id"]], "replace")
+    catalog.update_video_folders(["video-2"], [campaign["id"]], "add")
+    assert {folder["name"] for folder in catalog.get_video("video-1")["folders"]} == {"Campaign", "Interview"}
+    assert catalog.delete_folder(campaign["id"]) == 2
+    assert catalog.get_video("video-1") is not None
+    assert catalog.get_video("video-1")["folder_ids"] == [interview["id"]]
+    catalog.update_video_folders(["video-1"], [], "replace")
+    assert catalog.get_video("video-1")["folder_ids"] == []
+
+
+def test_folder_scope_unions_explicit_assets_and_preserves_empty_folder(tmp_path):
+    catalog = Catalog(tmp_path / "catalog.sqlite3")
+    for video_id in ("video-1", "video-2", "video-3"):
+        catalog.create_video({"id": video_id, "name": f"{video_id}.mp4", "file_path": str(tmp_path / f"{video_id}.mp4"), "duration": 5, "fps": 25, "width": 640, "height": 480, "status": "uploaded"})
+    folder, empty = catalog.create_folder("Project"), catalog.create_folder("Empty")
+    catalog.update_video_folders(["video-1", "video-2"], [folder["id"]], "add")
+    assert set(catalog.resolve_video_scope(["video-3"], [folder["id"]]) or []) == {"video-1", "video-2", "video-3"}
+    assert catalog.resolve_video_scope(None, [empty["id"]]) == []
+    assert set(catalog.resolve_video_scope(None, [Catalog.DEFAULT_FOLDER_ID]) or []) == {"video-3"}
+
+
 def test_milvus_cleanup_queue_is_durable_and_deduplicated(tmp_path):
     catalog = Catalog(tmp_path / "catalog.sqlite3")
     catalog.enqueue_milvus_cleanup("video-1", "connection refused")

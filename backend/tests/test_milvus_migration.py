@@ -7,7 +7,7 @@ Covers the scenarios listed in the migration spec:
   4. Partial batch write failure + retry
   5. Milvus write success but NPZ write failure (data survives in Milvus)
   6. Data integrity after video deletion
-  7. Write-fail-policy=raise aborts the index job
+  7. Fail-closed Milvus writes abort the index job
   8. Fallback routing: MilvusServiceError → NPZ (only when FALLBACK_ENABLED)
   9. Empty Milvus result is NOT treated as a service error
  10. should_use_milvus_for_video() stable hash routing
@@ -16,9 +16,6 @@ All tests mock Milvus at the Collection level so no live Milvus is needed.
 """
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -159,8 +156,6 @@ def test_visual_asset_version_isolation(tmp_path):
 
 def test_model_version_upgrade_disjoint_pks(tmp_path):
     from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
-    from app.vector_store.milvus.milvus_schema import MODEL_VERSIONS
-
     npz = _make_npz(tmp_path, "visual")
     client, col = _make_mock_client()
     indexer = VisualMilvusIndexer()
@@ -186,39 +181,7 @@ def test_model_version_upgrade_disjoint_pks(tmp_path):
 # 4. Partial batch write failure + retry queue
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skip(reason="write queue was removed; retained NPZ is the recovery source")
-def test_write_failure_enqueues_retry(tmp_path):
-    npz = _make_npz(tmp_path, "visual")
-    client = MagicMock()
-    col = MagicMock()
-    col.upsert = MagicMock(side_effect=RuntimeError("connection refused"))
-    client.collection_for = MagicMock(return_value=col)
-
-    queue_path = tmp_path / "queue.jsonl"
-
-    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, write_modality_to_milvus
-    from app.indexing.milvus_write_queue import MilvusWriteQueue
-
-    ctx = MilvusWriteContext(video_id="vid_fail", asset_version="1", client=client)
-
-    with patch("app.indexing.milvus_write_queue.get_write_queue",
-               return_value=MilvusWriteQueue(queue_path)), \
-         patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="queue"):
-        write_modality_to_milvus(ctx, "visual", npz)
-
-    queue = MilvusWriteQueue(queue_path)
-    assert queue.pending_count() == 1
-    jobs = queue._load_all()
-    assert jobs[0]["video_id"] == "vid_fail"
-    assert jobs[0]["modality"] == "visual"
-    assert jobs[0]["npz_path"] == str(npz)
-
-
-# ---------------------------------------------------------------------------
-# 5. Write-fail-policy=raise
-# ---------------------------------------------------------------------------
-
-def test_write_fail_policy_raise(tmp_path):
+def test_write_failure_fails_closed(tmp_path):
     npz = _make_npz(tmp_path, "visual")
     client = MagicMock()
     col = MagicMock()
@@ -229,9 +192,8 @@ def test_write_fail_policy_raise(tmp_path):
 
     ctx = MilvusWriteContext(video_id="vid_raise", asset_version="1", client=client)
 
-    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="raise"):
-        with pytest.raises(RuntimeError, match="policy=raise"):
-            write_modality_to_milvus(ctx, "visual", npz)
+    with pytest.raises(RuntimeError, match="fail-closed"):
+        write_modality_to_milvus(ctx, "visual", npz)
 
 
 # ---------------------------------------------------------------------------
@@ -297,32 +259,11 @@ def test_speaker_upsert(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. Fallback routing: MilvusServiceError → NPZ
-# ---------------------------------------------------------------------------
-
-def test_search_fallback_on_service_error(tmp_path):
-    """When Milvus raises MilvusServiceError and fallback is enabled, NPZ is used."""
-    from app.vector_store.milvus.milvus_search import MilvusServiceError
-
-    with patch("app.vector_store.milvus.milvus_flags.milvus_read_enabled", return_value=True), \
-         patch("app.vector_store.milvus.milvus_flags.milvus_fallback_enabled", return_value=True), \
-         patch("app.vector_store.milvus.milvus_flags.should_use_milvus_for_video", return_value=True), \
-         patch("app.vector_store.milvus.milvus_search.milvus_visual_candidates",
-               side_effect=MilvusServiceError("timeout")):
-        # This test just verifies that MilvusServiceError is a distinct exception class
-        # and can be caught separately from, e.g., empty results.
-        with pytest.raises(MilvusServiceError):
-            raise MilvusServiceError("timeout")
-
-
-# ---------------------------------------------------------------------------
-# 9. Empty Milvus result is NOT a service error
+# 8. Empty Milvus result is NOT a service error
 # ---------------------------------------------------------------------------
 
 def test_empty_milvus_result_is_not_service_error():
     """Milvus returning 0 results is valid; no exception should be raised."""
-    from app.vector_store.milvus.milvus_search import MilvusServiceError
-
     # Empty results would come back as an empty list from _search()
     # and produce an empty Candidate list — no exception.
     empty: list = []
@@ -332,136 +273,53 @@ def test_empty_milvus_result_is_not_service_error():
 
 
 # ---------------------------------------------------------------------------
-# 10. Stable hash routing
+# 9. Write queue retry smoke test
 # ---------------------------------------------------------------------------
 
-def test_stable_hash_routing_determinism():
-    """The same video_id always maps to the same routing decision."""
-    from app.vector_store.milvus.milvus_flags import should_use_milvus_for_video
+def test_stage_publish_verifies_before_switching_and_then_reclaims_old_rows(tmp_path):
+    """Failed verification never changes the reader-visible channel manifest."""
+    from app.indexing.stage_executor import StageContext, _write_manifest
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
 
-    with patch("app.vector_store.milvus.milvus_flags._settings") as mock_settings:
-        mock_settings.return_value.milvus_rollout_percent = 50
-
-        video_id = "abc123def456"
-        first  = should_use_milvus_for_video(video_id)
-        second = should_use_milvus_for_video(video_id)
-        third  = should_use_milvus_for_video(video_id)
-        assert first == second == third, "Same video_id must always route the same way"
-
-
-def test_stable_hash_routing_distribution():
-    """At rollout_percent=50, ~50% of distinct IDs should route to Milvus."""
-    import hashlib
-    from app.vector_store.milvus.milvus_flags import should_use_milvus_for_video
-
-    ids = [f"video-{i:06d}" for i in range(200)]
-    with patch("app.vector_store.milvus.milvus_flags._settings") as mock_settings:
-        mock_settings.return_value.milvus_rollout_percent = 50
-        routed = sum(1 for vid in ids if should_use_milvus_for_video(vid))
-    # Expect between 30% and 70% (wide margin for 200 samples)
-    assert 60 <= routed <= 140, f"Expected ~100 of 200 routed, got {routed}"
-
-
-# ---------------------------------------------------------------------------
-# 11. Write queue retry smoke test
-# ---------------------------------------------------------------------------
-
-@pytest.mark.skip(reason="write queue was removed; backfill consumes retained NPZ files")
-def test_write_queue_retry(tmp_path):
-    """retry_pending() calls _reindex_from_npz() for each pending job."""
-    npz = _make_npz(tmp_path, "face")
-    queue_path = tmp_path / "q.jsonl"
-
-    from app.indexing.milvus_write_queue import MilvusWriteQueue
-
-    queue = MilvusWriteQueue(queue_path)
-    queue.enqueue(
-        modality="face", video_id="v1", asset_version="1",
-        model_version="insightface-buffalo-l-v1", npz_path=str(npz),
+    client = MagicMock()
+    client.count_video_modality_version.return_value = 2
+    context = StageContext(
+        video={"id": "vid_x", "duration": 1}, options={}, settings=MagicMock(),
+        pool=None, video_path="unused", index_dir=tmp_path, working_dir=tmp_path,
+        milvus_ctx=MilvusWriteContext(video_id="vid_x", asset_version="2", client=client),
     )
-    assert queue.pending_count() == 1
-
-    client = MagicMock()
-    col = MagicMock()
-    col.upsert = MagicMock()
-    client.collection_for = MagicMock(return_value=col)
-
-    with patch("app.vector_store.milvus.milvus_indexer._reindex_from_npz") as mock_reindex:
-        mock_reindex.return_value = None
-        result = queue.retry_pending(client)
-
-    assert result["done"] == 1
-    assert result["failed"] == 0
-    mock_reindex.assert_called_once()
+    with patch("app.indexing.stage_executor.write_stage_manifest") as write_manifest:
+        with pytest.raises(RuntimeError, match="Milvus verification failed"):
+            _write_manifest("visual", context, {"milvus_rows": 3})
+    write_manifest.assert_not_called()
+    client.delete_video_modality_except_version.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# 12. Pre-delete failure blocks indexing when policy=raise  (隐患 1)
+# 13. Re-index cleanup is scoped to superseded versions
 # ---------------------------------------------------------------------------
 
-def test_pre_delete_failure_raises_when_policy_raise(tmp_path):
-    """delete_video_modality returning -1 must raise when policy=raise."""
+def test_stage_publish_reclaims_only_versions_not_selected_by_manifest(tmp_path):
+    from app.indexing.stage_executor import StageContext, _write_manifest
     from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
 
     client = MagicMock()
-    client.delete_video_modality = MagicMock(return_value=-1)  # simulate failure
-
-    ctx = MilvusWriteContext(video_id="vid_x", asset_version="2", client=client)
-
-    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="raise"):
-        # Import after patching so the flag function is the mock.
-        from app.indexing.stage_executor import _pre_delete_modality
-        with pytest.raises(RuntimeError, match="Pre-index Milvus cleanup failed"):
-            _pre_delete_modality(ctx, "vid_x", "visual")
-
-
-def test_pre_delete_failure_warns_when_policy_warn(tmp_path):
-    """delete_video_modality returning -1 must only warn when policy=warn."""
-    import logging
-    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
-
-    client = MagicMock()
-    client.delete_video_modality = MagicMock(return_value=-1)
-
-    ctx = MilvusWriteContext(video_id="vid_y", asset_version="1", client=client)
-
-    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="warn"):
-        from app.indexing.stage_executor import _pre_delete_modality
-        # Must NOT raise — only warn.
-        _pre_delete_modality(ctx, "vid_y", "visual")
-
-    client.delete_video_modality.assert_called_once_with("vid_y", "visual")
-
-
-# ---------------------------------------------------------------------------
-# 13. Re-index with fewer frames cleans orphan records  (隐患 1 / core fix)
-# ---------------------------------------------------------------------------
-
-def test_reindex_fewer_frames_deletes_before_write(tmp_path):
-    """delete_video_modality is called before upsert on re-index."""
-    npz = _make_npz(tmp_path, "visual")
-    client = MagicMock()
-    col = MagicMock()
-    col.upsert = MagicMock()
-    client.collection_for = MagicMock(return_value=col)
-    client.delete_video_modality = MagicMock(return_value=5)  # deleted 5 old rows
-
-    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext, VisualMilvusIndexer
-
-    ctx = MilvusWriteContext(video_id="vid_reindex", asset_version="2", client=client)
-
-    # Simulate what stage_runner does: pre-delete then upsert.
-    from app.indexing.stage_executor import _pre_delete_modality
-    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="queue"):
-        _pre_delete_modality(ctx, "vid_reindex", "visual")
-
-    # After successful pre-delete, upsert the new (smaller) index.
-    count = VisualMilvusIndexer().upsert_from_npz(ctx, npz)
-
-    # Verify: delete happened, then upsert happened (and only 3 new rows).
-    client.delete_video_modality.assert_called_once_with("vid_reindex", "visual")
-    assert count == 3  # new NPZ has 3 frames (≤ the 5 "old" rows deleted)
-    col.upsert.assert_called()
+    client.count_video_modality_version.return_value = 3
+    client.delete_video_modality_except_version.return_value = 1
+    context = StageContext(
+        video={"id": "vid_reindex", "duration": 1}, options={}, settings=MagicMock(),
+        pool=None, video_path="unused", index_dir=tmp_path, working_dir=tmp_path,
+        milvus_ctx=MilvusWriteContext(video_id="vid_reindex", asset_version="2", client=client),
+    )
+    with (
+        patch("app.indexing.stage_executor.write_stage_manifest") as write_manifest,
+        patch("app.vector_store.milvus.milvus_asset_version.publish_asset_version"),
+    ):
+        _write_manifest("visual", context, {"milvus_rows": 3})
+    write_manifest.assert_called_once()
+    client.delete_video_modality_except_version.assert_called_once_with(
+        "vid_reindex", "visual", "2"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -494,79 +352,78 @@ def test_asset_version_bump_handles_non_integer_legacy(tmp_path):
     assert bump_asset_version(tmp_path) == "2"
 
 
+def test_interrupted_attempt_uses_a_new_version_and_preserves_reader_pointer(tmp_path):
+    """A failed v2 write cannot contaminate a v3 retry or replace published v1."""
+    from types import SimpleNamespace
+
+    from app.indexing.manifest import load_index_manifest, update_channel_manifest
+    from app.indexing.stage_executor import StageContext, _write_manifest
+    from app.vector_store.milvus.milvus_asset_version import (
+        current_asset_version,
+        current_attempt_version,
+        publish_asset_version,
+        reserve_next_attempt_version,
+    )
+    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
+
+    update_channel_manifest(
+        tmp_path,
+        video_id="vid_retry",
+        duration_seconds=1,
+        segment_seconds=1,
+        channel="visual",
+        channel_manifest={"milvus_asset_version": "1", "milvus_row_count": 3},
+    )
+    publish_asset_version(tmp_path, "1")
+
+    failed_version = reserve_next_attempt_version(tmp_path)
+    assert failed_version == "2"
+    assert current_asset_version(tmp_path) == "1"
+    assert load_index_manifest(tmp_path)["channels"]["visual"]["milvus_asset_version"] == "1"
+
+    # Simulate an interrupted v2 attempt that left only part of its rows behind.
+    failed_client = MagicMock()
+    failed_client.count_video_modality_version.return_value = 1
+    failed_context = StageContext(
+        video={"id": "vid_retry", "duration": 1}, options={},
+        settings=SimpleNamespace(visual_model="siglip2-test", visual_sample_fps=1.0, visual_segment_seconds=1.0),
+        pool=None, video_path="unused", index_dir=tmp_path, working_dir=tmp_path,
+        milvus_ctx=MilvusWriteContext(video_id="vid_retry", asset_version=failed_version, client=failed_client),
+    )
+    with pytest.raises(RuntimeError, match="Milvus verification failed"):
+        _write_manifest("visual", failed_context, {"milvus_rows": 2})
+    assert load_index_manifest(tmp_path)["channels"]["visual"]["milvus_asset_version"] == "1"
+
+    retry_version = reserve_next_attempt_version(tmp_path)
+    assert retry_version == "3"
+    assert current_attempt_version(tmp_path) == "3"
+
+    successful_client = MagicMock()
+    successful_client.count_video_modality_version.return_value = 2
+    successful_client.delete_video_modality_except_version.return_value = 4
+    successful_context = StageContext(
+        video={"id": "vid_retry", "duration": 1}, options={},
+        settings=SimpleNamespace(visual_model="siglip2-test", visual_sample_fps=1.0, visual_segment_seconds=1.0),
+        pool=None, video_path="unused", index_dir=tmp_path, working_dir=tmp_path,
+        milvus_ctx=MilvusWriteContext(video_id="vid_retry", asset_version=retry_version, client=successful_client),
+    )
+    _write_manifest("visual", successful_context, {"milvus_rows": 2})
+
+    assert load_index_manifest(tmp_path)["channels"]["visual"]["milvus_asset_version"] == "3"
+    assert current_asset_version(tmp_path) == "3"
+    successful_client.delete_video_modality_except_version.assert_called_once_with(
+        "vid_retry", "visual", "3"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 15. Stale write-queue jobs are cancelled on re-index  (隐患 2)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skip(reason="write queue was removed")
-def test_cancel_pending_for_video_cancels_matching_jobs(tmp_path):
-    """cancel_pending_for_video() marks matching pending jobs as cancelled."""
-    queue_path = tmp_path / "q.jsonl"
-    from app.indexing.milvus_write_queue import MilvusWriteQueue
+def test_execute_stage_has_no_destructive_pre_delete():
+    import app.indexing.stage_executor as executor
 
-    queue = MilvusWriteQueue(queue_path)
-    # Enqueue two jobs for the same video (different modalities) and one for another video.
-    queue.enqueue(modality="visual", video_id="v1", asset_version="1",
-                  model_version="model-v1", npz_path="/fake/visual.npz")
-    queue.enqueue(modality="asr", video_id="v1", asset_version="1",
-                  model_version="model-v1", npz_path="/fake/asr.npz")
-    queue.enqueue(modality="visual", video_id="v2", asset_version="1",
-                  model_version="model-v1", npz_path="/fake/v2_visual.npz")
-
-    assert queue.pending_count() == 3
-    cancelled = queue.cancel_pending_for_video("v1")
-    assert cancelled == 2
-    assert queue.pending_count() == 1  # only v2's job remains
-
-
-@pytest.mark.skip(reason="write queue was removed")
-def test_cancel_pending_scoped_to_modality(tmp_path):
-    """cancel_pending_for_video(modality=...) only cancels the given modality."""
-    queue_path = tmp_path / "q.jsonl"
-    from app.indexing.milvus_write_queue import MilvusWriteQueue
-
-    queue = MilvusWriteQueue(queue_path)
-    queue.enqueue(modality="visual", video_id="v1", asset_version="1",
-                  model_version="model-v1", npz_path="/fake/visual.npz")
-    queue.enqueue(modality="asr", video_id="v1", asset_version="1",
-                  model_version="model-v1", npz_path="/fake/asr.npz")
-
-    cancelled = queue.cancel_pending_for_video("v1", modality="visual")
-    assert cancelled == 1
-    assert queue.pending_count() == 1  # asr job still pending
-
-
-# ---------------------------------------------------------------------------
-# 16. Speaker pre-delete is NOT called at ASR stage start  (隐患 3)
-# ---------------------------------------------------------------------------
-
-def test_asr_stage_does_not_pre_delete_speaker_on_entry():
-    """At ASR stage start only 'asr' is pre-deleted; 'speaker' is not.
-
-    The speaker pre-delete must happen immediately before build_speaker_index(),
-    not at the top of the asr branch.  This test inspects the call order by
-    tracing delete_video_modality calls up to (but not including) the
-    speaker build step, then verifies 'speaker' was not touched.
-    """
-    from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
-
-    client = MagicMock()
-    client.delete_video_modality = MagicMock(return_value=0)
-
-    ctx = MilvusWriteContext(video_id="vid_asr", asset_version="2", client=client)
-
-    with patch("app.vector_store.milvus.milvus_flags.milvus_write_fail_policy", return_value="warn"):
-        from app.indexing.stage_executor import _pre_delete_modality
-        # Simulate what the asr branch does: only pre-delete 'asr'.
-        _pre_delete_modality(ctx, "vid_asr", "asr")
-
-    calls = [c.args for c in client.delete_video_modality.call_args_list]
-    # 'asr' should be deleted, 'speaker' should NOT be deleted at this point.
-    assert ("vid_asr", "asr") in calls
-    assert ("vid_asr", "speaker") not in calls, (
-        "Speaker must not be pre-deleted at the start of the ASR stage; "
-        "it should only be deleted immediately before build_speaker_index()."
-    )
+    assert not hasattr(executor, "_pre_delete_modality")
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +449,15 @@ def test_stage_lock_allows_different_stages(tmp_path):
     with video_stage_lock(tmp_path, video_id="vid_multi", stage="visual"):
         with video_stage_lock(tmp_path, video_id="vid_multi", stage="asr"):
             pass  # no StageLockError expected
+
+
+def test_publish_lock_serializes_different_modalities_for_one_video(tmp_path):
+    from app.vector_store.milvus.milvus_stage_lock import StageLockError, video_stage_lock
+
+    with video_stage_lock(tmp_path, video_id="vid_publish", stage="publish"):
+        with pytest.raises(StageLockError):
+            with video_stage_lock(tmp_path, video_id="vid_publish", stage="publish"):
+                pass
 
 
 def test_stage_lock_releases_on_exception(tmp_path):

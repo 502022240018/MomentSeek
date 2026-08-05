@@ -13,6 +13,7 @@ from app import __version__
 from app.api import (
     color_grading_routes,
     entity_routes,
+    folder_routes,
     job_routes,
     search_routes,
     speaker_routes,
@@ -55,6 +56,7 @@ for route_module in (
     speaker_routes,
     job_routes,
     entity_routes,
+    folder_routes,
     search_routes,
     color_grading_routes,
 ):

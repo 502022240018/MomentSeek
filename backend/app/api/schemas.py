@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -158,6 +160,38 @@ class VideoRenameRequest(BaseModel):
         return normalized
 
 
+class FolderCreateRequest(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("文件夹名称不能为空")
+        if len(value) > 100:
+            raise ValueError("文件夹名称过长")
+        return value
+
+
+class FolderRenameRequest(FolderCreateRequest):
+    pass
+
+
+class VideoFolderMembershipRequest(BaseModel):
+    video_ids: list[str] = Field(min_length=1)
+    folder_ids: list[str] = Field(default_factory=list)
+    operation: Literal["add", "remove", "replace"] = "replace"
+
+    @field_validator("video_ids", "folder_ids")
+    @classmethod
+    def validate_ids(cls, value: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip()))
+        if len(normalized) != len(value):
+            raise ValueError("文件夹和视频 ID 必须为非空字符串且不能重复")
+        return normalized
+
+
 class SpeakerUpdateRequest(BaseModel):
     display_name: str | None = None
     representative_utterance_index: int | None = Field(default=None, ge=0)
@@ -225,5 +259,4 @@ class HealthResponse(BaseModel):
     orchestration_profile: str | None = None
     milvus_enabled: bool = False
     milvus_primary: bool = False
-    milvus_fallback_enabled: bool = True
     query_models: dict = Field(default_factory=dict)

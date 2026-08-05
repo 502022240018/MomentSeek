@@ -9,16 +9,9 @@ Validates that:
 """
 import numpy as np
 import pytest
-from pathlib import Path
-from unittest.mock import Mock, patch, call
+from unittest.mock import Mock, patch
 from app.vector_store.milvus.milvus_indexer import (
     write_modality_from_memory,
-    VisualMilvusIndexer,
-    AsrMilvusIndexer,
-    OcrMilvusIndexer,
-    FaceMilvusIndexer,
-    SpeakerMilvusIndexer,
-    MilvusWriteContext,
 )
 
 
@@ -45,7 +38,6 @@ def mock_ctx():
 class TestVisualDirectWrite:
     def test_direct_write_success_no_npz(self, mock_ctx, tmp_path):
         """Visual: Milvus available → write directly, no NPZ."""
-        indexer = VisualMilvusIndexer()
         embeddings = np.random.randn(10, 1152).astype(np.float32)
         frame_times = np.arange(0, 10000, 1000, dtype=np.int32)
         offsets = np.array([0, 5, 10], dtype=np.int32)
@@ -73,16 +65,9 @@ class TestVisualDirectWrite:
         """Visual: Milvus write fails → recovery_save_fn is invoked."""
         mock_ctx.client.collection_for().upsert.side_effect = RuntimeError("Connection lost")
 
-        npz_path = tmp_path / "visual.npz"
         recovery_called = Mock()
 
-        with (
-            patch(
-                "app.vector_store.milvus.milvus_flags.milvus_write_fail_policy",
-                return_value="raise",
-            ),
-            pytest.raises(RuntimeError, match="Milvus write failed"),
-        ):
+        with pytest.raises(RuntimeError, match="Milvus write failed"):
             write_modality_from_memory(
                 mock_ctx, "visual",
                 {

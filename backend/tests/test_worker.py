@@ -137,3 +137,24 @@ def test_selective_rebuild_preserves_existing_modalities(monkeypatch, tmp_path):
     assert updated_video["status"] == "ready"
     assert updated_job["status"] == "completed"
     assert updated_job["modalities"] == ["asr"]
+
+
+def test_asr_stage_marks_nested_speaker_as_indexed(monkeypatch, tmp_path):
+    import app.execution.worker as worker
+
+    settings = Settings(_env_file=None, app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models")
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    video_path = settings.upload_dir / "video-1.mp4"
+    video_path.write_bytes(b"fake")
+    catalog.create_video({"id": "video-1", "name": "demo.mp4", "file_path": str(video_path),
+                          "duration": 1.0, "fps": 25.0, "width": 1, "height": 1, "status": "uploaded"})
+    job = catalog.create_job({"id": "job-1", "video_id": "video-1", "status": "queued",
+                              "stage": "queued", "progress": 0, "modalities": ["asr"], "options": {}})
+    monkeypatch.setattr(worker, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stdout='{"chunks": 3, "speaker": {"utterances": 0}}\n', stderr=""))
+
+    worker.execute_job(job["id"])
+
+    assert catalog.get_video("video-1")["indexed_modalities"] == ["asr", "speaker"]

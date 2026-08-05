@@ -11,10 +11,8 @@ Run:
     pytest backend/tests/integration/test_visual_ann.py -v -s
 """
 import time
-import pytest
 import numpy as np
-
-pytestmark = pytest.mark.integration
+import pytest
 
 from app.vector_store.milvus.milvus_client import MilvusClient
 from app.vector_store.milvus.milvus_search import milvus_visual_candidates
@@ -24,6 +22,8 @@ from app.vector_store.milvus.milvus_search_visual_v2 import (
     _normalize,
 )
 from app.core.settings import get_settings
+
+pytestmark = pytest.mark.integration
 
 
 # Configuration - update with actual test video
@@ -67,6 +67,18 @@ def test_video_id(milvus_client):
             pytest.fail(f"No indexed video found: {e}")
 
 
+@pytest.fixture(scope="module")
+def test_asset_version(milvus_client, test_video_id):
+    rows = milvus_client.collection_for("visual").query(
+        expr=f'video_id == "{test_video_id}"',
+        output_fields=["asset_version"],
+        limit=1,
+    )
+    if not rows or not rows[0].get("asset_version"):
+        pytest.skip("Test video has no asset_version")
+    return str(rows[0]["asset_version"])
+
+
 @pytest.fixture
 def query_embedding():
     """Generate a normalized random query vector."""
@@ -88,13 +100,14 @@ class TestVisualANNBasics:
         except MilvusVisualSearchError as e:
             pytest.fail(f"Index type mismatch: {e}")
 
-    def test_single_query_search(self, milvus_client, test_video_id, query_embedding):
+    def test_single_query_search(self, milvus_client, test_video_id, test_asset_version, query_embedding):
         """Test single-query visual search."""
         start = time.perf_counter()
 
         candidates = milvus_visual_candidates(
             client=milvus_client,
             video_id=test_video_id,
+            asset_version=test_asset_version,
             query=query_embedding,
             limit=10,
             profile="balanced",
@@ -115,7 +128,7 @@ class TestVisualANNBasics:
             scores = [c.score for c in candidates]
             assert scores == sorted(scores, reverse=True), "Should be sorted by score"
 
-    def test_multi_query_search(self, milvus_client, test_video_id):
+    def test_multi_query_search(self, milvus_client, test_video_id, test_asset_version):
         """Test multi-query visual search (AND semantics)."""
         # Create 2 different query vectors
         query1 = np.random.randn(1152).astype(np.float32)
@@ -129,6 +142,7 @@ class TestVisualANNBasics:
         candidates = milvus_visual_candidates(
             client=milvus_client,
             video_id=test_video_id,
+            asset_version=test_asset_version,
             query=multi_query,
             limit=10,
             profile="balanced",
@@ -144,11 +158,12 @@ class TestVisualANNBasics:
 class TestVisualANNProfiles:
     """Test different search profiles."""
 
-    def test_precision_profile(self, milvus_client, test_video_id, query_embedding):
+    def test_precision_profile(self, milvus_client, test_video_id, test_asset_version, query_embedding):
         """Test precision profile."""
         candidates = milvus_visual_candidates(
             client=milvus_client,
             video_id=test_video_id,
+            asset_version=test_asset_version,
             query=query_embedding,
             limit=10,
             profile="precision",
@@ -157,11 +172,12 @@ class TestVisualANNProfiles:
         assert len(candidates) <= 10, "Precision should respect limit"
         print(f"\n✓ Precision profile: {len(candidates)} candidates")
 
-    def test_balanced_profile(self, milvus_client, test_video_id, query_embedding):
+    def test_balanced_profile(self, milvus_client, test_video_id, test_asset_version, query_embedding):
         """Test balanced profile (default)."""
         candidates = milvus_visual_candidates(
             client=milvus_client,
             video_id=test_video_id,
+            asset_version=test_asset_version,
             query=query_embedding,
             limit=10,
             profile="balanced",
@@ -170,11 +186,12 @@ class TestVisualANNProfiles:
         assert len(candidates) <= 10, "Balanced should respect limit"
         print(f"\n✓ Balanced profile: {len(candidates)} candidates")
 
-    def test_recall_profile(self, milvus_client, test_video_id, query_embedding):
+    def test_recall_profile(self, milvus_client, test_video_id, test_asset_version, query_embedding):
         """Test recall profile (returns more candidates)."""
         candidates = milvus_visual_candidates(
             client=milvus_client,
             video_id=test_video_id,
+            asset_version=test_asset_version,
             query=query_embedding,
             limit=10,
             profile="recall",
@@ -187,16 +204,17 @@ class TestVisualANNProfiles:
 class TestVisualANNPerformance:
     """Performance benchmarks."""
 
-    def test_latency_target(self, milvus_client, test_video_id, query_embedding):
+    def test_latency_target(self, milvus_client, test_video_id, test_asset_version, query_embedding):
         """Test that query latency is reasonable."""
         times = []
         n_runs = 5
 
         for _ in range(n_runs):
             start = time.perf_counter()
-            candidates = milvus_visual_candidates(
+            milvus_visual_candidates(
                 client=milvus_client,
                 video_id=test_video_id,
+                asset_version=test_asset_version,
                 query=query_embedding,
                 limit=20,
             )
@@ -215,11 +233,12 @@ class TestVisualANNPerformance:
 class TestVisualANNCandidateFields:
     """Test candidate structure and fields."""
 
-    def test_candidate_fields(self, milvus_client, test_video_id, query_embedding):
+    def test_candidate_fields(self, milvus_client, test_video_id, test_asset_version, query_embedding):
         """Test that candidates have required fields and no legacy fields."""
         candidates = milvus_visual_candidates(
             client=milvus_client,
             video_id=test_video_id,
+            asset_version=test_asset_version,
             query=query_embedding,
             limit=5,
         )
@@ -245,7 +264,7 @@ class TestVisualANNCandidateFields:
         assert not hasattr(c, "percentile"), "Legacy field percentile should be removed"
         assert not hasattr(c, "distribution_reliable"), "Legacy field should be removed"
 
-        print(f"\n✓ Candidate fields correct")
+        print("\n✓ Candidate fields correct")
         print(f"  score={c.score:.3f}, raw_score={c.raw_score:.3f}")
         print(f"  evidence: {c.evidence[:80]}...")
 

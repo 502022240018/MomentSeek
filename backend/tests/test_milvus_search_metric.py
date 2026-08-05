@@ -5,9 +5,10 @@ lookup tables and conversion math that were incorrect before the fix.
 """
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
-
 from app.vector_store.milvus.milvus_client import _COLLECTION_FOR_MODALITY
 from app.vector_store.milvus.milvus_search import (
     _MODALITY_INDEX_TYPE,
@@ -15,7 +16,6 @@ from app.vector_store.milvus.milvus_search import (
     milvus_face_candidates,
 )
 from app.vector_store.milvus.milvus_search_visual_v2 import _aggregate_by_segment
-
 
 # ---------------------------------------------------------------------------
 # 1. Metric-type table completeness and consistency
@@ -55,8 +55,8 @@ def test_modality_metric_matches_collection_configs():
 
 def test_modality_index_type_matches_collection_configs():
     """get_modality_index_type() must return values matching collection configs."""
-    from app.vector_store.milvus.milvus_search import get_modality_index_type
     from app.vector_store.milvus.milvus_client import get_collection_index_config
+    from app.vector_store.milvus.milvus_search import get_modality_index_type
 
     for modality, collection_name in _COLLECTION_FOR_MODALITY.items():
         # Get index config dynamically
@@ -76,7 +76,7 @@ def test_modality_index_type_matches_collection_configs():
 @pytest.mark.parametrize("modality,expected_metric,expected_index", [
     ("visual",  "COSINE",   None),  # Visual uses dynamic config (DISKANN or HNSW)
     ("asr",     "IP",       "HNSW"),
-    ("ocr",     "IP",       "HNSW"),
+    ("ocr",     "IP",       "DISKANN"),  # OCR now uses DISKANN
     ("face",    "L2",       "IVF_FLAT"),
     ("speaker", "COSINE",   "HNSW"),
 ])
@@ -84,6 +84,56 @@ def test_per_modality_metric_and_index(modality, expected_metric, expected_index
     assert _MODALITY_METRIC[modality] == expected_metric
     if expected_index is not None:  # Skip index check for visual (dynamic config)
         assert _MODALITY_INDEX_TYPE[modality] == expected_index
+
+
+def test_visual_ann_uses_supported_retrieval_profiler_api():
+    """Visual ANN must use span/increment, not the removed mark() API."""
+    from app.retrieval.retrieval_metrics import RetrievalProfiler
+    from app.vector_store.milvus.milvus_search_visual_v2 import (
+        _reset_index_verification,
+        milvus_visual_candidates_ann,
+    )
+
+    settings = MagicMock(
+        visual_use_diskann=True,
+        visual_ann_top_k=10,
+        visual_ann_segment_top_n=1,
+    )
+    client = MagicMock()
+    collection = MagicMock()
+    client.collection_for.return_value = collection
+    collection.index.return_value = MagicMock(params={"index_type": "DISKANN"})
+    hit = MagicMock()
+    hit.distance = 0.85
+    hit.entity.get.side_effect = lambda field, default=None: {
+        "frame_idx": 0,
+        "timestamp_ms": 200,
+        "segment_id": 0,
+        "segment_start_ms": 0,
+        "segment_end_ms": 5_000,
+    }.get(field, default)
+    collection.search.return_value = [[hit]]
+
+    _reset_index_verification()
+    try:
+        with patch("app.core.settings.get_settings", return_value=settings):
+            profiler = RetrievalProfiler()
+            results = milvus_visual_candidates_ann(
+                client,
+                "test-video",
+                "7",
+                [np.ones(1152, dtype=np.float32)],
+                limit=10,
+                profiler=profiler,
+            )
+    finally:
+        _reset_index_verification()
+
+    snapshot = profiler.snapshot()
+    assert results
+    assert snapshot["timing"]["milvus_rpc"]["visual"] >= 0
+    assert snapshot["counters"]["milvus"]["visual_requests"] == 1
+    assert snapshot["counters"]["milvus"]["visual_rows"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +187,9 @@ def test_face_candidates_l2_to_cosine_conversion():
     query = np.ones(512, dtype=np.float32)
     query /= np.linalg.norm(query)
 
-    candidates = milvus_face_candidates(fake_client, "vid-test", query, limit=5, threshold=0.35)
+    candidates = milvus_face_candidates(
+        fake_client, "vid-test", query, "7", limit=5, threshold=0.35
+    )
 
     assert len(candidates) == 1
     candidate = candidates[0]

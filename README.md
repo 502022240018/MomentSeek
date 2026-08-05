@@ -4,7 +4,7 @@
 
 当前只交付实际使用并经过服务器验证的 **ARM64 + Ascend 910B + Docker Compose** 路线，不放入尚未形成生产交付的 CPU/CUDA 和裸机部署文件。
 
-本仓库不携带模型、视频、运行结果、实验记录和历史迁移脚本。Milvus 是平台默认依赖，但其历史维护脚本不是部署必需项；需要独立 Milvus 时使用 `compose/compose.milvus.yml`。
+本仓库不携带模型、视频、运行结果和实验记录。Milvus 是唯一在线检索库；需要独立 Milvus 时使用 `compose/compose.milvus.yml`。部署本身不需要维护脚本，但已有运行数据切换到 Milvus-only 模式时，必须按 [Milvus-only 正式索引切换手册](docs/MILVUS_ONLY_MIGRATION.md) 执行。
 
 具体来源提交和迁移边界见 [SOURCE.md](SOURCE.md)。
 
@@ -50,6 +50,8 @@ vendor-wheels/               Ascend ARM64必须固定的离线wheels
 平台架构、模块分层与扩展指南见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 需要从源码制作镜像时阅读 [docs/IMAGE_BUILD.md](docs/IMAGE_BUILD.md)；拿到镜像后，按
 [docs/DEPLOYMENT_ASCEND.md](docs/DEPLOYMENT_ASCEND.md) 部署。
+已有视频从旧索引切换时，按 [docs/MILVUS_ONLY_MIGRATION.md](docs/MILVUS_ONLY_MIGRATION.md)
+执行灰度、全量重建和版本行数核验。
 
 ## 测试
 

@@ -22,7 +22,7 @@ MomentSeek 是面向私有视频素材的多通道视频片段检索平台：视
         ▼                         ▼                          ▼
 ┌───────────────┐        ┌────────────────┐         ┌────────────────┐
 │ SQLite catalog │        │ runtime/ 文件区 │         │ Milvus 向量库   │
-│ (视频/任务/    │        │ uploads 索引NPZ │         │ (etcd + MinIO)  │
+│ (视频/任务/    │        │ uploads/恢复副本 │         │ (etcd + MinIO)  │
 │  人物/声纹)    │        │ 帧缓存 clip缓存 │         │ 五通道 collection│
 └───────────────┘        └────────────────┘         └────────────────┘
                                   ▲
@@ -79,7 +79,7 @@ backend/app/
 ├─ orchestration/           检索编排层（在 retrieval 之上）
 │     retrieval_orchestration.py  LLM planner/reranker（OpenAI 兼容 provider）
 ├─ vector_store/            向量存储层（纯基础设施）
-│     └─ milvus/            client / schema / indexer / search / flags / 锁 / 版本
+│     └─ milvus/            client / schema / indexer / search / 锁 / 版本 / 离线恢复工具
 ├─ execution/               后台执行层
 │     worker.py             每任务子进程编排（subprocess 模式）
 │     stage_runner.py       阶段子进程 CLI 入口（python -m app.execution.stage_runner）
@@ -125,8 +125,8 @@ POST /api/videos/{id}/index  (modalities 子集，可增量/重建)
   → indexing.stage_executor：
        media 解码抽帧/抽音频
        modalities/<通道> 编码
-       vector_store.milvus 直写（P2 内存路径）+ NPZ 落盘
-       pipeline_manifest 写通道 manifest
+       vector_store.milvus 直写（P2 内存路径）+ 保留 NPZ 离线恢复副本
+       校验新版本行数 → pipeline_manifest 发布通道 asset_version → 清理旧版本
   → 阶段进程退出，释放 NPU
 ```
 
@@ -136,7 +136,7 @@ POST /api/videos/{id}/index  (modalities 子集，可增量/重建)
 POST /api/search (文字/图片, modalities, 可选 orchestration profile)
   → orchestration：可选 LLM planner 决定通道与参数（失败自动回退默认计划）
   → retrieval.SearchEngine：
-       编码查询（CPU）→ 各通道独立召回（Milvus 优先，NPZ 兜底）
+       编码查询（CPU）→ 各通道按 manifest 已发布 asset_version 从 Milvus 独立召回
        → 阈值/证据判定 → 按时间邻近融合成片段
   → 可选 LLM reranker 重排
   → 返回 start/end、置信度、证据、缩略图/clip URL（实时抽帧，磁盘缓存）
@@ -148,7 +148,7 @@ POST /api/search (文字/图片, modalities, 可选 orchestration profile)
 runtime/                     （容器内 APP_DATA_DIR，不进 Git）
   catalog.sqlite3            视频/任务/人物/声纹/仿色任务
   uploads/                   原始视频与字幕 sidecar
-  indexes/{video_id}/        各通道 NPZ + index manifest（Milvus 的恢复兜底）
+  indexes/{video_id}/        各通道 NPZ 离线副本 + index manifest（Milvus 发布指针）
   frame_cache/  clips/       检索命中的实时抽帧与预览片段缓存
 models/ → 容器内 /app/models  模型权重（部署前预缓存，运行时禁止下载）
 Milvus                       五通道向量 collection（模型版本参与主键/schema）
@@ -193,7 +193,7 @@ Milvus                       五通道向量 collection（模型版本参与主�
 | 共享编码器抽层 | ✅ 已完成（2026-07-31） | `app/encoders/{visual,face,text}.py`；retrieval 与 indexing 共同依赖，互不伸手 |
 | 拆分 `retrieval/search.py` | 待办 | 单文件约 77KB，五通道召回+融合混在一处；按通道拆分并抽出 Candidate/SearchResult 类型 |
 | 拆分前端 `main.tsx` | 待办 | 单文件约 34KB；按 upload/search/assets/player 拆组件 |
-| face 等通道升级 P2 直写 | 待办 | visual 已走 `write_modality_from_memory` 内存直写，face/asr/ocr/speaker 仍是"先 NPZ 再入 Milvus"的旧路径 |
+| 五通道 P2 直写与版本化发布 | ✅ 已完成 | visual/face/asr/ocr/speaker 均从内存直写；在线读取只认 manifest 已发布的 Milvus `asset_version`，NPZ 仅供离线恢复。既有数据切换见 `docs/MILVUS_ONLY_MIGRATION.md`。 |
 
 以上均为结构优化，不改变行为；每项单独改造、单独回归验证。
 

@@ -7,7 +7,6 @@ from urllib.parse import urlencode
 import numpy as np
 
 from app.catalog.db import Catalog
-from app.indexing.modalities.speaker.speaker import load_speaker_index
 from app.core.settings import get_settings
 
 
@@ -32,18 +31,6 @@ def ensure_milvus_reachable() -> None:
     ensure()
 
 
-def milvus_read_enabled() -> bool:
-    from app.vector_store.milvus.milvus_flags import milvus_read_enabled as enabled
-
-    return enabled()
-
-
-def milvus_fallback_enabled() -> bool:
-    from app.vector_store.milvus.milvus_flags import milvus_fallback_enabled as enabled
-
-    return enabled()
-
-
 def _expected_speaker_utterances(path: Path) -> int | None:
     from app.indexing.manifest import load_index_manifest
 
@@ -64,18 +51,29 @@ def _expected_speaker_utterances(path: Path) -> int | None:
 
 
 def _texts(asr_path: Path, video_id: str | None = None) -> list[str]:
-    if video_id is not None and milvus_read_enabled():
-        texts = _texts_from_milvus(video_id)
-        if texts:
-            return texts
-    with np.load(asr_path, allow_pickle=False) as data:
-        return [str(value) for value in data["texts"]]
+    if video_id is None:
+        raise ValueError("Milvus-only speaker reads require video_id")
+    return _texts_from_milvus(video_id)
+
+
+def _published_asset_version(video_id: str, modality: str) -> str:
+    from app.indexing.manifest import load_index_manifest
+
+    manifest = load_index_manifest(get_settings().index_dir / video_id) or {}
+    channel = (manifest.get("channels") or {}).get(modality) or {}
+    version = channel.get("milvus_asset_version")
+    if version is None or not str(version).strip():
+        raise SpeakerMilvusCoverageError(
+            f"Milvus {modality} version is not published for video {video_id}"
+        )
+    return str(version)
 
 
 def _milvus_rows(video_id: str, modality: str, fields: list[str]) -> list[dict]:
     ensure_milvus_reachable()
     collection = get_milvus_client().collection_for(modality)
-    expression = f'video_id == "{video_id}"'
+    version = _published_asset_version(video_id, modality)
+    expression = f'video_id == "{video_id}" and asset_version == "{version}"'
     rows: list[dict] = []
     timeout = get_settings().milvus_query_timeout_seconds
     if hasattr(collection, "query_iterator"):
@@ -104,28 +102,26 @@ def _milvus_rows(video_id: str, modality: str, fields: list[str]) -> list[dict]:
 
 
 def _texts_for_video(index_dir: Path, video_id: str) -> list[str]:
-    if milvus_read_enabled():
-        try:
-            texts = _texts_from_milvus(video_id)
-            if texts:
-                return texts
-        except Exception:
-            logger.warning("Milvus ASR text fetch failed for %s; falling back to NPZ", video_id, exc_info=True)
-    path = index_dir / video_id / "asr.npz"
-    return _texts(path) if path.exists() else []
+    del index_dir
+    return _texts_from_milvus(video_id)
 
 
 def _texts_from_milvus(video_id: str) -> list[str]:
     try:
         ensure_milvus_reachable()
         rows = get_milvus_client().collection_for("asr").query(
-            expr=f'video_id == "{video_id}"',
+            expr=(f'video_id == "{video_id}" and asset_version == "'
+                  f'{_published_asset_version(video_id, "asr")}"'),
             output_fields=["segment_idx", "text"],
             limit=16_384,
             timeout=get_settings().milvus_query_timeout_seconds,
         )
-    except Exception:
-        return []
+    except SpeakerMilvusCoverageError:
+        raise
+    except Exception as exc:
+        raise SpeakerMilvusCoverageError(
+            f"Milvus ASR text is unavailable for video {video_id}: {exc}"
+        ) from exc
     if not rows:
         return []
     values = {
@@ -219,23 +215,16 @@ def _speaker_data_from_milvus(
 
 
 def _load_speaker_data(path: Path, video_id: str) -> dict[str, np.ndarray]:
-    if milvus_read_enabled():
-        try:
-            data = _speaker_data_from_milvus(
-                video_id,
-                expected_utterances=_expected_speaker_utterances(path),
-            )
-            if data is not None:
-                return data
-        except Exception:
-            if not milvus_fallback_enabled():
-                raise
-        else:
-            if not milvus_fallback_enabled():
-                raise SpeakerMilvusCoverageError(
-                    f"Milvus speaker data is missing for video {video_id}"
-                )
-    return load_speaker_index(path)
+    """Load online speaker state exclusively from Milvus."""
+    data = _speaker_data_from_milvus(
+        video_id,
+        expected_utterances=_expected_speaker_utterances(path),
+    )
+    if data is None:
+        raise SpeakerMilvusCoverageError(
+            f"Milvus speaker data is missing for video {video_id}"
+        )
+    return data
 
 
 def speaker_utterance_embedding(
@@ -243,7 +232,7 @@ def speaker_utterance_embedding(
     video_id: str,
     utterance_index: int,
 ) -> np.ndarray:
-    """Read one utterance from Milvus primary with NPZ fallback."""
+    """Read one utterance from the Milvus source of truth."""
     data = _load_speaker_data(index_dir / video_id / "speaker.npz", video_id)
     try:
         return data["utterance_embeddings"][utterance_index].astype(np.float32)
@@ -405,84 +394,14 @@ def voice_search_vectors(
     if queries.ndim != 2 or not len(queries):
         raise ValueError("没有有效查询声纹")
     queries /= np.maximum(np.linalg.norm(queries, axis=1, keepdims=True), 1e-12)
-    selected = set(video_ids) if video_ids else None
-    hits: list[dict] = []
-    if milvus_read_enabled():
-        try:
-            milvus_hits, covered_video_ids = _voice_search_vectors_milvus(
-                index_dir,
-                catalog,
-                queries=queries,
-                video_ids=video_ids,
-                limit=limit,
-                exclude=exclude,
-            )
-        except Exception:
-            if not milvus_fallback_enabled():
-                raise
-        else:
-            expected_video_ids = {
-                str(video["id"])
-                for video in catalog.list_videos()
-                if (selected is None or str(video["id"]) in selected)
-                and (
-                    (index_dir / str(video["id"]) / "speaker.npz").exists()
-                    or (_expected_speaker_utterances(
-                        index_dir / str(video["id"]) / "speaker.npz"
-                    ) or 0) > 0
-                )
-            }
-            coverage_gaps = expected_video_ids - covered_video_ids
-            if not coverage_gaps:
-                return milvus_hits[:limit]
-            if not milvus_fallback_enabled():
-                raise SpeakerMilvusCoverageError(
-                    "Milvus speaker coverage is missing for video(s): "
-                    + ", ".join(sorted(coverage_gaps))
-                )
-            hits.extend(milvus_hits)
-            selected = coverage_gaps
-    for video in catalog.list_videos():
-        video_id = video["id"]
-        if selected is not None and video_id not in selected:
-            continue
-        path = index_dir / video_id / "speaker.npz"
-        try:
-            data = _load_speaker_data(path, video_id)
-        except FileNotFoundError:
-            continue
-        vectors = data["utterance_embeddings"].astype(np.float32)
-        if not len(vectors):
-            continue
-        vectors /= np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)
-        # A concrete sentence is the primary match. Multiple uploaded query
-        # samples support it through max similarity without averaging speakers.
-        scores = np.max(vectors @ queries.T, axis=1)
-        overlays = catalog.speaker_overlays(video_id)["utterances"]
-        for utterance_index in np.argsort(-scores)[: min(limit, len(scores))]:
-            if exclude == (video_id, int(utterance_index)):
-                continue
-            override = overlays.get(int(utterance_index), {})
-            if not bool(override.get("searchable", 1)):
-                continue
-            start_ms, end_ms = data["utterance_times_ms"][utterance_index]
-            chunk_index, auto_track = data["utterance_refs"][utterance_index]
-            hits.append({
-                "video_id": video_id, "video_name": video["name"],
-                "utterance_index": int(utterance_index), "asr_chunk_index": int(chunk_index),
-                "track_id": override.get("corrected_track_id", int(auto_track)),
-                "start_ms": int(start_ms), "end_ms": int(end_ms),
-                "score": float(scores[utterance_index]),
-                "clip_url": f"/api/videos/{video_id}/clip?{urlencode({'start': start_ms / 1000, 'end': end_ms / 1000})}",
-            })
-    hits.sort(key=lambda item: item["score"], reverse=True)
-    texts_by_video: dict[str, list[str]] = {}
-    for hit in hits[:limit]:
-        texts = texts_by_video.setdefault(
-            hit["video_id"], _texts_for_video(index_dir, hit["video_id"])
-        )
-        index = hit["asr_chunk_index"]
-        hit["text"] = texts[index] if 0 <= index < len(texts) else ""
+    hits, _covered_video_ids = _voice_search_vectors_milvus(
+        index_dir,
+        catalog,
+        queries=queries,
+        video_ids=video_ids,
+        limit=limit,
+        exclude=exclude,
+    )
     return hits[:limit]
 
 
@@ -513,7 +432,12 @@ def _voice_search_vectors_milvus(
         best_by_utterance = {}
         for query in queries:
             for candidate in milvus_speaker_candidates(
-                client, video_id, query, limit, threshold=-1.0
+                client,
+                video_id,
+                query,
+                _published_asset_version(video_id, "speaker"),
+                limit,
+                threshold=-1.0,
             ):
                 previous = best_by_utterance.get(candidate.unit_id)
                 if previous is None or candidate.score > previous.score:

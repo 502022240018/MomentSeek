@@ -12,6 +12,18 @@ from app.platform import context
 router = APIRouter()
 
 
+def _parse_id_list(value: str | None, field_name: str) -> list[str] | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"{field_name} 必须是 JSON 字符串数组") from exc
+    if not isinstance(parsed, list) or any(not isinstance(item, str) or not item.strip() for item in parsed):
+        raise HTTPException(status_code=422, detail=f"{field_name} 必须是非空字符串数组")
+    return list(dict.fromkeys(item.strip() for item in parsed)) or None
+
+
 @router.get("/api/orchestration/profiles")
 def orchestration_profiles() -> dict:
 
@@ -24,6 +36,7 @@ async def search(
     query_image: UploadFile | None = File(default=None),
     modalities: str = Form(default="visual,face,asr,ocr"),
     video_ids: str | None = Form(default=None),
+    folder_ids: str | None = Form(default=None),
     alpha: float = Form(default=0.5),
     limit: int = Form(default=24),
     orchestration_profile: str | None = Form(default=None),
@@ -40,6 +53,12 @@ async def search(
         raise HTTPException(status_code=422, detail="planner_mode 必须是 auto、off 或 force")
     if reranker_mode not in {"auto", "off", "force"}:
         raise HTTPException(status_code=422, detail="reranker_mode 必须是 auto、off 或 force")
+    requested_video_ids = _parse_id_list(video_ids, "video_ids")
+    requested_folder_ids = _parse_id_list(folder_ids, "folder_ids")
+    try:
+        resolved_video_ids = context.catalog.resolve_video_scope(requested_video_ids, requested_folder_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     image_path = None
     if query_image and query_image.filename:
         image_path = context.settings.query_dir / (
@@ -53,7 +72,7 @@ async def search(
             query_text.strip() if query_text else None,
             str(image_path) if image_path else None,
             selected_modalities,
-            json.loads(video_ids) if video_ids else None,
+            resolved_video_ids,
             max(0, min(1, alpha)),
             max(1, min(100, limit)),
             profile_name=orchestration_profile,
@@ -76,5 +95,7 @@ async def search(
         "above_count": sum(1 for item in results if item.get("above_threshold")),
         "elapsed_seconds": elapsed_seconds,
         "execution": outcome["execution"],
+        "scope": {"folder_ids": requested_folder_ids or [], "video_ids": requested_video_ids or [],
+                  "resolved_video_count": len(resolved_video_ids) if resolved_video_ids is not None else len(context.catalog.list_videos())},
         "results": results,
     }

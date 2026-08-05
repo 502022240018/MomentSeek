@@ -10,6 +10,33 @@ from app.catalog.db import Catalog
 from app.core.settings import Settings
 
 
+def test_folder_api_deletion_keeps_asset_and_its_index(monkeypatch, tmp_path):
+    import app.main as main
+
+    settings = Settings(_env_file=None, app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models", indexer_mode="process_exit")
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    video_path = settings.upload_dir / "video-1.mp4"
+    video_path.write_bytes(b"video")
+    index_path = settings.index_dir / "video-1" / "visual.npz"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_bytes(b"index")
+    catalog.create_video({"id": "video-1", "name": "demo.mp4", "file_path": str(video_path), "duration": 1, "fps": 25, "width": 640, "height": 480, "status": "ready"})
+    monkeypatch.setattr(context, "settings", settings)
+    monkeypatch.setattr(context, "catalog", catalog)
+
+    with TestClient(main.app) as client:
+        folder = client.post("/api/folders", json={"name": "Campaign"})
+        assert folder.status_code == 201
+        folder_id = folder.json()["id"]
+        assert client.post("/api/videos/folders", json={"video_ids": ["video-1"], "folder_ids": [folder_id], "operation": "add"}).status_code == 200
+        assert client.delete(f"/api/folders/{folder_id}").json()["released_video_count"] == 1
+        assert client.get("/api/videos").json()[0]["folder_ids"] == []
+
+    assert video_path.exists()
+    assert index_path.exists()
+
+
 def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
 
     settings = Settings(
@@ -160,6 +187,7 @@ def test_create_index_job_queues_only_requested_modalities(monkeypatch, tmp_path
         app_data_dir=tmp_path / "runtime",
         app_model_dir=tmp_path / "models",
         indexer_mode="process_exit",
+        milvus_enabled=True,
     )
     settings.ensure_dirs()
     catalog = Catalog(settings.db_path)
@@ -202,6 +230,34 @@ def test_create_index_job_queues_only_requested_modalities(monkeypatch, tmp_path
     }
     assert launched == [job["id"]]
     assert catalog.get_video("video-1")["indexed_modalities"] == ["face", "visual"]
+
+
+def test_create_index_job_rejects_disabled_milvus(monkeypatch, tmp_path):
+    import app.main as main
+
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        milvus_enabled=False,
+    )
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    video_path = settings.upload_dir / "video-1.mp4"
+    video_path.write_bytes(b"fake")
+    catalog.create_video({
+        "id": "video-1", "name": "demo.mp4", "file_path": str(video_path),
+        "duration": 10.0, "fps": 25.0, "width": 1920, "height": 1080, "status": "ready",
+    })
+    monkeypatch.setattr(context, "settings", settings)
+    monkeypatch.setattr(context, "catalog", catalog)
+
+    with TestClient(main.app) as client:
+        response = client.post("/api/videos/video-1/index", json={"modalities": ["visual"]})
+
+    assert response.status_code == 503
+    assert "MILVUS_ENABLED=true" in response.json()["detail"]
+    assert catalog.list_jobs("video-1") == []
 
 
 def _create_cancellable_job(catalog, tmp_path, *, status="queued"):
@@ -273,6 +329,7 @@ def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
         asr_model="turbo",
         asr_language="auto",
         asr_semantic_enabled=False,
+        milvus_enabled=True,
     )
     settings.ensure_dirs()
     catalog = Catalog(settings.db_path)
@@ -318,6 +375,8 @@ def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
 
     monkeypatch.setattr(stage_runner, "get_settings", lambda: settings)
     monkeypatch.setattr(asr, "build_asr_index", fake_build_asr_index)
+    import app.indexing.stage_executor as stage_executor
+    monkeypatch.setattr(stage_executor, "_setup_milvus_context", lambda *args: None)
 
     result = stage_runner.run("asr", job["id"])
 

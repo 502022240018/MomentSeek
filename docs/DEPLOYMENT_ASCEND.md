@@ -90,6 +90,28 @@ MILVUS_PORT=19530
 `127.0.0.1` 连接它。应由管理员提供容器可达地址，或把 Milvus 加入同一
 Docker 网络。
 
+### Visual ANN 与视觉结果优先级
+
+`.env` 中的下列值决定视觉通道查询行为：
+
+```dotenv
+VISUAL_USE_DISKANN=true
+VISUAL_ANN_TOP_K=500
+VISUAL_ANN_SEGMENT_TOP_N=3
+SEARCH_VISUAL_PRIORITY_ENABLED=true
+```
+
+`VISUAL_USE_DISKANN` 必须与现有 visual collection 的实际索引类型一致：
+DiskANN 使用 `true`，HNSW 使用 `false`。改变此值不会迁移已有索引；必须先
+在维护窗口重建 collection，再更新配置并启动应用。`VISUAL_ANN_TOP_K` 为每个
+子查询的 ANN 召回数量，`VISUAL_ANN_SEGMENT_TOP_N` 为一个时间段参与聚合的帧数；
+两者必须是正整数。
+
+默认开启 `SEARCH_VISUAL_PRIORITY_ENABLED`：当一次检索明确包含 `visual` 通道时，
+先按“是否超过阈值”分层，再在同一层内将含视觉证据的结果排在纯 Face、ASR 或 OCR
+证据之前。它不会让低于阈值的视觉结果越过高于阈值的辅助通道结果。设为 `false`
+可恢复为纯综合分数排序。
+
 ## 5. 自动预检
 
 ```bash
@@ -162,6 +184,13 @@ python3 scripts/smoke_check.py --base-url http://127.0.0.1:8000
 
 首次验证只证明服务与基础 API 可用。正式业务验收还应上传一段已授权的测试
 视频，完成一次索引和一次检索，并确认任务结束后 NPU 资源符合配置预期。
+
+### 已有数据的首次切换
+
+如果 `HOST_RUNTIME_DIR` 中已有上传视频或旧索引，服务启动成功不代表它们已经具备
+Milvus-only 的发布版本。必须在维护窗口按
+[Milvus-only 正式索引切换手册](MILVUS_ONLY_MIGRATION.md) 执行灰度、全量重建和行数核验，
+再开放该实例的正式检索流量。NPZ 不参与线上读取，不能作为服务不可用时的回退。
 
 ## 8. 常用运维
 

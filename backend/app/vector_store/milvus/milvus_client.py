@@ -52,6 +52,8 @@ def _get_visual_index_config() -> dict:
 
 
 # Static index configs for non-visual modalities
+# Note: For collections with multiple indexes (like ocr_embeddings), this only represents
+# the primary dense vector index. The actual index creation uses _COLLECTION_CONFIGS["indexes"].
 _STATIC_INDEX_CONFIGS: dict[str, dict] = {
     "asr_embeddings": {
         "index_type": "HNSW",
@@ -59,9 +61,14 @@ _STATIC_INDEX_CONFIGS: dict[str, dict] = {
         "params": {"M": 16, "efConstruction": 200},
     },
     "ocr_embeddings": {
-        "index_type": "HNSW",
+        "index_type": "DISKANN",
         "metric_type": "IP",
-        "params": {"M": 16, "efConstruction": 200},
+        "params": {
+            "max_degree": 56,
+            "search_list_size": 128,
+            "pq_code_budget_gb": 0.125,
+            "build_dram_budget_gb": 32.0,
+        },
     },
     "face_embeddings": {
         "index_type": "IVF_FLAT",
@@ -106,7 +113,25 @@ _COLLECTION_CONFIGS: dict[str, dict] = {
     },
     "ocr_embeddings": {
         "schema": create_ocr_schema,
-        "index": _STATIC_INDEX_CONFIGS["ocr_embeddings"],
+        "indexes": {
+            # Dense index: DiskANN for semantic search
+            "embedding": {
+                "index_type": "DISKANN",
+                "metric_type": "IP",
+                "params": {
+                    "max_degree": 56,
+                    "search_list_size": 128,
+                    "pq_code_budget_gb": 0.125,
+                    "build_dram_budget_gb": 32.0,
+                },
+            },
+            # Sparse index: BM25 function output requires BM25 metric type
+            "sparse_embedding": {
+                "index_type": "SPARSE_INVERTED_INDEX",
+                "metric_type": "BM25",
+                "params": {"drop_ratio_build": 0.2},
+            },
+        },
     },
     "face_embeddings": {
         "schema": create_face_schema,
@@ -125,6 +150,54 @@ _COLLECTION_FOR_MODALITY: dict[str, str] = {
     "face":    "face_embeddings",
     "speaker": "speaker_embeddings",
 }
+
+_OCR_V2_REQUIRED_FIELDS = frozenset({
+    "text",
+    "embedding",
+    "sparse_embedding",
+    "has_embedding",
+})
+_OCR_V2_REQUIRED_INDEX_FIELDS = frozenset({"embedding", "sparse_embedding"})
+
+
+def _validate_existing_ocr_collection(col: Collection) -> None:
+    """Fail fast when an existing OCR collection predates hybrid search.
+
+    Adding a BM25 function or sparse-vector field is not an in-place Milvus
+    schema migration.  Starting successfully against the legacy collection
+    would defer the failure to a user's first OCR query, so require operators
+    to rebuild it before this release serves traffic.
+    """
+    schema = col.schema
+    fields = {field.name for field in schema.fields}
+    function_names = {
+        function.name
+        for function in (getattr(schema, "functions", None) or [])
+    }
+    index_fields = {
+        index.field_name
+        for index in col.indexes
+        if getattr(index, "field_name", None)
+    }
+
+    missing_fields = sorted(_OCR_V2_REQUIRED_FIELDS - fields)
+    missing_functions = sorted({"bm25_ocr"} - function_names)
+    missing_indexes = sorted(_OCR_V2_REQUIRED_INDEX_FIELDS - index_fields)
+    if not (missing_fields or missing_functions or missing_indexes):
+        return
+
+    details: list[str] = []
+    if missing_fields:
+        details.append(f"fields={missing_fields}")
+    if missing_functions:
+        details.append(f"functions={missing_functions}")
+    if missing_indexes:
+        details.append(f"indexes={missing_indexes}")
+    raise RuntimeError(
+        "Milvus collection 'ocr_embeddings' uses the legacy OCR schema "
+        f"({', '.join(details)}). Drop and rebuild the OCR Milvus index "
+        "before deploying hybrid OCR search."
+    )
 
 
 def ensure_milvus_reachable() -> None:
@@ -189,13 +262,24 @@ class MilvusClient:
                 logger.info("Creating collection: %s", name)
                 schema: CollectionSchema = config["schema"]()
                 col = Collection(name=name, schema=schema, consistency_level="Strong")
-                # Get index config dynamically for runtime support
-                index_config = get_collection_index_config(name) if name == "visual_embeddings" else config["index"]
-                col.create_index(field_name="embedding", index_params=index_config)
+
+                # Handle different index configuration formats
+                if "indexes" in config:
+                    # Multiple indexes (OCR uses dense + sparse retrieval).
+                    for field_name, index_params in config["indexes"].items():
+                        col.create_index(field_name=field_name, index_params=index_params)
+                        logger.info("Created index on %s.%s: %s", name, field_name, index_params["index_type"])
+                else:
+                    # Single index (legacy format)
+                    index_config = get_collection_index_config(name) if name == "visual_embeddings" else config["index"]
+                    col.create_index(field_name="embedding", index_params=index_config)
+
                 col.load()
                 logger.info("Collection %s created and loaded", name)
             else:
                 col = Collection(name)
+                if name == "ocr_embeddings":
+                    _validate_existing_ocr_collection(col)
                 load_state = utility.load_state(name)
                 if load_state.name != "Loaded":
                     logger.info("Loading existing collection: %s", name)
@@ -289,9 +373,17 @@ class MilvusClient:
             Number of records deleted, or -1 on failure.
         """
         name = _COLLECTION_FOR_MODALITY[modality]
-        col = Collection(name)
-        expr = f'video_id == "{video_id}"'
         try:
+            # Check if collection exists first
+            if not utility.has_collection(name):
+                logger.info(
+                    "delete_video_modality video=%s modality=%s: collection %s does not exist, skipping",
+                    video_id, modality, name
+                )
+                return 0  # No records to delete
+
+            col = Collection(name)
+            expr = f'video_id == "{video_id}"'
             result = col.delete(expr)
             col.flush()
             count = getattr(result, "delete_count", 0)
@@ -305,6 +397,40 @@ class MilvusClient:
                 "delete_video_modality %s/%s failed: %s", video_id, modality, exc
             )
             return -1
+
+    def delete_video_modality_except_version(
+        self, video_id: str, modality: str, keep_asset_version: str
+    ) -> int:
+        """Remove superseded rows only after *keep_asset_version* is published."""
+        name = _COLLECTION_FOR_MODALITY[modality]
+        try:
+            if not utility.has_collection(name):
+                return 0
+            col = Collection(name)
+            expr = (
+                f'video_id == "{video_id}" and '
+                f'asset_version != "{keep_asset_version}"'
+            )
+            result = col.delete(expr)
+            col.flush()
+            return int(getattr(result, "delete_count", 0))
+        except Exception as exc:
+            logger.warning(
+                "superseded-version cleanup failed video=%s modality=%s keep=%s: %s",
+                video_id, modality, keep_asset_version, exc,
+            )
+            return -1
+
+    def count_video_modality_version(
+        self, video_id: str, modality: str, asset_version: str
+    ) -> int:
+        """Return the persisted rows for one published modality version."""
+        name = _COLLECTION_FOR_MODALITY[modality]
+        rows = Collection(name).query(
+            expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}"'),
+            output_fields=["count(*)"],
+        )
+        return int(rows[0].get("count(*)", 0)) if rows else 0
 
     def count_video_modality(self, video_id: str, modality: str) -> int:
         """Return the persisted row count for one video and modality."""

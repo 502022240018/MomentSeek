@@ -146,285 +146,6 @@ def _seconds(ms: int | float) -> float:
     return float(ms) / 1000.0
 
 
-def _decode_text_array(values: np.ndarray) -> list[str]:
-    return [str(item) for item in values.tolist()]
-
-
-def _semantic_arrays(data) -> tuple[np.ndarray | None, np.ndarray | None]:
-    if "embeddings" not in data.files or "embedding_chunk_indices" not in data.files:
-        return None, None
-    embeddings = data["embeddings"]
-    indices = data["embedding_chunk_indices"].astype(np.int32)
-    if embeddings.ndim != 2 or not len(embeddings) or not len(indices):
-        return None, None
-    return np.asarray(embeddings, dtype=np.float32), indices
-
-
-def _visual_index_arrays(data) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
-    required = {"frame_embeddings", "frame_times_ms", "segment_frame_offsets"}
-    if not required.issubset(set(data.files)):
-        raise ValueError("visual v3 索引缺少必要数组，请重跑 visual 索引")
-    embeddings = np.asarray(data["frame_embeddings"], dtype=np.float32)
-    frame_times_ms = data["frame_times_ms"].astype(np.int32)
-    offsets = data["segment_frame_offsets"].astype(np.int32)
-    if embeddings.ndim != 2 or len(embeddings) != len(frame_times_ms):
-        raise ValueError("visual v3 索引数组长度不一致，请重跑 visual 索引")
-    if len(offsets) < 2 or offsets[0] != 0 or offsets[-1] != len(frame_times_ms) or np.any(np.diff(offsets) < 0):
-        raise ValueError("visual v3 segment_frame_offsets 无效，请重跑 visual 索引")
-    segment_times_ms = None
-    if "segment_times_ms" in data.files:
-        segment_times_ms = data["segment_times_ms"].astype(np.int32)
-        if segment_times_ms.shape != (len(offsets) - 1, 2):
-            raise ValueError("visual v3 segment_times_ms 无效，请重跑 visual 索引")
-        if np.any(segment_times_ms[:, 1] < segment_times_ms[:, 0]):
-            raise ValueError("visual v3 segment_times_ms 时间范围无效，请重跑 visual 索引")
-    return embeddings, frame_times_ms, offsets, segment_times_ms
-
-
-def _visual_segment_scores(
-    frame_scores: np.ndarray,
-    frame_times_ms: np.ndarray,
-    offsets: np.ndarray,
-) -> tuple[list[int], np.ndarray, list[float], list[float], list[list[float]], list[int]]:
-    score_values = np.asarray(frame_scores, dtype=np.float32)
-    if score_values.ndim == 1:
-        score_values = score_values.reshape(-1, 1)
-    if score_values.ndim != 2 or score_values.shape[0] != len(frame_times_ms):
-        raise ValueError("visual frame score shape does not match the index")
-    segment_ids: list[int] = []
-    raw_scores: list[float] = []
-    top3_scores: list[float] = []
-    mean_scores: list[float] = []
-    subquery_scores: list[list[float]] = []
-    best_times_ms: list[int] = []
-    for segment_id in range(len(offsets) - 1):
-        start, end = int(offsets[segment_id]), int(offsets[segment_id + 1])
-        if start == end:
-            continue
-        bucket_scores = score_values[start:end]
-        per_query_top = np.max(bucket_scores, axis=0)
-        if score_values.shape[1] == 1:
-            aggregate_score = float(per_query_top[0])
-            frame_aggregate = bucket_scores[:, 0]
-        else:
-            aggregate_score = float(0.65 * np.mean(per_query_top) + 0.35 * np.min(per_query_top))
-            frame_aggregate = 0.65 * np.mean(bucket_scores, axis=1) + 0.35 * np.min(
-                bucket_scores, axis=1
-            )
-        order = np.argsort(frame_aggregate)[::-1]
-        top_values = frame_aggregate[order]
-        segment_ids.append(segment_id)
-        raw_scores.append(aggregate_score)
-        top3_scores.append(float(np.mean(top_values[:min(3, len(top_values))])))
-        mean_scores.append(float(np.mean(frame_aggregate)))
-        subquery_scores.append([float(value) for value in per_query_top])
-        best_times_ms.append(int(frame_times_ms[start + int(order[0])]))
-    return (
-        segment_ids,
-        np.asarray(raw_scores, dtype=np.float32),
-        top3_scores,
-        mean_scores,
-        subquery_scores,
-        best_times_ms,
-    )
-
-
-def _visual_decision(
-    profile: str,
-    reliable: bool,
-    local_index: int,
-    fallback_indices: set[int],
-    raw_score: float,
-    ranking_score: float,
-    percentile: float,
-    z_score: float,
-    sample_count: int,
-) -> tuple[str, bool, str]:
-    if not reliable:
-        decision, above = ("fallback", True) if local_index in fallback_indices else ("weak", False)
-        detail = (
-            f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
-            f" · distribution fallback (n={sample_count})"
-        )
-        return decision, above, detail
-    if z_score >= 2.0 or percentile >= 0.975:
-        decision, above = "strong", True
-    elif percentile >= 0.80:
-        qualifies = not (
-            (profile == "balanced" and not (z_score >= 1.0 or percentile >= 0.90))
-            or profile == "precision"
-        )
-        decision, above = (("fuzzy", True) if qualifies else ("weak", False))
-    else:
-        decision, above = "weak", False
-    detail = (
-        f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
-        f" · percentile={percentile * 100:.1f}% · robust_z={z_score:.2f}"
-    )
-    return decision, above, detail
-
-
-def _visual_segment_bounds(
-    segment_id: int,
-    segment_times_ms: np.ndarray | None,
-    segment_ms: int,
-    duration_ms: int,
-) -> tuple[int, int, str]:
-    if segment_times_ms is not None:
-        start_ms, end_ms = [int(value) for value in segment_times_ms[segment_id]]
-        return start_ms, end_ms, "explicit"
-    start_ms = segment_id * segment_ms
-    end_ms = min((segment_id + 1) * segment_ms, duration_ms or (segment_id + 1) * segment_ms)
-    return start_ms, end_ms, "fixed"
-
-
-def _visual_candidates(
-    data,
-    query: np.ndarray,
-    video_id: str,
-    duration_ms: int,
-    segment_ms: int,
-    profile: str = "balanced",
-    limit: int = 72,
-    segment_strategy: str = "fixed",
-) -> list[Candidate]:
-    frame_embeddings, frame_times_ms, offsets, segment_times_ms = _visual_index_arrays(data)
-    if not len(frame_embeddings):
-        return []
-    query_values = np.asarray(query, dtype=np.float32)
-    if query_values.ndim == 1:
-        query_values = query_values.reshape(1, -1)
-    if query_values.ndim != 2 or query_values.shape[1] != frame_embeddings.shape[1]:
-        raise ValueError("visual query embedding shape does not match the index")
-    query_values = np.stack([normalize(value) for value in query_values])
-    (
-        segment_ids,
-        raw_values,
-        top3_scores,
-        mean_scores,
-        subquery_scores,
-        best_times_ms,
-    ) = _visual_segment_scores(
-        frame_embeddings @ query_values.T, frame_times_ms, offsets
-    )
-    if not len(raw_values):
-        return []
-    distribution = robust_distribution(raw_values)
-    z_scores = distribution["z_scores"]
-    percentiles = distribution["percentiles"]
-    reliable = distribution["reliable"]
-    raw_order = np.argsort(raw_values)[::-1]
-    fallback_counts = {"recall": 3, "balanced": 2, "precision": 1}
-    fallback_indices = set(int(index) for index in raw_order[:min(len(raw_order), fallback_counts[profile])])
-    candidates = []
-    cap = 500 if profile == "recall" else limit
-    for local_index in raw_order[:cap]:
-        local_index = int(local_index)
-        segment_id = int(segment_ids[local_index])
-        raw_score = float(raw_values[local_index])
-        z_score = float(z_scores[local_index])
-        percentile = float(percentiles[local_index])
-        ranking_score = visual_confidence(raw_score)
-        decision, above, detail = _visual_decision(
-            profile,
-            reliable,
-            local_index,
-            fallback_indices,
-            raw_score,
-            ranking_score,
-            percentile,
-            z_score,
-            len(raw_values),
-        )
-
-        top3 = float(top3_scores[local_index])
-        mean = float(mean_scores[local_index])
-        best_ms = int(best_times_ms[local_index])
-        detail += f" · best_frame={best_ms / 1000:.2f}s · top1={raw_score:.3f} · top3={top3:.3f} · mean={mean:.3f}"
-        if query_values.shape[0] > 1:
-            detail += " · subqueries=" + ",".join(
-                f"{value:.3f}" for value in subquery_scores[local_index]
-            )
-        start_ms, end_ms, time_source = _visual_segment_bounds(
-            segment_id, segment_times_ms, segment_ms, duration_ms
-        )
-        candidates.append(Candidate(
-            video_id=video_id,
-            start_time=_seconds(start_ms),
-            end_time=_seconds(end_ms),
-            score=ranking_score,
-            modality="visual",
-            evidence=detail if above else detail + " · 低于阈值",
-            raw_score=raw_score,
-            robust_z=z_score,
-            percentile=percentile,
-            decision=decision,
-            above_threshold=above,
-            distribution_reliable=reliable,
-            distribution_median=distribution["median"],
-            distribution_mad=distribution["mad"],
-            best_time=_seconds(best_ms),
-            visual_top1=raw_score,
-            visual_top3=top3,
-            visual_mean=mean,
-            unit_type="segment",
-            unit_id=segment_id,
-            best_ms=best_ms,
-            features={
-                "visual_top1": raw_score,
-                "visual_top3": top3,
-                "visual_mean": mean,
-                "visual_rank_score": ranking_score,
-                "visual_subquery_scores": subquery_scores[local_index],
-                "visual_subquery_count": int(query_values.shape[0]),
-                "percentile": percentile,
-                "robust_z": z_score,
-                "segment_time_source": time_source,
-                "segment_strategy": segment_strategy,
-            },
-        ))
-    return candidates
-
-
-def _face_candidates(data, query: np.ndarray, video_id: str, limit: int, threshold: float = 0.35) -> list[Candidate]:
-    if "embeddings" not in data.files or "track_times_ms" not in data.files:
-        raise ValueError("face v3 索引缺少必要数组，请重跑 face 索引")
-    embeddings = np.asarray(data["embeddings"], dtype=np.float32)
-    times = data["track_times_ms"].astype(np.int32)
-    if embeddings.ndim != 2 or times.shape != (len(embeddings), 3):
-        raise ValueError("face v3 索引数组长度不一致，请重跑 face 索引")
-    if not len(embeddings):
-        return []
-    scores = embeddings @ normalize(query)
-    candidates: list[Candidate] = []
-    for index in np.argsort(scores)[::-1]:
-        if len(candidates) >= limit:
-            break
-        index = int(index)
-        cosine = float(scores[index])
-        above = cosine >= threshold
-        confidence = face_confidence(cosine)
-        start_ms, end_ms, best_ms = [int(value) for value in times[index]]
-        detail = f"face cosine={cosine:.3f} · confidence={confidence * 100:.1f}%"
-        candidates.append(Candidate(
-            video_id=video_id,
-            start_time=_seconds(start_ms),
-            end_time=_seconds(end_ms),
-            score=confidence,
-            modality="face",
-            evidence=detail if above else detail + " · 低于阈值",
-            raw_score=cosine,
-            decision="absolute_hit" if above else "weak",
-            above_threshold=above,
-            best_time=_seconds(best_ms),
-            unit_type="track",
-            unit_id=index,
-            best_ms=best_ms,
-            features={"face_cosine": cosine},
-        ))
-    return candidates
-
-
 def _semantic_chunk_scores(
     chunk_count: int,
     semantic_embeddings: np.ndarray | None,
@@ -553,24 +274,6 @@ def _asr_candidates(
     return candidates
 
 
-def _asr_chunks_from_npz(data) -> list[dict]:
-    if "chunk_times_ms" not in data.files or "texts" not in data.files:
-        raise ValueError("asr v3 索引缺少必要数组，请重跑 ASR 索引")
-    times = data["chunk_times_ms"].astype(np.int32)
-    texts = _decode_text_array(data["texts"])
-    if times.shape != (len(texts), 2):
-        raise ValueError("asr v3 chunk_times_ms/texts 长度不一致，请重跑 ASR 索引")
-    return [
-        {
-            "chunk_id": index,
-            "start_ms": int(row[0]),
-            "end_ms": int(row[1]),
-            "text": texts[index],
-        }
-        for index, row in enumerate(times)
-    ]
-
-
 def _limit_text(value: str, max_chars: int) -> str:
     text = str(value or "").strip()
     if len(text) <= max_chars:
@@ -670,76 +373,25 @@ def _ocr_display_text(
 
 
 
-def _ocr_chunks_from_npz(data) -> list[dict]:
-    """Load the frame-native OCR v3 layout."""
-    required = {"frame_times_ms", "frame_windows_ms", "box_frame_indices", "box_texts", "box_scores", "boxes"}
-    if not required.issubset(set(data.files)):
-        raise ValueError("ocr v3 索引缺少帧级数组，请重跑 OCR 索引")
-    frame_times = data["frame_times_ms"].astype(np.int32)
-    frame_windows = data["frame_windows_ms"].astype(np.int32)
-    box_frame_indices = data["box_frame_indices"].astype(np.int32)
-    box_texts = _decode_text_array(data["box_texts"])
-    box_scores = np.asarray(data["box_scores"], dtype=np.float32)
-    boxes = np.asarray(data["boxes"], dtype=np.float32)
-    if frame_times.ndim != 1:
-        raise ValueError("ocr v3 frame_times_ms 必须是一维数组，请重跑 OCR 索引")
-    if frame_windows.ndim != 2 or frame_windows.shape != (len(frame_times), 2):
-        raise ValueError("ocr v3 frame_windows_ms 必须是 [num_frames, 2]，请重跑 OCR 索引")
-    if not (len(box_frame_indices) == len(box_texts) == len(box_scores) == len(boxes)):
-        raise ValueError("ocr v3 box 数组长度不一致，请重跑 OCR 索引")
-    if len(box_frame_indices) and np.any((box_frame_indices < 0) | (box_frame_indices >= len(frame_times))):
-        raise ValueError("ocr v3 box_frame_indices 越界，请重跑 OCR 索引")
-    chunks: list[dict] = []
-    for frame_index, frame_ms in enumerate(frame_times):
-        indices = np.flatnonzero(box_frame_indices == frame_index)
-        box_text_values = [box_texts[int(index)].strip() for index in indices if box_texts[int(index)].strip()]
-        box_score_values = [float(box_scores[int(index)]) for index in indices if box_texts[int(index)].strip()]
-        chunks.append({
-            "chunk_id": frame_index,
-            "start_ms": int(frame_windows[frame_index, 0]),
-            "end_ms": int(frame_windows[frame_index, 1]),
-            "frame_ms": int(frame_ms),
-            "text": " ".join(box_text_values),
-            "ocr_box_texts": box_text_values,
-            "ocr_box_scores": box_score_values,
-            "score": max(box_score_values) if box_score_values else 0.0,
-        })
-    return chunks
-
-
-def _remap_embedding_frame_times_to_chunk_indices(
-    chunks: list[dict],
-    embedding_frame_times_ms: np.ndarray | None,
-) -> np.ndarray | None:
-    """
-    OCR 新 schema 的 embedding_chunk_indices 保存的是 frame_ms。
-    但 _asr_candidates 内部需要 embedding_id -> chunk_id。
-    所以这里把 frame_ms 映射成当前重建 chunks 的 chunk_id。
-    """
-    if embedding_frame_times_ms is None:
-        return None
-
-    frame_to_chunk_id = {
-        int(chunk["frame_ms"]): int(chunk["chunk_id"])
-        for chunk in chunks
-        if "frame_ms" in chunk and "chunk_id" in chunk
-    }
-
-    values = np.asarray(embedding_frame_times_ms, dtype=np.int32).reshape((-1,))
-    return np.asarray(
-        [frame_to_chunk_id.get(int(frame_ms), -1) for frame_ms in values],
-        dtype=np.int32,
-    )
 
 
 def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict, Path]:
     manifest, channel_manifest = require_channel_manifest(index_dir, str(video.get("name") or video["id"]), channel)
-    default_files = {"visual": "visual.npz", "face": "face.npz", "asr": "asr.npz", "ocr": "ocr.npz"}
-    file_name = str(channel_manifest.get("file") or default_files[channel])
+    file_name = str(channel_manifest.get("file") or "")
     index_file = index_dir / file_name
-    if not index_file.exists():
-        raise ValueError(f"视频 {video.get('name') or video['id']} 缺少 {channel} v3 索引文件，请重跑该通道")
+    # The manifest selects model/version metadata.  Its NPZ file is an offline
+    # recovery artifact and must never gate the online Milvus read path.
     return manifest, channel_manifest, index_file
+
+
+def _published_asset_version(channel_manifest: dict, video_name: str, channel: str) -> str:
+    """Return the only Milvus version that online retrieval may read."""
+    value = channel_manifest.get("milvus_asset_version")
+    if value is None or not str(value).strip():
+        raise ValueError(
+            f"视频 {video_name} 的 {channel} 索引尚未发布到 Milvus，请重跑该通道"
+        )
+    return str(value)
 
 
 def _round_optional(value: float | None, digits: int) -> float | None:
@@ -785,25 +437,27 @@ def _serialize_evidence(item: Candidate) -> dict:
     }
 
 _OCR_ONLY_MERGE_GAP_SECONDS = 0.35
-_OCR_MERGE_MIN_SCORE_RATIO = 0.70
-_OCR_MERGE_MAX_SCORE_DROP = 0.25
+_OCR_MERGE_MIN_SCORE_RATIO = 0.90  # 收紧至80%，让高低分更明确分开
+_OCR_MERGE_MAX_SCORE_DROP = 0.10   # 减小至0.10，避免低分拖长高分片段
 
 def _ocr_scores_compatible(group: list[Candidate], candidate: Candidate) -> bool:
     """
     OCR-only 合并时，避免高分命中被明显低分命中拖长。
 
     规则：
-    - candidate 必须是 above_threshold；
-    - group 里必须已有 above_threshold 的 OCR 命中；
+    - candidate 必须是 OCR 模态；
+    - group 里必须已有 OCR 命中；
     - candidate 分数不能比 group 里最佳 OCR 命中低太多。
+
+    注意：不再检查 above_threshold，聚合只基于分数差异。
     """
-    if candidate.modality != "ocr" or not candidate.above_threshold:
+    if candidate.modality != "ocr":
         return False
 
     group_scores = [
         float(item.score)
         for item in group
-        if item.modality == "ocr" and item.above_threshold
+        if item.modality == "ocr"
     ]
     if not group_scores:
         return False
@@ -829,9 +483,11 @@ def _should_merge_ocr_only(
 
     只允许：
     - OCR 与 OCR 合并；
-    - 都是 above-threshold；
     - 时间窗口重叠或几乎相邻；
     - 分数不能差太多。
+
+    注意：不再检查 above_threshold，聚合只基于分数和时间。
+    above_threshold 只影响最终展示，不影响聚合逻辑。
 
     不设置最大合并时长：
     如果同一段 OCR 文本持续稳定出现很久，它应该保留为一个连续命中片段。
@@ -839,11 +495,6 @@ def _should_merge_ocr_only(
     if candidate.modality != "ocr":
         return False
     if any(item.modality != "ocr" for item in group):
-        return False
-
-    if not candidate.above_threshold:
-        return False
-    if not any(item.above_threshold for item in group):
         return False
 
     group_end = max(item.end_time for item in group)
@@ -894,13 +545,128 @@ def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_
     return near
 
 
+def _groups_ocr_score_first(candidates: list[Candidate]) -> list[list[Candidate]]:
+    """
+    OCR 专用聚合：从高分帧开始向两边扩展。
+
+    算法：
+    1. 按分数降序选种子（未聚合的最高分）
+    2. 从种子向时间两边扩展，基于种子分数判断是否合并
+    3. 标记已聚合的帧，避免重复处理
+    4. 重复直到所有帧都处理完
+    """
+    if not candidates:
+        return []
+
+    # 按 video_id 分组处理
+    by_video: dict[str, list[Candidate]] = {}
+    for candidate in candidates:
+        by_video.setdefault(candidate.video_id, []).append(candidate)
+
+    all_groups: list[list[Candidate]] = []
+
+    for video_id, video_candidates in by_video.items():
+        # 按时间排序（用于向两边扩展）
+        time_sorted = sorted(video_candidates, key=lambda c: (c.start_time, c.end_time))
+        # 按分数降序（用于选种子）
+        score_sorted = sorted(video_candidates, key=lambda c: -float(c.score))
+
+        used_ids = set()  # 记录已聚合的候选
+
+        for seed in score_sorted:
+            seed_id = id(seed)
+            if seed_id in used_ids:
+                continue  # 已被其他组聚合，跳过
+
+            # 以 seed 为核心建新组
+            group = [seed]
+            used_ids.add(seed_id)
+
+            # 计算分数阈值（基于种子分数，不会滑坡）
+            seed_score = float(seed.score)
+            score_threshold = max(
+                seed_score * _OCR_MERGE_MIN_SCORE_RATIO,
+                seed_score - _OCR_MERGE_MAX_SCORE_DROP,
+            )
+
+            seed_idx = time_sorted.index(seed)
+
+            # === 向左扩展（时间更早的帧）===
+            for i in range(seed_idx - 1, -1, -1):
+                candidate = time_sorted[i]
+                cand_id = id(candidate)
+
+                if cand_id in used_ids:
+                    continue  # 已被聚合，跳过但继续尝试更早的帧
+
+                # 检查分数兼容性
+                if float(candidate.score) < score_threshold:
+                    break  # 分数不够，停止向左扩展
+
+                # 检查时间 gap（candidate 在左边，检查它的 end_time 和 group 最早的 start_time）
+                group_start = min(c.start_time for c in group)
+                gap_to_group = group_start - candidate.end_time
+
+                if gap_to_group > _OCR_ONLY_MERGE_GAP_SECONDS:
+                    break  # 时间太远，停止向左扩展
+
+                # 满足条件，加入组
+                group.append(candidate)
+                used_ids.add(cand_id)
+
+            # === 向右扩展（时间更晚的帧）===
+            for i in range(seed_idx + 1, len(time_sorted)):
+                candidate = time_sorted[i]
+                cand_id = id(candidate)
+
+                if cand_id in used_ids:
+                    continue  # 已被聚合，跳过但继续尝试更晚的帧
+
+                # 检查分数兼容性
+                if float(candidate.score) < score_threshold:
+                    break  # 分数不够，停止向右扩展
+
+                # 检查时间 gap（candidate 在右边，检查 group 最晚的 end_time 和它的 start_time）
+                group_end = max(c.end_time for c in group)
+                gap_to_group = candidate.start_time - group_end
+
+                if gap_to_group > _OCR_ONLY_MERGE_GAP_SECONDS:
+                    break  # 时间太远，停止向右扩展
+
+                # 满足条件，加入组
+                group.append(candidate)
+                used_ids.add(cand_id)
+
+            all_groups.append(group)
+
+    return all_groups
+
+
 def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -> list[list[Candidate]]:
+    # OCR-only 候选使用新的分数优先算法
+    ocr_candidates = [c for c in candidates if c.modality == "ocr"]
+    non_ocr_candidates = [c for c in candidates if c.modality != "ocr"]
+
     groups: list[list[Candidate]] = []
-    for candidate in sorted(candidates, key=lambda item: (item.video_id, item.start_time, item.end_time)):
+
+    # OCR 使用分数优先聚合
+    if ocr_candidates:
+        # 检查是否是纯 OCR 场景
+        if not non_ocr_candidates:
+            # 纯 OCR，直接使用新算法
+            return _groups_ocr_score_first(ocr_candidates)
+        else:
+            # 混合模态，OCR 先聚合，再和其他模态合并
+            ocr_groups = _groups_ocr_score_first(ocr_candidates)
+            groups.extend(ocr_groups)
+
+    # 非 OCR 候选使用原有的时间优先算法
+    for candidate in sorted(non_ocr_candidates, key=lambda item: (item.video_id, item.start_time, item.end_time)):
         if groups and _should_merge(groups[-1], candidate, gap, max_duration):
             groups[-1].append(candidate)
             continue
         groups.append([candidate])
+
     return groups
 
 
@@ -980,20 +746,6 @@ def _reserve_asr_lexical_results(results: list[SearchResult], limit: int) -> lis
     return reranked + remaining_above + below
 
 
-def _ocr_semantic_arrays(data) -> tuple[np.ndarray | None, np.ndarray | None]:
-    embeddings = data["embeddings"].astype(np.float32) if "embeddings" in data.files else None
-    if embeddings is not None and (embeddings.ndim != 2 or not embeddings.shape[0] or not embeddings.shape[1]):
-        embeddings = None
-    indices = (
-        data["embedding_frame_indices"].astype(np.int32)
-        if "embedding_frame_indices" in data.files
-        else None
-    )
-    if embeddings is not None and indices is None:
-        raise ValueError("ocr v3 索引缺少 embedding_frame_indices，请重跑 OCR 索引")
-    if embeddings is not None and len(indices) != embeddings.shape[0]:
-        raise ValueError("ocr v3 semantic 数组长度不一致，请重跑 OCR 索引")
-    return embeddings, indices
 
 
 def _fuse_candidate_groups(
@@ -1001,10 +753,18 @@ def _fuse_candidate_groups(
     videos: list[dict],
     merge_gap: float,
     max_result_seconds: float,
+    primary_modality: str | None = None,
 ) -> list[SearchResult]:
+    """Fuse overlapping candidates and optionally prefer one requested modality.
+
+    Threshold status remains the primary ordering boundary. Within one tier,
+    results containing ``primary_modality`` are ordered before auxiliary-only
+    candidates; the modality's own score resolves ties among those results.
+    """
     names = {video["id"]: video["name"] for video in videos}
     weights = {"face": 0.55, "visual": 0.30, "ocr": 0.20, "asr": 0.15}
-    results = []
+    results: list[SearchResult] = []
+    primary_scores: dict[int, float] = {}
     for group in _groups(candidates, merge_gap, max_result_seconds):
         best_by_modality = {}
         for item in group:
@@ -1031,7 +791,7 @@ def _fuse_candidate_groups(
         )
         start_time = min(item.start_time for item in group)
         end_time = max(item.end_time for item in group)
-        results.append(SearchResult(
+        result = SearchResult(
             video_id=video_id,
             video_name=names.get(video_id, video_id),
             start_time=start_time,
@@ -1044,8 +804,23 @@ def _fuse_candidate_groups(
             decision=decision,
             above_threshold=any(item.above_threshold for item in group),
             evidence=[_serialize_evidence(item) for item in group],
-        ))
-    results.sort(key=lambda item: (item.above_threshold, item.score), reverse=True)
+        )
+        results.append(result)
+        if primary_modality in best_by_modality:
+            primary_scores[id(result)] = best_by_modality[primary_modality]
+
+    if primary_modality is None:
+        results.sort(key=lambda item: (item.above_threshold, item.score), reverse=True)
+    else:
+        results.sort(
+            key=lambda item: (
+                item.above_threshold,
+                primary_modality in item.modalities,
+                primary_scores.get(id(item), item.score),
+                item.score,
+            ),
+            reverse=True,
+        )
     return results
 
 
@@ -1290,6 +1065,7 @@ class SearchEngine:
         client,
         modality: str,
         video_ids: list[str],
+        asset_versions: dict[str, str],
         output_fields: list[str],
         profiler: RetrievalProfiler | None,
     ) -> dict[str, list[dict]]:
@@ -1300,6 +1076,7 @@ class SearchEngine:
             client,
             modality,
             video_ids,
+            asset_versions,
             output_fields,
             profiler,
         )
@@ -1312,7 +1089,9 @@ class SearchEngine:
 
     def _selected_videos(self, video_ids: list[str] | None) -> list[dict]:
         videos = self.catalog.list_videos()
-        if not video_ids:
+        # An empty folder resolves to ``[]`` and must not silently expand to all
+        # assets. ``None`` alone means the established all-video scope.
+        if video_ids is None:
             return videos
         allowed = set(video_ids)
         return [video for video in videos if video["id"] in allowed]
@@ -1326,38 +1105,6 @@ class SearchEngine:
         if entity and entity.get("embedding_path") and Path(entity["embedding_path"]).exists():
             return np.load(entity["embedding_path"])["embedding"]
         return None
-
-    def _visual_for_video(
-        self,
-        video: dict,
-        profile: str,
-        limit: int,
-        visual_queries: dict[str, np.ndarray],
-    ) -> list[Candidate]:
-        index_dir = self.settings.index_dir / video["id"]
-        manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "visual")
-        with np.load(index_file, allow_pickle=False) as data:
-            visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
-            if visual_model not in visual_queries:
-                raise RuntimeError(
-                    f"visual query vector was not prepared for model={visual_model}"
-                )
-            return _visual_candidates(
-                data,
-                visual_queries[visual_model],
-                video["id"],
-                int(manifest.get("duration_ms") or round(float(video.get("duration") or 0) * 1000)),
-                int(manifest.get("segment_ms") or round(float(self.settings.visual_segment_seconds) * 1000)),
-                profile,
-                limit,
-                str(channel_manifest.get("segment_strategy") or "fixed"),
-            )
-
-    def _face_for_video(self, video: dict, face_query: np.ndarray, limit: int) -> list[Candidate]:
-        index_dir = self.settings.index_dir / video["id"]
-        _manifest, _channel_manifest, index_file = _channel_manifest_for(video, index_dir, "face")
-        with np.load(index_file, allow_pickle=False) as data:
-            return _face_candidates(data, face_query, video["id"], limit, 0.35)
 
     def _semantic_query(
         self,
@@ -1398,103 +1145,6 @@ class SearchEngine:
             or self.settings.asr_semantic_model
         )
 
-    def _asr_for_video(
-        self,
-        video: dict,
-        text: str,
-        limit: int,
-        semantic_queries: dict[str, np.ndarray | None],
-    ) -> list[Candidate]:
-        index_dir = self.settings.index_dir / video["id"]
-        _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "asr")
-        with np.load(index_file, allow_pickle=False) as data:
-            embeddings, indices = _semantic_arrays(data)
-            model_name = self._semantic_model_for_channel(channel_manifest)
-            return _asr_candidates(
-                _asr_chunks_from_npz(data),
-                text,
-                video["id"],
-                limit,
-                semantic_embeddings=embeddings,
-                embedding_chunk_indices=indices,
-                semantic_query=(
-                    semantic_queries.get(model_name)
-                    if model_name is not None
-                    else None
-                ),
-            )
-
-    def _ocr_for_video(
-        self,
-        video: dict,
-        text: str,
-        limit: int,
-        semantic_queries: dict[str, np.ndarray | None],
-    ) -> list[Candidate]:
-        index_dir = self.settings.index_dir / video["id"]
-        _manifest, channel_manifest, index_file = _channel_manifest_for(video, index_dir, "ocr")
-        if int(channel_manifest.get("schema_version") or 0) != 3:
-            raise ValueError(f"视频 {video.get('name') or video['id']} 的 OCR 索引不是重构后的 v3，请重跑 OCR 索引")
-        with np.load(index_file, allow_pickle=False) as data:
-            embeddings, indices = _ocr_semantic_arrays(data)
-            semantic_query = None
-            if embeddings is not None:
-                model_name = self._semantic_model_for_channel(
-                    channel_manifest
-                )
-                if model_name is not None:
-                    semantic_query = semantic_queries.get(model_name)
-            return _asr_candidates(
-                _ocr_chunks_from_npz(data),
-                text,
-                video["id"],
-                limit,
-                modality="ocr",
-                semantic_embeddings=embeddings,
-                embedding_chunk_indices=indices,
-                semantic_query=semantic_query,
-            )
-
-    def _candidates_for_video(
-        self,
-        video: dict,
-        *,
-        text: str | None,
-        modalities: list[str],
-        limit: int,
-        visual_profile: str,
-        visual_queries: dict[str, np.ndarray],
-        face_query: np.ndarray | None,
-        channel_limits: dict[str, int],
-        semantic_queries: dict[str, np.ndarray | None],
-    ) -> list[Candidate]:
-        candidates = []
-        indexed = set(video.get("indexed_modalities") or [])
-        if "visual" in modalities and "visual" in indexed:
-            candidates.extend(self._visual_for_video(
-                video,
-                visual_profile,
-                channel_limits["visual"],
-                visual_queries,
-            ))
-        if "face" in modalities and face_query is not None and "face" in indexed:
-            candidates.extend(self._face_for_video(video, face_query, channel_limits["face"]))
-        if "asr" in modalities and text and "asr" in indexed:
-            candidates.extend(self._asr_for_video(
-                video,
-                text,
-                channel_limits["asr"],
-                semantic_queries,
-            ))
-        if "ocr" in modalities and text and "ocr" in indexed:
-            candidates.extend(self._ocr_for_video(
-                video,
-                text,
-                channel_limits["ocr"],
-                semantic_queries,
-            ))
-        return candidates
-
     def _milvus_candidates_for_video(
         self,
         video: dict,
@@ -1513,7 +1163,7 @@ class SearchEngine:
         from app.vector_store.milvus.milvus_search import (
             milvus_asr_candidates,
             milvus_face_candidates,
-            milvus_ocr_candidates,
+            milvus_ocr_candidates_hybrid,
             milvus_visual_candidates,
         )
 
@@ -1528,6 +1178,9 @@ class SearchEngine:
             manifest, channel_manifest, _index_file = _channel_manifest_for(
                 video, index_dir, "visual"
             )
+            asset_version = _published_asset_version(
+                channel_manifest, str(video.get("name") or video_id), "visual"
+            )
             visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
             if visual_model not in visual_queries:
                 raise RuntimeError(
@@ -1537,15 +1190,22 @@ class SearchEngine:
                 client,
                 video_id,
                 visual_queries[visual_model],
+                asset_version,
                 profile=visual_profile,
                 limit=channel_limits["visual"],
                 profiler=profiler,
             ))
         if "face" in modalities and face_query is not None and "face" in indexed:
+            _manifest, channel_manifest, _index_file = _channel_manifest_for(
+                video, index_dir, "face"
+            )
             candidates.extend(milvus_face_candidates(
                 client,
                 video_id,
                 face_query,
+                _published_asset_version(
+                    channel_manifest, str(video.get("name") or video_id), "face"
+                ),
                 channel_limits["face"],
                 0.35,
                 profiler,
@@ -1563,6 +1223,9 @@ class SearchEngine:
             candidates.extend(milvus_asr_candidates(
                 client,
                 video_id,
+                _published_asset_version(
+                    channel_manifest, str(video.get("name") or video_id), "asr"
+                ),
                 text,
                 semantic_query,
                 channel_limits["asr"],
@@ -1579,9 +1242,12 @@ class SearchEngine:
                 if model_name is not None
                 else None
             )
-            candidates.extend(milvus_ocr_candidates(
+            candidates.extend(milvus_ocr_candidates_hybrid(
                 client,
                 video_id,
+                _published_asset_version(
+                    channel_manifest, str(video.get("name") or video_id), "ocr"
+                ),
                 text,
                 semantic_query,
                 channel_limits["ocr"],
@@ -1599,13 +1265,7 @@ class SearchEngine:
         modalities: list[str],
         face_query: np.ndarray | None,
     ) -> set[str]:
-        """Return channels that should have produced candidates for this query.
-
-        This mirrors the routing guards in both storage backends.  Keeping the
-        set explicit lets a partially populated Milvus deployment fall back one
-        channel at a time instead of discarding successful Milvus results from
-        the other channels.
-        """
+        """Return channels that should produce candidates from Milvus."""
         indexed = set(video.get("indexed_modalities") or [])
         requested: set[str] = set()
         if "visual" in modalities and bool(text or image_path) and "visual" in indexed:
@@ -1707,21 +1367,8 @@ class SearchEngine:
                 if "face" in modalities
                 else None
             )
-        from app.vector_store.milvus.milvus_flags import (
-            milvus_fallback_enabled,
-            milvus_shadow_compare_enabled,
-            should_use_milvus_for_video,
-        )
-        from app.vector_store.milvus.milvus_search import (
-            BULK_QUERY_FIELDS,
-            shadow_compare_log,
-        )
+        from app.vector_store.milvus.milvus_search import BULK_QUERY_FIELDS
 
-        shadow = milvus_shadow_compare_enabled()
-        use_milvus_by_video = {
-            video["id"]: should_use_milvus_for_video(video["id"])
-            for video in videos
-        }
         requested_by_video = {
             video["id"]: self._requested_indexed_modalities(
                 video,
@@ -1747,17 +1394,11 @@ class SearchEngine:
             video["id"]
             for video in videos
             if requested_by_video[video["id"]]
-            and (use_milvus_by_video[video["id"]] or shadow)
         ]
         milvus_video_id_set = set(milvus_video_ids)
-        milvus_errors: dict[str, Exception] = {}
         milvus_client = None
         if milvus_video_ids:
-            try:
-                milvus_client = self._get_milvus_client()
-            except Exception as exc:
-                for modality in set(modalities):
-                    milvus_errors[modality] = exc
+            milvus_client = self._get_milvus_client()
 
         batch_size = self.settings.milvus_search_video_batch_size
         for batch_offset in range(0, len(videos), batch_size):
@@ -1771,8 +1412,6 @@ class SearchEngine:
             modality_rows: dict[str, list[dict]] = {}
             if milvus_client is not None and batch_video_ids:
                 for modality, output_fields in BULK_QUERY_FIELDS.items():
-                    if modality in milvus_errors:
-                        continue
                     eligible_ids = [
                         video_id
                         for video_id in batch_video_ids
@@ -1780,166 +1419,79 @@ class SearchEngine:
                     ]
                     if not eligible_ids:
                         continue
-                    try:
-                        modality_rows = self._query_rows_for_videos(
-                            milvus_client,
-                            modality,
-                            eligible_ids,
-                            output_fields,
-                            profiler,
+                    asset_versions = {}
+                    for video in batch_videos:
+                        video_id = video["id"]
+                        if video_id not in eligible_ids:
+                            continue
+                        _manifest, channel_manifest, _index_file = _channel_manifest_for(
+                            video, self.settings.index_dir / video_id, modality
                         )
-                    except Exception as exc:
-                        milvus_errors[modality] = exc
-                        logger.warning(
-                            "Milvus batch search failed for modality=%s; "
-                            "using per-modality NPZ fallback: %s",
+                        asset_versions[video_id] = _published_asset_version(
+                            channel_manifest,
+                            str(video.get("name") or video_id),
                             modality,
-                            exc,
                         )
-                    else:
-                        for video_id in eligible_ids:
-                            prefetched_rows[(video_id, modality)] = modality_rows.get(
-                                video_id, []
-                            )
+                    modality_rows = self._query_rows_for_videos(
+                        milvus_client,
+                        modality,
+                        eligible_ids,
+                        asset_versions,
+                        output_fields,
+                        profiler,
+                    )
+                    for video_id in eligible_ids:
+                        prefetched_rows[(video_id, modality)] = modality_rows.get(
+                            video_id, []
+                        )
 
             for video in batch_videos:
                 video_id = video["id"]
-                use_milvus = use_milvus_by_video[video_id]
                 requested_modalities = requested_by_video[video_id]
-                milvus_candidates: list[Candidate] = []
-                npz_modalities = (
-                    set(requested_modalities)
-                    if (not use_milvus or shadow)
-                    else set()
-                )
-                recovery_modalities: set[str] = set()
-
-                if use_milvus or shadow:
-                    for modality in sorted(requested_modalities):
-                        if modality in milvus_errors:
-                            if use_milvus and not milvus_fallback_enabled():
-                                raise milvus_errors[modality]
-                            npz_modalities.add(modality)
-                            recovery_modalities.add(modality)
-                            continue
-                        try:
-                            scoring_span = (
-                                profiler.span(
-                                    "local_processing",
-                                    f"{modality}_scoring",
-                                )
-                                if profiler and modality != "face"
-                                else nullcontext()
-                            )
-                            with scoring_span:
-                                modality_candidates = (
-                                    self._milvus_candidates_for_video(
-                                        video,
-                                        text=text,
-                                        modalities=[modality],
-                                        visual_profile=visual_profile,
-                                        visual_queries=visual_queries,
-                                        face_query=face_query,
-                                        channel_limits=resolved_channel_limits,
-                                        semantic_queries=semantic_queries,
-                                        profiler=profiler,
-                                        client=milvus_client,
-                                        prefetched_rows={
-                                            modality: prefetched_rows.get(
-                                                (video_id, modality), []
-                                            )
-                                        }
-                                        if modality in BULK_QUERY_FIELDS
-                                        else None,
-                                    )
-                                )
-                        except Exception as exc:
-                            if use_milvus and not milvus_fallback_enabled():
-                                raise
-                            milvus_errors[modality] = exc
-                            npz_modalities.add(modality)
-                            recovery_modalities.add(modality)
-                            logger.warning(
-                                "Milvus search failed for video=%s modality=%s; "
-                                "using NPZ fallback: %s",
-                                video_id,
-                                modality,
-                                exc,
-                            )
-                        else:
-                            modality_candidates = [
-                                item
-                                for item in modality_candidates
-                                if item.modality == modality
-                            ]
-                            milvus_candidates.extend(modality_candidates)
-                            if (
-                                use_milvus
-                                and milvus_fallback_enabled()
-                                and not modality_candidates
-                            ):
-                                npz_modalities.add(modality)
-                                recovery_modalities.add(modality)
-
-                npz_candidates: list[Candidate] = []
-                if npz_modalities:
-                    fallback_span = (
-                        profiler.span("npz_fallback", "search")
-                        if profiler and use_milvus
+                for modality in sorted(requested_modalities):
+                    scoring_span = (
+                        profiler.span("local_processing", f"{modality}_scoring")
+                        if profiler and modality != "face"
                         else nullcontext()
                     )
-                    with fallback_span:
-                        npz_candidates = self._candidates_for_video(
+                    with scoring_span:
+                        modality_candidates = self._milvus_candidates_for_video(
                             video,
                             text=text,
-                            modalities=sorted(npz_modalities),
-                            limit=limit,
+                            modalities=[modality],
                             visual_profile=visual_profile,
                             visual_queries=visual_queries,
                             face_query=face_query,
                             channel_limits=resolved_channel_limits,
                             semantic_queries=semantic_queries,
+                            profiler=profiler,
+                            client=milvus_client,
+                            prefetched_rows={
+                                modality: prefetched_rows.get((video_id, modality), [])
+                            }
+                            if modality in BULK_QUERY_FIELDS
+                            else None,
                         )
-
-                if use_milvus and recovery_modalities:
-                    recovered = [
-                        item
-                        for item in npz_candidates
-                        if item.modality in recovery_modalities
-                    ]
-                    if recovered:
-                        logger.warning(
-                            "Milvus coverage/failure recovery video=%s "
-                            "modalities=%s; recovered %d NPZ candidates",
-                            video_id,
-                            sorted(recovery_modalities),
-                            len(recovered),
-                        )
-                        milvus_candidates.extend(recovered)
-
-                if shadow:
-                    for modality in requested_modalities:
-                        shadow_compare_log(
-                            video_id,
-                            modality,
-                            [
-                                item
-                                for item in npz_candidates
-                                if item.modality == modality
-                            ],
-                            [
-                                item
-                                for item in milvus_candidates
-                                if item.modality == modality
-                            ],
-                        )
-                candidates.extend(
-                    milvus_candidates if use_milvus else npz_candidates
-                )
+                    candidates.extend(
+                        item for item in modality_candidates if item.modality == modality
+                    )
             # Raw embeddings for this batch become unreachable before the next
             # Milvus query, bounding peak memory by video batch size.
             prefetched_rows.clear()
             modality_rows.clear()
+
+        # Apply global dynamic threshold to OCR candidates across all videos
+        ocr_candidates = [c for c in candidates if c.modality == "ocr"]
+        if ocr_candidates:
+            global_top_score = max(float(c.score) for c in ocr_candidates)
+            global_threshold = max(0.10, global_top_score * 0.3)  # At least 0.10, or 30% of global top score
+
+            for candidate in ocr_candidates:
+                candidate.above_threshold = float(candidate.score) >= global_threshold
+                # Update evidence text to include threshold marker if below threshold
+                if not candidate.above_threshold and " · 低于阈值" not in candidate.evidence:
+                    candidate.evidence += " · 低于阈值"
+
         fusion_span = (
             profiler.span("local_processing", "fusion")
             if profiler
@@ -1947,7 +1499,16 @@ class SearchEngine:
         )
         with fusion_span:
             results = _fuse_candidate_groups(
-                candidates, videos, merge_gap, max_result_seconds
+                candidates,
+                videos,
+                merge_gap,
+                max_result_seconds,
+                primary_modality=(
+                    "visual"
+                    if self.settings.search_visual_priority_enabled
+                    and "visual" in modalities
+                    else None
+                ),
             )
             if set(modalities) == {"asr"} and text:
                 results = _reserve_asr_lexical_results(results, limit)
