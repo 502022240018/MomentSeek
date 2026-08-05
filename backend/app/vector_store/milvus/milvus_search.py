@@ -404,6 +404,7 @@ def milvus_asr_candidates_hybrid(
                 limit=limit,
                 expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
                 output_fields=output_fields,
+                timeout=settings.milvus_query_timeout_seconds,
             )
     else:
         query_norm = normalize(np.asarray(query_embedding, dtype=np.float32))
@@ -429,6 +430,7 @@ def milvus_asr_candidates_hybrid(
                         f'and has_embedding == True'
                     ),
                     output_fields=output_fields,
+                    timeout=settings.milvus_query_timeout_seconds,
                 )
         else:
             # Hybrid search: Dense + Sparse.
@@ -461,6 +463,7 @@ def milvus_asr_candidates_hybrid(
                     rerank=WeightedRanker(semantic_weight, lexical_weight),
                     limit=limit,
                     output_fields=output_fields,
+                    timeout=settings.milvus_query_timeout_seconds,
                 )
 
     # Convert to Candidate objects (threshold applied globally later in search.py).
@@ -569,6 +572,7 @@ def milvus_ocr_candidates_hybrid(
                 expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
                 output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
                               "text", "avg_box_score", "has_embedding"],
+                timeout=settings.milvus_query_timeout_seconds,
             )
     else:
         # Normalize query embedding for semantic search
@@ -593,6 +597,7 @@ def milvus_ocr_candidates_hybrid(
                           "AND has_embedding == True"),
                     output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
                                   "text", "avg_box_score", "has_embedding"],
+                    timeout=settings.milvus_query_timeout_seconds,
                 )
         else:
             # Hybrid search: Dense + Sparse
@@ -623,6 +628,7 @@ def milvus_ocr_candidates_hybrid(
                     limit=limit,
                     output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
                                   "text", "avg_box_score", "has_embedding"],
+                    timeout=settings.milvus_query_timeout_seconds,
                 )
 
     # Convert to Candidate objects (threshold will be applied globally later)

@@ -9,7 +9,6 @@ from app.retrieval.search import (
     SearchEngine,
     _fuse_candidate_groups,
     _groups,
-    _visual_candidates,
 )
 from app.retrieval.retrieval_metrics import RetrievalProfiler
 from app.core.settings import Settings

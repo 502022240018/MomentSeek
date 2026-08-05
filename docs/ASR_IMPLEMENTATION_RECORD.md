@@ -25,7 +25,7 @@ Successfully implemented **ASR modality optimization** by migrating from full-sc
 
 ```python
 def create_asr_schema() -> CollectionSchema:
-    fields = _common_fields("asr") + [
+    fields = _common_fields() + [
         FieldSchema("segment_idx", DataType.INT64),
         FieldSchema("start_ms", DataType.INT64),
         FieldSchema("end_ms", DataType.INT64),
@@ -114,6 +114,7 @@ asr_diskann_search_list: int = 100      # DiskANN search_list parameter
 def milvus_asr_candidates_hybrid(
     client: MilvusClient,
     video_id: str,
+    asset_version: str,
     query_text: str,
     query_embedding: np.ndarray | None,
     limit: int,
@@ -122,6 +123,7 @@ def milvus_asr_candidates_hybrid(
 ```
 
 **Features**:
+- **`asset_version` isolation**: every query expression filters on both `video_id` and `asset_version`, so only the published online index is searched (see `_published_asset_version()` in `search.py`).
 - **Three-way fallback**:
   - `hybrid`: query_embedding present AND query_text non-empty
   - `dense-only`: query_embedding present, query_text empty
@@ -129,6 +131,7 @@ def milvus_asr_candidates_hybrid(
 - **WeightedRanker** fusion: `(semantic_weight=0.65, lexical_weight=0.35)`
 - **DiskANN parameters**: `search_list`, `metric_type=IP`
 - **BM25 search**: server-side via `anns_field="sparse_embedding"`
+- **Query timeout**: all three paths pass `timeout=settings.milvus_query_timeout_seconds` (default 3.0s) so a stalled Milvus fails fast instead of blocking retrieval indefinitely.
 - **Global threshold**: Applied in `search.py` after multi-video collection
 
 **Removed**:
@@ -150,11 +153,14 @@ from app.vector_store.milvus.milvus_search import (
 )
 ```
 
-**Call Updated** (line ~1197):
+**Call Updated** (line ~1181):
 ```python
 candidates.extend(milvus_asr_candidates_hybrid(
     client,
     video_id,
+    _published_asset_version(
+        channel_manifest, str(video.get("name") or video_id), "asr"
+    ),
     text,
     semantic_query,
     channel_limits["asr"],
@@ -304,6 +310,26 @@ Query → milvus_asr_candidates_hybrid()
 - `chinese` analyzer handles tokenization; BM25 weights are automatic
 - Can revisit if Milvus adds parameter support in future versions
 
+### 5. Explicit Query Timeout on Every Search Path
+**Decision**: Pass `timeout=settings.milvus_query_timeout_seconds` (default 3.0s) to
+every `col.search()` / `col.hybrid_search()` call in `milvus_asr_candidates_hybrid`
+(bm25-only / dense-only / hybrid).  
+**Rationale**:
+- `MILVUS_QUERY_TIMEOUT_SECONDS` was configured but never wired into the hybrid
+  search paths, so a stalled Milvus could block retrieval indefinitely — the
+  setting had no effect on the online query path.
+- The bulk-query helpers (`_query_all`, `query_rows_for_videos`) already read this
+  setting; the hybrid ANN/BM25 paths must do the same for the timeout to be a real
+  guarantee rather than dead config.
+
+**Impact**: A slow or unresponsive Milvus now fails fast (≤3s) instead of hanging.  
+**Guidance for future modalities**: Every new `search()` / `hybrid_search()` call
+MUST forward `timeout=settings.milvus_query_timeout_seconds`. This is easy to omit
+because the call succeeds without it — the omission only surfaces under Milvus
+stress, so it needs a mock assertion (see Verification) to prevent silent
+regression. The same fix was applied to `milvus_ocr_candidates_hybrid`, which had
+the identical gap on all three of its paths.
+
 ---
 
 ## Verification
@@ -316,6 +342,17 @@ Query → milvus_asr_candidates_hybrid()
 ✓ ASR schema: 11 fields, 1 BM25 function (bm25_asr)
 ✓ Index type: ASR=DISKANN, OCR=DISKANN
 ```
+
+### Timeout Mock Assertions
+`backend/tests/test_milvus_query_timeout.py` verifies — without a live Milvus —
+that all three ASR paths and all three OCR paths forward
+`timeout=settings.milvus_query_timeout_seconds` to `search` / `hybrid_search`:
+```bash
+✓ 6 passed — test_{asr,ocr}_{bm25_only,dense_only,hybrid}_passes_timeout
+```
+These are mock-based (`unittest.mock.MagicMock`), so they run under the CI
+`pytest -m "not integration"` gate and guard against the timeout kwarg being
+dropped in future refactors.
 
 ### Code Statistics
 ```
