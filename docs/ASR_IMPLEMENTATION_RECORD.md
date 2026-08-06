@@ -373,14 +373,33 @@ dropped in future refactors.
 ## Next Steps
 
 ### 1. Collection Migration
-- Current ASR collection uses old HNSW schema
-- Run migration script to create DiskANN + BM25 collection:
+- Existing ASR collections using the old HNSW schema cannot be altered in place.
+  The temporary migration script deletes that collection and creates the exact
+  DiskANN + BM25 schema used by the application. It does **not** restore rows;
+  stop indexing, take the normal Milvus backup, then run it during a maintenance
+  window.
   ```bash
-  docker exec momentseek-0829-platform python backend/scripts/create_asr_v2_collection.py
+  # Inspect only; this does not change Milvus.
+  docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+    exec app python scripts/recreate_asr_hybrid_collection.py
+
+  # Destructive schema recreation. Existing ASR rows are removed.
+  docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+    exec app python scripts/recreate_asr_hybrid_collection.py \
+    --execute --confirm-drop-asr-embeddings
   ```
 
 ### 2. Re-indexing
-- Re-index existing videos to populate `sparse_embedding` field
+- Re-index existing videos to populate `sparse_embedding` field, then verify
+  the published versions:
+  ```bash
+  docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+    exec app python -m app.maintenance.reindex_milvus_only \
+    --modalities asr --execute
+  docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+    exec app python -m app.maintenance.reindex_milvus_only \
+    --modalities asr --verify-only
+  ```
 - Milvus will auto-compute BM25 vectors via Function
 
 ### 3. Testing

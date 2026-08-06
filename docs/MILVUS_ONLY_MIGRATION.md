@@ -23,6 +23,12 @@
 
 `MILVUS_ENABLED=true` 与 `MILVUS_WRITE_ENABLED=true` 是必需条件。不要在切换中停止 Milvus，也不要同时运行 Web UI 发起的索引任务或 indexer daemon。
 
+> **ASR hybrid schema upgrade**：若 `asr_embeddings` 是旧 HNSW schema，必须先
+> 停止索引写入、备份 Milvus，并运行
+> `scripts/recreate_asr_hybrid_collection.py --execute --confirm-drop-asr-embeddings`。
+> 此操作会删除旧 ASR 行，随后必须执行本手册中的 `--modalities asr --execute`
+> 重建；具体命令见 `docs/ASR_IMPLEMENTATION_RECORD.md`。
+
 ## 3. 预检查与灰度
 
 以下命令在应用容器中运行；把 Compose 文件组合替换为本环境实际使用的组合。若本环境自带 Milvus，命令追加 `-f compose/compose.milvus.yml`。
