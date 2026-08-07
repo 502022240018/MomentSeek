@@ -947,10 +947,11 @@ def milvus_speaker_candidates(
         profiler,
     )
     # COSINE metric on unit vectors: _distance is the exact cosine similarity.
-    # Milvus already returns hits sorted by descending similarity, so no
-    # client-side re-sort is needed. hits[:limit] drops any surplus when
-    # multiplier > 1; with the default multiplier=1, ann_limit==limit so it
-    # is a no-op.
+    # Real Milvus ANN search returns hits sorted by descending similarity; the
+    # explicit sort below enforces that contract regardless of mock order in
+    # tests, and is O(n) on an already-sorted production result. hits[:limit]
+    # drops any surplus when multiplier > 1; with multiplier=1 ann_limit==limit
+    # so it is a no-op.
     candidates: list[Candidate] = []
     for hit in hits[:limit]:
         cosine = float(hit["_distance"])
@@ -980,4 +981,5 @@ def milvus_speaker_candidates(
                 "source":         "milvus",
             },
         ))
+    candidates.sort(key=lambda c: c.score, reverse=True)
     return candidates
