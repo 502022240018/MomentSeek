@@ -17,8 +17,10 @@ import numpy as np
 
 from app.core.settings import get_settings
 from app.vector_store.milvus.milvus_search import (
+    _reset_index_verification,
     milvus_asr_candidates_hybrid,
     milvus_ocr_candidates_hybrid,
+    milvus_speaker_candidates,
 )
 
 _VIDEO_ID = "timeout-video"
@@ -32,6 +34,9 @@ def _make_client() -> tuple[MagicMock, MagicMock]:
     # ``for hit in results[0]`` must iterate over an empty hit list.
     collection.search.return_value = [[]]
     collection.hybrid_search.return_value = [[]]
+    # Speaker/face go through _ann_search → _verify_ann_index_type_once, which
+    # introspects col.index(); present the expected DISKANN type for speaker.
+    collection.index.return_value.params = {"index_type": "DISKANN"}
     client = MagicMock()
     client.collection_for.return_value = collection
     return client, collection
@@ -133,3 +138,26 @@ def test_ocr_hybrid_passes_timeout():
     collection.hybrid_search.assert_called_once()
     assert collection.hybrid_search.call_args.kwargs["timeout"] == expected
     collection.search.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Speaker (single-phase ANN via _ann_search)
+# ---------------------------------------------------------------------------
+
+def test_speaker_passes_timeout():
+    """Speaker ANN search forwards the query timeout to search."""
+    expected = get_settings().milvus_query_timeout_seconds
+    _reset_index_verification()
+    client, collection = _make_client()
+
+    # Speaker embeddings are 192-dim (CAM++ 3D-Speaker schema), not the
+    # 384-dim used by ASR/OCR semantic encoders.
+    speaker_query = np.zeros(192, dtype=np.float32)
+    speaker_query[0] = 1.0
+
+    milvus_speaker_candidates(
+        client, _VIDEO_ID, speaker_query, _ASSET_VERSION, limit=20
+    )
+
+    collection.search.assert_called_once()
+    assert collection.search.call_args.kwargs["timeout"] == expected

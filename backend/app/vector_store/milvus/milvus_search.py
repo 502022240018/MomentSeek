@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
@@ -68,7 +69,7 @@ _STATIC_INDEX_TYPES: dict[str, str] = {
     "asr":     "DISKANN",
     "ocr":     "DISKANN",
     "face":    "IVF_FLAT",
-    "speaker": "HNSW",
+    "speaker": "DISKANN",   # migrated HNSW → DISKANN (COSINE) for 千万级 scale
 }
 
 
@@ -109,6 +110,104 @@ BULK_QUERY_FIELDS: dict[str, list[str]] = {}
 
 class MilvusServiceError(RuntimeError):
     """Raised on connection / timeout failures; NOT on empty result sets."""
+
+
+# ---------------------------------------------------------------------------
+# Index-type fail-fast verification (face / speaker share _ann_search)
+# ---------------------------------------------------------------------------
+
+# Modalities already verified this process. Keyed by modality so face(IVF_FLAT)
+# and speaker(DISKANN) are checked against their own expected type — never a
+# shared assumption that could mis-judge one of them.
+_verified_index_modalities: set[str] = set()
+_index_verify_lock = threading.Lock()
+
+
+def _reset_index_verification() -> None:
+    """Test hook: clear the per-modality verification cache."""
+    with _index_verify_lock:
+        _verified_index_modalities.clear()
+
+
+def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
+    """Fail-fast if the live index type has drifted from the configured one.
+
+    A HNSW→DISKANN config change does NOT rebuild an existing collection
+    (_init_collections only load()s it), so a stale collection would silently
+    break DiskANN search. This one-time check surfaces the drift explicitly.
+    Cached per-modality; only issues an RPC on the first search of each modality.
+
+    Scope note: both ANN modalities that reach _ann_search are verified — speaker
+    (expects DISKANN) and face (expects IVF_FLAT). Each is checked against its own
+    configured type, so face is never judged against speaker's DISKANN. face
+    picked up this fail-fast alongside the speaker DiskANN migration; it is a
+    safety net (IVF_FLAT config matches IVF_FLAT collection → passes) rather than
+    a behaviour change for correctly-built collections.
+
+    Transient vs structural failure: a genuine RPC/timeout error during
+    introspection soft-passes (does not block search) but is NOT cached, so the
+    next search retries and drift detection is not permanently disabled. Only a
+    structural limitation — a lightweight client/collection that cannot introspect
+    at all (AttributeError/TypeError), or a missing/non-str index type — is cached
+    to avoid re-attempting (and log-spamming) on every search.
+    """
+    if modality in _verified_index_modalities:
+        return
+    with _index_verify_lock:
+        if modality in _verified_index_modalities:
+            return
+        expected = get_modality_index_type(modality)
+        # col.index() (the RPC) is intentionally inside the lock so that
+        # concurrent searches on first startup do not fan out duplicate
+        # introspection RPCs. The lock is held for one network round-trip
+        # only once per modality per process lifetime.
+        try:
+            col = client.collection_for(modality)
+            index_info = col.index()
+            if not index_info:
+                logger.warning(
+                    "%s collection has no index yet; first indexing will create it",
+                    modality,
+                )
+                _verified_index_modalities.add(modality)
+                return
+            actual = index_info.params.get("index_type", "UNKNOWN")
+        except MilvusServiceError:
+            raise
+        except (AttributeError, TypeError) as exc:
+            # Structural limitation: lightweight test clients / wrappers that do
+            # not expose index introspection at all. This will never recover, so
+            # cache to avoid re-attempting on every search. Mirror visual
+            # _verify_index_type's soft handling.
+            logger.warning(
+                "%s index type not introspectable (%s); skipping drift check",
+                modality, exc,
+            )
+            _verified_index_modalities.add(modality)
+            return
+        except Exception as exc:
+            # Transient introspection failure (RPC/timeout). Soft-pass so search
+            # is not blocked, but do NOT cache — the next search retries so a
+            # single blip never permanently disables drift detection.
+            logger.warning(
+                "Transient failure verifying %s index type: %s; will retry",
+                modality, exc,
+            )
+            return
+        if not isinstance(actual, str):
+            # Loose test mocks return a non-str (e.g. MagicMock) here. A real
+            # Milvus collection always yields a str index_type, so only enforce
+            # drift detection when we actually got one.
+            _verified_index_modalities.add(modality)
+            return
+        if actual != expected:
+            raise MilvusServiceError(
+                f"Index type mismatch for modality={modality!r}: config expects "
+                f"{expected} but collection has {actual}. Rebuild the "
+                f"{modality} collection with the new index config before serving."
+            )
+        logger.debug("%s index type verified: %s", modality, actual)
+        _verified_index_modalities.add(modality)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +330,23 @@ def query_rows_for_videos(
     return grouped
 
 
+def _diskann_search_list_for(modality: str) -> int:
+    """Return the configured DiskANN search_list for a modality.
+
+    Keyed per modality so the DISKANN branch of _ann_search never silently
+    inherits another modality's tuning. Only speaker currently reaches this
+    branch (face=IVF_FLAT; visual's DiskANN path lives in
+    milvus_search_visual_v2). A future DISKANN modality must add its own entry
+    here rather than fall through to speaker's value.
+    """
+    settings = get_settings()
+    if modality == "speaker":
+        return settings.speaker_diskann_search_list
+    raise MilvusServiceError(
+        f"_ann_search has no DiskANN search_list configured for modality={modality!r}"
+    )
+
+
 def _ann_search(
     client: MilvusClient,
     modality: str,
@@ -242,18 +358,29 @@ def _ann_search(
     profiler: RetrievalProfiler | None = None,
 ) -> list[dict]:
     """Execute a per-video ANN search; used only by face and speaker."""
+    _verify_ann_index_type_once(client, modality)
     col = client.collection_for(modality)
     metric     = _MODALITY_METRIC[modality]
     index_type = get_modality_index_type(modality)
-    if index_type == "HNSW":
-        sp = {"metric_type": metric, "params": {"ef": _HNSW_EF}}
+    if index_type == "DISKANN":
+        # DiskANN hard constraint: search_list >= limit. `limit` here is the
+        # caller's ann_limit; taking a static setting would fail/truncate when
+        # limit exceeds it (see milvus_speaker_candidates). Mirror visual v2's
+        # max(top_k, 100) pattern. search_list setting is modality-keyed so this
+        # generic branch cannot misapply speaker's tuning to another modality.
+        search_list = max(limit, _diskann_search_list_for(modality))
+        sp = {"metric_type": metric, "params": {"search_list": search_list}}
     elif index_type == "IVF_FLAT":
         sp = {"metric_type": metric, "params": {"nprobe": _IVF_NPROBE}}
+    elif index_type == "HNSW":
+        # Currently unreachable: face=IVF_FLAT, speaker=DISKANN, and visual's
+        # HNSW path lives in milvus_search_visual_v2 (not via _ann_search).
+        # Retained for a possible future modality that indexes with HNSW.
+        sp = {"metric_type": metric, "params": {"ef": _HNSW_EF}}
     else:
-        # DiskANN and other types are not supported in _ann_search (face/speaker only)
         raise MilvusServiceError(
             f"_ann_search does not support index_type={index_type!r} "
-            f"for modality={modality!r}; only HNSW and IVF_FLAT are supported."
+            f"for modality={modality!r}; only DISKANN, IVF_FLAT and HNSW are supported."
         )
     try:
         span = profiler.span("milvus_rpc", modality) if profiler else nullcontext()
@@ -263,7 +390,10 @@ def _ann_search(
                 anns_field="embedding",
                 param=sp,
                 limit=limit,
-                expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}"'),
+                expr=(
+                    f'video_id == {json.dumps(video_id)}'
+                    f' and asset_version == {json.dumps(asset_version)}'
+                ),
                 output_fields=output_fields,
                 timeout=get_settings().milvus_query_timeout_seconds,
             )
@@ -402,7 +532,10 @@ def milvus_asr_candidates_hybrid(
                 anns_field="sparse_embedding",
                 param={"metric_type": "BM25"},
                 limit=limit,
-                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
+                expr=(
+                    f'video_id == {json.dumps(video_id)}'
+                    f' and asset_version == {json.dumps(asset_version)}'
+                ),
                 output_fields=output_fields,
                 timeout=settings.milvus_query_timeout_seconds,
             )
@@ -425,9 +558,9 @@ def milvus_asr_candidates_hybrid(
                     },
                     limit=limit,
                     expr=(
-                        f'video_id == "{video_id}" '
-                        f'and asset_version == "{asset_version}" '
-                        f'and has_embedding == True'
+                        f'video_id == {json.dumps(video_id)}'
+                        f' and asset_version == {json.dumps(asset_version)}'
+                        f' and has_embedding == True'
                     ),
                     output_fields=output_fields,
                     timeout=settings.milvus_query_timeout_seconds,
@@ -443,9 +576,9 @@ def milvus_asr_candidates_hybrid(
                 },
                 limit=recall_size,
                 expr=(
-                    f'video_id == "{video_id}" '
-                    f'and asset_version == "{asset_version}" '
-                    f'and has_embedding == True'
+                    f'video_id == {json.dumps(video_id)}'
+                    f' and asset_version == {json.dumps(asset_version)}'
+                    f' and has_embedding == True'
                 ),
             )
 
@@ -454,7 +587,10 @@ def milvus_asr_candidates_hybrid(
                 anns_field="sparse_embedding",
                 param={"metric_type": "BM25"},
                 limit=recall_size,
-                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
+                expr=(
+                    f'video_id == {json.dumps(video_id)}'
+                    f' and asset_version == {json.dumps(asset_version)}'
+                ),
             )
 
             with (profiler.span("milvus_rpc", "asr_hybrid") if profiler else nullcontext()):
@@ -569,7 +705,10 @@ def milvus_ocr_candidates_hybrid(
                 anns_field="sparse_embedding",
                 param={"metric_type": "BM25"},
                 limit=limit,
-                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
+                expr=(
+                    f'video_id == {json.dumps(video_id)}'
+                    f' and asset_version == {json.dumps(asset_version)}'
+                ),
                 output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
                               "text", "avg_box_score", "has_embedding"],
                 timeout=settings.milvus_query_timeout_seconds,
@@ -593,8 +732,11 @@ def milvus_ocr_candidates_hybrid(
                         "params": {"search_list": search_list},
                     },
                     limit=limit,
-                    expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}" '
-                          "AND has_embedding == True"),
+                    expr=(
+                        f'video_id == {json.dumps(video_id)}'
+                        f' and asset_version == {json.dumps(asset_version)}'
+                        f' and has_embedding == True'
+                    ),
                     output_fields=["frame_idx", "frame_ms", "start_ms", "end_ms",
                                   "text", "avg_box_score", "has_embedding"],
                     timeout=settings.milvus_query_timeout_seconds,
@@ -609,8 +751,11 @@ def milvus_ocr_candidates_hybrid(
                     "params": {"search_list": search_list},
                 },
                 limit=recall_size,
-                expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}" '
-                      "AND has_embedding == True"),
+                expr=(
+                    f'video_id == {json.dumps(video_id)}'
+                    f' and asset_version == {json.dumps(asset_version)}'
+                    f' and has_embedding == True'
+                ),
             )
 
             sparse_req = AnnSearchRequest(
@@ -618,7 +763,10 @@ def milvus_ocr_candidates_hybrid(
                 anns_field="sparse_embedding",
                 param={"metric_type": "BM25"},
                 limit=recall_size,
-                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
+                expr=(
+                    f'video_id == {json.dumps(video_id)}'
+                    f' and asset_version == {json.dumps(asset_version)}'
+                ),
             )
 
             with (profiler.span("milvus_rpc", "ocr_hybrid") if profiler else nullcontext()):
@@ -768,42 +916,44 @@ def milvus_speaker_candidates(
     query: np.ndarray,
     asset_version: str,
     limit: int,
-    threshold: float = 0.50,
+    threshold: float | None = None,
     profiler: RetrievalProfiler | None = None,
 ) -> list[Candidate]:
-    """Speaker utterance recall: ANN expansion → exact cosine re-score → threshold.
+    """Speaker utterance recall: single-phase ANN with trusted COSINE distance.
 
-    Same two-phase strategy as face:
-    1. ANN with expanded limit (HNSW COSINE metric).
-    2. Recompute exact cosine from retrieved utterance embeddings to eliminate
-       any HNSW approximation error near the identity threshold.
-    3. Apply threshold, sort, truncate.
+    Speaker embeddings are unit-normalised before write (speaker.py), so under a
+    COSINE metric Milvus returns ``_distance`` that IS the exact cosine similarity
+    within float32 precision. HNSW/DiskANN approximation only affects *which*
+    neighbours are returned, not the distance of a returned neighbour. The former
+    two-phase re-score (pull ``embedding`` back + Python ``np.dot``) was therefore
+    pure overhead and has been removed (Milvus_optimization_plan.md 方案3).
 
-    threshold=0.50 is calibrated for CAM++ (3D-Speaker); same-speaker utterances
-    typically land 0.6–0.9, different speakers below 0.4.
+    threshold=None resolves to settings.speaker_identity_threshold (default 0.50,
+    calibrated for CAM++ 3D-Speaker: same-speaker utterances land 0.6–0.9,
+    different speakers below 0.4). It only drives the ``above_threshold`` display
+    flag; voice-search passes threshold=-1.0 to keep every candidate.
     """
+    settings = get_settings()
+    if threshold is None:
+        threshold = settings.speaker_identity_threshold
     query_norm = normalize(np.asarray(query, dtype=np.float32))
-    ann_limit  = min(limit * 2, 16_384)
+    # Reranking removed → wide recall no longer needed. multiplier defaults to 1;
+    # search_list >= ann_limit is enforced in _ann_search's DISKANN branch.
+    ann_limit = min(limit * settings.speaker_recall_multiplier, 16_384)
     hits = _ann_search(
         client, "speaker", video_id, asset_version, query_norm.tolist(),
         ann_limit,
-        ["utterance_idx", "start_ms", "end_ms", "track_id", "asr_chunk_idx", "embedding"],
+        ["utterance_idx", "start_ms", "end_ms", "track_id", "asr_chunk_idx"],
         profiler,
     )
-    scored: list[tuple[float, dict]] = []
-    for hit in hits:
-        raw_emb = hit.get("embedding")
-        if raw_emb is None:
-            # COSINE metric: distance value IS the cosine similarity.
-            cosine = float(hit["_distance"])
-        else:
-            utt_vec = normalize(np.asarray(raw_emb, dtype=np.float32))
-            cosine  = float(np.dot(query_norm, utt_vec))
-        scored.append((cosine, hit))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
+    # COSINE metric on unit vectors: _distance is the exact cosine similarity.
+    # Milvus already returns hits sorted by descending similarity, so no
+    # client-side re-sort is needed. hits[:limit] drops any surplus when
+    # multiplier > 1; with the default multiplier=1, ann_limit==limit so it
+    # is a no-op.
     candidates: list[Candidate] = []
-    for cosine, hit in scored[:limit]:
+    for hit in hits[:limit]:
+        cosine = float(hit["_distance"])
         above    = cosine >= threshold
         start_ms = int(hit.get("start_ms") or 0)
         end_ms   = int(hit.get("end_ms")   or 0)

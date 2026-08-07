@@ -83,9 +83,17 @@ _STATIC_INDEX_CONFIGS: dict[str, dict] = {
         "params": {"nlist": 1024},
     },
     "speaker_embeddings": {
-        "index_type": "HNSW",
+        # Migrated HNSW → DISKANN for 千万级 scale (disk-resident vectors +
+        # PQ in memory). COSINE retained: speaker embeddings are normalised
+        # unit vectors, and visual proved DiskANN supports COSINE in this stack.
+        "index_type": "DISKANN",
         "metric_type": "COSINE",
-        "params": {"M": 16, "efConstruction": 200},
+        "params": {
+            "max_degree": 56,
+            "search_list_size": 128,
+            "pq_code_budget_gb": 0.125,
+            "build_dram_budget_gb": 32.0,
+        },
     },
 }
 

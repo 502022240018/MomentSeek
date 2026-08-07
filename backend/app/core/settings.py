@@ -112,6 +112,14 @@ class Settings(BaseSettings):
     speaker_model_repo: str = "3D-Speaker"
     speaker_model_cache_dir: str = "3dspeaker-cache"
 
+    # Speaker retrieval configuration (DiskANN + COSINE, no re-scoring).
+    # identity_threshold only drives above_threshold/decision display fields;
+    # the voice-search path passes threshold=-1.0 to take all candidates, so
+    # this default affects cross-modal/evidence display, not voice-search recall.
+    speaker_identity_threshold: float = 0.50  # CAM++ same-speaker cutoff
+    speaker_diskann_search_list: int = 128    # DiskANN search_list (dynamically raised to >= ann_limit)
+    speaker_recall_multiplier: int = 1        # ann_limit = limit * this (re-score removed → 1)
+
     ocr_engine: str = "rapidocr"
     ocr_device: str = "auto"
     ocr_version: str = "PP-OCRv6"
@@ -224,6 +232,20 @@ class Settings(BaseSettings):
     def validate_asr_semantic_weight(cls, value: float) -> float:
         if not 0.0 <= value <= 1.0:
             raise ValueError("asr_semantic_weight must be between 0.0 and 1.0")
+        return value
+
+    @field_validator("speaker_diskann_search_list", "speaker_recall_multiplier")
+    @classmethod
+    def validate_speaker_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Speaker retrieval parameters must be greater than 0")
+        return value
+
+    @field_validator("speaker_identity_threshold")
+    @classmethod
+    def validate_speaker_identity_threshold(cls, value: float) -> float:
+        if not -1.0 <= value <= 1.0:
+            raise ValueError("speaker_identity_threshold must be between -1.0 and 1.0")
         return value
 
     @field_validator("milvus_search_video_batch_size")
