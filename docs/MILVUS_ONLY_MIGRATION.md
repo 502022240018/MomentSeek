@@ -29,6 +29,25 @@
 > 此操作会删除旧 ASR 行，随后必须执行本手册中的 `--modalities asr --execute`
 > 重建；具体命令见 `docs/ASR_IMPLEMENTATION_RECORD.md`。
 
+> **Speaker DiskANN index upgrade**：若已有 `speaker_embeddings` 使用旧 HNSW
+> 索引，必须在运行 `reindex_milvus_only` 或启用新应用版本前，先停止 Speaker
+> 写入并执行下列命令。该操作只 release/rebuild `embedding` 的向量索引，**不会
+> 删除 collection、行数据或已发布的 manifest 指针**。
+>
+> ```bash
+> docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+>   exec app python scripts/migrate_speaker_diskann_index.py
+>
+> docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+>   exec app python scripts/migrate_speaker_diskann_index.py \
+>   --execute --confirm-rebuild-speaker-index
+> ```
+>
+> 输出 `status=migrated` 或 `status=already_compatible` 后，才可继续本手册的灰度
+> 或全量步骤。若迁移前后 `row_count` 不一致，脚本会失败退出；保留现场并从 Milvus
+> 备份恢复，勿继续启动新版本。Speaker 向量本身未变，不需要为了此次索引切换重跑
+> Speaker 模型。
+
 ## 3. 预检查与灰度
 
 以下命令在应用容器中运行；把 Compose 文件组合替换为本环境实际使用的组合。若本环境自带 Milvus，命令追加 `-f compose/compose.milvus.yml`。

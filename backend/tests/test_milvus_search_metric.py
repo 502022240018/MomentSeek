@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 from app.vector_store.milvus.milvus_client import _COLLECTION_FOR_MODALITY
 from app.vector_store.milvus.milvus_search import (
-    _MODALITY_INDEX_TYPE,
     _MODALITY_METRIC,
+    get_modality_index_type,
     milvus_face_candidates,
 )
 from app.vector_store.milvus.milvus_search_visual_v2 import _aggregate_by_segment
@@ -28,8 +28,6 @@ def test_modality_metric_covers_all_modalities():
 
 def test_modality_index_type_covers_all_modalities():
     """Every modality known to the client has an entry accessible via get_modality_index_type()."""
-    from app.vector_store.milvus.milvus_search import get_modality_index_type
-
     # Verify all modalities can be queried
     for modality in _COLLECTION_FOR_MODALITY:
         index_type = get_modality_index_type(modality)
@@ -56,7 +54,6 @@ def test_modality_metric_matches_collection_configs():
 def test_modality_index_type_matches_collection_configs():
     """get_modality_index_type() must return values matching collection configs."""
     from app.vector_store.milvus.milvus_client import get_collection_index_config
-    from app.vector_store.milvus.milvus_search import get_modality_index_type
 
     for modality, collection_name in _COLLECTION_FOR_MODALITY.items():
         # Get index config dynamically
@@ -78,12 +75,12 @@ def test_modality_index_type_matches_collection_configs():
     ("asr",     "IP",       "DISKANN"),  # ASR now uses DISKANN
     ("ocr",     "IP",       "DISKANN"),  # OCR now uses DISKANN
     ("face",    "L2",       "IVF_FLAT"),
-    ("speaker", "COSINE",   "HNSW"),
+    ("speaker", "COSINE",   "DISKANN"),  # migrated HNSW → DISKANN for 千万级 scale
 ])
 def test_per_modality_metric_and_index(modality, expected_metric, expected_index):
     assert _MODALITY_METRIC[modality] == expected_metric
     if expected_index is not None:  # Skip index check for visual (dynamic config)
-        assert _MODALITY_INDEX_TYPE[modality] == expected_index
+        assert get_modality_index_type(modality) == expected_index
 
 
 def test_visual_ann_uses_supported_retrieval_profiler_api():

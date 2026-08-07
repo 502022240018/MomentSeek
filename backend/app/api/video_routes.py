@@ -27,10 +27,19 @@ def _parse_id_list(value: str | None, field_name: str) -> list[str] | None:
 
 
 def _speaker_is_indexed(video_id: str) -> bool:
-    """Report online speaker availability from the published Milvus pointer."""
+    """Report online speaker availability from the published Milvus pointer.
+
+    Videos with 0 utterances (no speech detected) publish an empty asset_version
+    (0 rows) to prevent stale-index caching, but should not appear in the speaker
+    workspace dropdown as they have no usable data.
+    """
     manifest = load_index_manifest(context.settings.index_dir / video_id) or {}
     channel = (manifest.get("channels") or {}).get("speaker") or {}
-    return bool(channel.get("milvus_asset_version"))
+    version = channel.get("milvus_asset_version")
+    if not version:
+        return False
+    row_count = channel.get("milvus_row_count")
+    return row_count is not None and int(row_count) > 0
 
 
 @router.post("/api/videos", status_code=201)

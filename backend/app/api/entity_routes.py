@@ -109,20 +109,31 @@ def list_entity_voice_samples(entity_id: str) -> list[dict]:
     if not context.catalog.get_entity(entity_id):
         raise HTTPException(status_code=404, detail="人物不存在")
     samples = context.catalog.list_voice_samples(entity_id)
+    # Multiple samples routinely share one source video; build each video's
+    # speaker panel at most once (avoid the previous per-sample N+1 rebuild).
+    # Cache failures as None too, so a failing video is not retried per sample.
+    panels: dict[str, dict | None] = {}
     for sample in samples:
         if sample.get("source_video_id") is None or sample.get("source_utterance_index") is None:
             continue
-        try:
-            view = video_speakers(context.settings.index_dir, context.catalog, sample["source_video_id"])
-            utterance = next(
-                (item for item in view["utterances"] if item["index"] == int(sample["source_utterance_index"])),
-                None,
-            )
-            if utterance:
-                sample["clip_url"] = utterance["clip_url"]
-                sample["text"] = utterance["text"]
-        except (FileNotFoundError, IndexError, ValueError):
-            pass
+        video_id = sample["source_video_id"]
+        if video_id not in panels:
+            try:
+                panels[video_id] = video_speakers(
+                    context.settings.index_dir, context.catalog, video_id
+                )
+            except (FileNotFoundError, IndexError, ValueError):
+                panels[video_id] = None
+        view = panels[video_id]
+        if view is None:
+            continue
+        utterance = next(
+            (item for item in view["utterances"] if item["index"] == int(sample["source_utterance_index"])),
+            None,
+        )
+        if utterance:
+            sample["clip_url"] = utterance["clip_url"]
+            sample["text"] = utterance["text"]
     return samples
 
 
