@@ -163,8 +163,19 @@ Speaker 查询是声纹向量,无文本、无词面语义,BM25 无意义。
 ### 4. `speaker_identity_threshold` 对热路径近乎装饰
 声纹检索路径显式传 `threshold=-1.0`,threshold 只影响 `above_threshold`/`decision`/`evidence` 显示字段;而 `_voice_search_vectors_milvus` 并不消费这些字段(仅用 `score`/`features`/`unit_id`)。配置化仍保留以统一约定并支持将来直接调用场景。
 
-### 5. 索引本次完成后手动重建
-按用户确认,开发阶段不提供独立迁移脚本、不做存量原地迁移。改配置后 drop collection → `_init_collections` 以新 DISKANN 配置重建,或重跑索引。schema 字段不变 → 向量无需重新嵌入。**部署顺序**:改配置 + 重灌数据 **必须先于服务启用**,否则 fail-fast 校验会让 speaker 检索全部抛错。
+### 5. 索引迁移：保留现有 Speaker 行
+`backend/scripts/migrate_speaker_diskann_index.py` 是正式环境的一次性迁移命令。
+它会先检查索引类型；只有旧 HNSW（或缺索引）时，才 release collection、替换
+`embedding` 索引为 DiskANN、重新 load 并核验类型和行数。schema 与行数据均不变，
+因此不删除 collection、不改 manifest 指针、也不需重新嵌入 Speaker 向量。
+
+执行时必须显式传入：
+```bash
+python scripts/migrate_speaker_diskann_index.py \
+  --execute --confirm-rebuild-speaker-index
+```
+迁移完成后再启用新服务版本；否则 fail-fast 校验会拒绝旧 HNSW 的 Speaker 查询。完整
+维护窗口顺序见 `docs/MILVUS_ONLY_MIGRATION.md`。
 
 ---
 
