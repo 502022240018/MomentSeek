@@ -440,6 +440,83 @@ class SnapMindPlannerLab:
             return values
         return values
 
+    @staticmethod
+    def _identity_residual_query(
+        plan_set: PlanSet,
+        query: str,
+        entity_name: str,
+    ) -> str:
+        for mention in plan_set.identity_mentions:
+            if mention.name.strip() == entity_name and mention.visual_fallback_query.strip():
+                return mention.visual_fallback_query.strip()
+        return " ".join(query.replace(entity_name, " ").split()).strip(
+            " ,，、;；:：。.!！?？-—"
+        )
+
+    @staticmethod
+    def _identity_primary_modality(residual_query: str, available: set[str]) -> str:
+        if "asr" in available and _contains_any(residual_query, HeuristicPlanGenerator.ASR_TERMS):
+            return "asr"
+        if "ocr" in available and _contains_any(residual_query, HeuristicPlanGenerator.OCR_TERMS):
+            return "ocr"
+        if "visual" in available:
+            return "visual"
+        return next(iter(sorted(available - {"face"})), "face")
+
+    def _compound_identity_steps(
+        self,
+        plan_id: str,
+        residual_query: str,
+        entity_name: str,
+        available: set[str],
+    ) -> list[PlanStep]:
+        primary_modality = self._identity_primary_modality(residual_query, available)
+        primary_top_k = {"fast": 100, "balanced": 150, "deep": 300}[plan_id]
+        primary = _make_step(
+            "identity-primary",
+            f"{primary_modality}.search",
+            residual_query,
+            1.0,
+            primary_top_k,
+            "先用动作、场景或文本要求建立宽候选池，再在候选窗口内核验人物身份。",
+            role="primary",
+        )
+        face = _make_step(
+            "identity-face",
+            "face.search",
+            entity_name,
+            1.0,
+            100,
+            "只检查主通道候选窗口；达到阈值才作为身份 support，模糊结果仅供复核。",
+            role="support",
+            depends_on=[primary.step_id],
+            identity_threshold=0.35,
+            ambiguous_threshold=0.20,
+            window_padding_seconds=0.0,
+        )
+        if plan_id == "fast" or not self.settings.orchestration_enabled:
+            return [primary, face]
+
+        rerank_top_k = 20 if plan_id == "balanced" else 30
+        reranker = _make_step(
+            "identity-verifier",
+            "vlm.rerank",
+            residual_query,
+            1.0,
+            rerank_top_k,
+            "只复核已确认或模糊 Face 的身份候选，联合判断人物、动作与场景。",
+            "rerank",
+            role="verifier",
+            depends_on=[face.step_id],
+            candidate_pool="face_evidence",
+            identity_step_id=face.step_id,
+            include_face_statuses=["confirmed", "ambiguous"],
+            frame_count=4,
+            window_seconds=2.0,
+            score_weight=0.8,
+        )
+        return [primary, face, reranker]
+
     def _sanitize_plan_set(
         self,
         plan_set: PlanSet,
@@ -449,6 +526,18 @@ class SnapMindPlannerLab:
         matched_entity: dict[str, Any] | None = None,
     ) -> PlanSet:
         available = set(available_modalities)
+        entity_name = str((matched_entity or {}).get("name") or "").strip()
+        identity_residual = (
+            self._identity_residual_query(plan_set, query, entity_name)
+            if entity_name
+            else ""
+        )
+        compound_identity = bool(
+            entity_name
+            and identity_residual
+            and "face" in available
+            and bool(available - {"face"})
+        )
         for plan in plan_set.plans:
             accepted = []
             expensive_steps = 0
@@ -495,6 +584,28 @@ class SnapMindPlannerLab:
                         step.fallback_for = primary_ids[-1]
                         step.parameters["fallback_retargeted_from"] = original_fallback_for
                 accepted.append(step)
+            if compound_identity:
+                accepted = self._compound_identity_steps(
+                    plan.plan_id,
+                    identity_residual,
+                    entity_name,
+                    available,
+                )
+                plan.fusion = "rrf"
+                plan.result_limit = 30 if plan.plan_id == "deep" else 24
+                plan.early_stop_threshold = 1.0
+                plan.estimated_cost = (
+                    "low"
+                    if plan.plan_id == "fast"
+                    else "high"
+                    if self.settings.orchestration_enabled
+                    else "medium"
+                )
+                plan.description = {
+                    "fast": "宽召回后定点检查人物身份，不调用 VLM。",
+                    "balanced": "对人物身份候选做有限的多帧语义复核。",
+                    "deep": "扩大主召回，并对更多身份候选做多帧语义复核。",
+                }[plan.plan_id]
             if not accepted:
                 fallback = self.fallback_generator.generate(query, available_modalities, has_query_image)
                 replacement = next(item for item in fallback.plans if item.plan_id == plan.plan_id)

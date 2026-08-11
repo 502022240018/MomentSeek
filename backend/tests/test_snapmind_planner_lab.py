@@ -525,6 +525,57 @@ def test_registered_entity_is_exposed_and_injected_into_plans():
         assert any(step["tool_id"] == "face.search" for step in plan["steps"])
 
 
+def test_registered_compound_identity_uses_candidate_window_face_and_bounded_rerank():
+    orchestrator = FakeOrchestrator(
+        orchestration_enabled=True,
+        entity={"id": "person-1", "name": "王俊凯", "embedding_path": "entity.npz"},
+        modalities=["visual", "face"],
+    )
+    lab = SnapMindPlannerLab(orchestrator)
+
+    proposal = lab.propose("王俊凯吃包子近景", "auto", None, False)
+    plans = {plan["plan_id"]: plan for plan in proposal["plans"]}
+
+    fast_steps = plans["fast"]["steps"]
+    assert [(step["tool_id"], step["role"], step["top_k"]) for step in fast_steps] == [
+        ("visual.search", "primary", 100),
+        ("face.search", "support", 100),
+    ]
+    assert fast_steps[0]["query"] == "吃包子近景"
+
+    for plan_id, visual_top_k, rerank_top_k in (
+        ("balanced", 150, 20),
+        ("deep", 300, 30),
+    ):
+        steps = plans[plan_id]["steps"]
+        assert [(step["tool_id"], step["role"]) for step in steps] == [
+            ("visual.search", "primary"),
+            ("face.search", "support"),
+            ("vlm.rerank", "verifier"),
+        ]
+        assert steps[0]["top_k"] == visual_top_k
+        assert steps[1]["parameters"]["identity_threshold"] == pytest.approx(0.35)
+        assert steps[2]["top_k"] == rerank_top_k
+        assert steps[2]["parameters"]["candidate_pool"] == "face_evidence"
+        assert steps[2]["parameters"]["include_face_statuses"] == [
+            "confirmed", "ambiguous",
+        ]
+
+
+def test_registered_identity_only_query_keeps_global_face_primary():
+    orchestrator = FakeOrchestrator(
+        entity={"id": "person-1", "name": "王俊凯", "embedding_path": "entity.npz"},
+        modalities=["visual", "face"],
+    )
+    proposal = SnapMindPlannerLab(orchestrator).propose(
+        "王俊凯", "auto", None, False
+    )
+
+    for plan in proposal["plans"]:
+        face = next(step for step in plan["steps"] if step["tool_id"] == "face.search")
+        assert face["role"] == "primary"
+
+
 def test_unregistered_identity_mention_requires_user_clarification():
     lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["visual", "face", "asr", "ocr"]))
     plan_set = HeuristicPlanGenerator().generate(
