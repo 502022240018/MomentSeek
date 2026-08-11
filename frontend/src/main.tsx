@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ColorGradingCapability, ColorGradingTask, Entity, Folder, Job, OrchestrationProfile, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
+import { api, ColorGradingCapability, ColorGradingTask, Entity, FaceGalleryView, Folder, Job, OrchestrationProfile, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
 import { ColorGradingPage } from "./ColorGradingPage";
 import {
   defaultIndexConfiguration,
@@ -411,12 +411,49 @@ function SpeakersPage({ videos, setNotice }: { videos: Video[]; setNotice: (valu
   </div>;
 }
 
+function FacesPage({ videos, entities, refreshEntities, setNotice }: { videos: Video[]; entities: Entity[]; refreshEntities: () => Promise<void>; setNotice: (value: string) => void }) {
+  const indexed = videos.filter(video => video.indexed_modalities.includes("face"));
+  const [videoId, setVideoId] = useState("");
+  const [view, setView] = useState<FaceGalleryView>();
+  const [selectedEntity, setSelectedEntity] = useState<Record<number, string>>({});
+  const [loading, setLoading] = useState(false);
+  useEffect(() => { if (!videoId && indexed.length) setVideoId(indexed[0].id); }, [indexed.length]);
+  const load = async (id = videoId) => {
+    if (!id) return;
+    setLoading(true);
+    try { setView(await api.faceGallery(id)); }
+    catch (error) { setView(undefined); setNotice(error instanceof Error ? error.message : "无法读取主要人脸"); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(videoId); }, [videoId]);
+  const attach = async (groupIdx: number) => {
+    if (!view) return;
+    const entityId = selectedEntity[groupIdx];
+    if (!entityId) return setNotice("请先选择人物库身份");
+    try { await api.addFaceGroupToLibrary(videoId, groupIdx, view.asset_version, { entity_id: entityId }); setNotice("代表脸已加入人物库"); await load(); }
+    catch (error) { setNotice(error instanceof Error ? error.message : "加入人物库失败"); }
+  };
+  const create = async (groupIdx: number) => {
+    if (!view) return;
+    const name = window.prompt("新人物名称")?.trim();
+    if (!name) return;
+    try { await api.addFaceGroupToLibrary(videoId, groupIdx, view.asset_version, { new_entity_name: name }); await refreshEntities(); await load(); setNotice("已创建人物并加入代表脸"); }
+    catch (error) { setNotice(error instanceof Error ? error.message : "创建人物失败"); }
+  };
+  return <section className="face-gallery-page">
+    <div className="panel face-gallery-toolbar"><div><span className="panel-label">FACE WORKSPACE</span><h2>视频主要人脸</h2><p>把同一人物的多段人脸轨迹合并，优先展示清晰、出现时间长的代表脸。</p></div><label>视频<select value={videoId} onChange={event => setVideoId(event.target.value)}><option value="">选择已建立 Face 索引的视频</option>{indexed.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><span>{loading ? "读取中…" : `${view?.groups.length || 0} 人`}</span></div>
+    {!indexed.length && <div className="panel empty-list">请先为视频建立 Face 索引</div>}
+    {view?.legacy_backfilled && <div className="face-gallery-note">该视频已直接从 Milvus 旧人脸轨迹补齐人物分组；下次重建 Face 索引后可获得裁剪更准确的代表脸。</div>}
+    <div className="face-gallery-grid">{view?.groups.map((group, index) => <article className="panel face-gallery-card" key={group.group_idx}><a href={group.media_url} target="_blank" rel="noreferrer" className="face-portrait"><img loading="lazy" src={group.thumbnail_url} /><span>定位 {formatTime(group.best_ms / 1000)}</span></a><div className="face-gallery-info"><small>人物 {index + 1}</small><h3>{group.entity_name || "未命名人物"}</h3><p>{group.occurrence_count} 次检测 · 累计 {formatDuration(group.duration_ms / 1000)} · 首次 {formatTime(group.start_ms / 1000)}</p><div className="face-gallery-actions"><select value={selectedEntity[group.group_idx] || group.entity_id || ""} onChange={event => setSelectedEntity(value => ({ ...value, [group.group_idx]: event.target.value }))}><option value="">选择人物库身份</option>{entities.map(entity => <option key={entity.id} value={entity.id}>{entity.name}</option>)}</select><button className="outline" onClick={() => attach(group.group_idx)}>加入已有</button><button className="primary compact" onClick={() => create(group.group_idx)}>新建人物</button></div></div></article>)}</div>
+  </section>;
+}
+
 function EntitiesPage({ entities, videos, refresh, setNotice }: { entities: Entity[]; videos: Video[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
   const [name, setName] = useState(""); const [image, setImage] = useState<File>(); const [saving, setSaving] = useState(false);
   const save = async () => { if (!name.trim()) return setNotice("请输入人物名称"); setSaving(true); try { image ? await api.createEntity(name.trim(), image) : await api.createVoiceEntity(name.trim()); setName(""); setImage(undefined); await refresh(); setNotice(image ? "人物与参考脸已登记" : "已创建声音人物，可从 Speaker 页面添加声音"); } catch (error) { setNotice(error instanceof Error ? error.message : "人物登记失败"); } finally { setSaving(false); } };
   const rename = async (entity: Entity) => { const next = window.prompt("人物名称", entity.name); if (!next?.trim() || next.trim() === entity.name) return; try { await api.renameEntity(entity.id, next.trim()); await refresh(); setNotice("人物已重命名"); } catch (error) { setNotice(error instanceof Error ? error.message : "重命名失败"); } };
   const remove = async (entity: Entity) => { if (!window.confirm(`删除人物“${entity.name}”？相关人脸、声音样本和绑定也会删除。`)) return; try { await api.deleteEntity(entity.id); await refresh(); setNotice("人物已删除"); } catch (error) { setNotice(error instanceof Error ? error.message : "删除失败"); } };
-  return <div><div className="entity-layout"><div className="entity-create panel"><span className="panel-label">NEW IDENTITY</span><h2>登记人物</h2><p>参考脸可选；没有图片时可先创建声音人物，再从下方视频说话人添加代表声音。</p><input className="text-input" value={name} onChange={event => setName(event.target.value)} placeholder="人物或明星名称" /><label className="portrait-drop"><input type="file" accept="image/*" onChange={event => setImage(event.target.files?.[0])} />{image ? <img src={URL.createObjectURL(image)} /> : <><span>◎</span><b>可选：添加清晰正脸</b></>}</label><button className="primary compact" disabled={saving} onClick={save}>{saving ? "正在登记…" : image ? "登记人脸人物" : "创建声音人物"}</button></div><div className="entity-library"><div className="section-head"><div><span className="panel-label">IDENTITY LIBRARY</span><h2>人物库</h2></div><span>{entities.length} entities</span></div><div className="entity-grid">{entities.map(entity => <article key={entity.id}>{entity.reference_path ? <img src={`/api/entities/${entity.id}/reference`} /> : <div className="voice-only-avatar">◉</div>}<div><b>{entity.name}</b><small>{entity.embedding_path ? "人脸" : "无参考脸"} · {entity.voice_sample_count || 0} 条声音</small><div className="asset-actions"><button className="outline" onClick={() => rename(entity)}>重命名</button><button className="outline danger" onClick={() => remove(entity)}>删除</button></div></div></article>)}{!entities.length && <div className="empty-list">还没有登记人物</div>}</div></div></div><SpeakersPage videos={videos} setNotice={setNotice} /></div>;
+  return <div><div className="entity-layout"><div className="entity-create panel"><span className="panel-label">NEW IDENTITY</span><h2>登记人物</h2><p>参考脸可选；没有图片时可先创建人物，再从下方主要人脸或视频说话人添加样本。</p><input className="text-input" value={name} onChange={event => setName(event.target.value)} placeholder="人物或明星名称" /><label className="portrait-drop"><input type="file" accept="image/*" onChange={event => setImage(event.target.files?.[0])} />{image ? <img src={URL.createObjectURL(image)} /> : <><span>◎</span><b>可选：添加清晰正脸</b></>}</label><button className="primary compact" disabled={saving} onClick={save}>{saving ? "正在登记…" : image ? "登记人脸人物" : "创建声音人物"}</button></div><div className="entity-library"><div className="section-head"><div><span className="panel-label">IDENTITY LIBRARY</span><h2>人物库</h2></div><span>{entities.length} entities</span></div><div className="entity-grid">{entities.map(entity => <article key={entity.id}>{entity.reference_path ? <img src={`/api/entities/${entity.id}/reference`} /> : <div className="voice-only-avatar">◉</div>}<div><b>{entity.name}</b><small>{entity.reference_path ? "人脸" : "无参考脸"} · {entity.voice_sample_count || 0} 条声音</small><div className="asset-actions"><button className="outline" onClick={() => rename(entity)}>重命名</button><button className="outline danger" onClick={() => remove(entity)}>删除</button></div></div></article>)}{!entities.length && <div className="empty-list">还没有登记人物</div>}</div></div></div><FacesPage videos={videos} entities={entities} refreshEntities={refresh} setNotice={setNotice} /><SpeakersPage videos={videos} setNotice={setNotice} /></div>;
 }
 
 function Overview({ videos, jobs, entities, setPage }: { videos: Video[]; jobs: Job[]; entities: Entity[]; setPage: (page: Page) => void }) {
