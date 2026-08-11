@@ -79,6 +79,14 @@ CREATE TABLE IF NOT EXISTS speaker_identity_bindings (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(video_id, track_id)
 );
+CREATE TABLE IF NOT EXISTS face_identity_bindings (
+  video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  asset_version TEXT NOT NULL,
+  group_idx INTEGER NOT NULL,
+  entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(video_id, asset_version, group_idx)
+);
 CREATE TABLE IF NOT EXISTS voice_samples (
   id TEXT PRIMARY KEY,
   entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
@@ -575,6 +583,7 @@ class Catalog:
         # dependent mutable records explicitly.
         with self.connect() as connection:
             connection.execute("DELETE FROM speaker_identity_bindings WHERE entity_id=?", (entity_id,))
+            connection.execute("DELETE FROM face_identity_bindings WHERE entity_id=?", (entity_id,))
             connection.execute("DELETE FROM voice_samples WHERE entity_id=?", (entity_id,))
             cursor = connection.execute("DELETE FROM entities WHERE id=?", (entity_id,))
             return cursor.rowcount > 0
@@ -632,6 +641,27 @@ class Catalog:
                 """INSERT INTO speaker_identity_bindings(video_id,track_id,entity_id) VALUES(?,?,?)
                    ON CONFLICT(video_id,track_id) DO UPDATE SET entity_id=excluded.entity_id""",
                 (video_id, track_id, entity_id),
+            )
+
+    def face_identity_bindings(self, video_id: str, asset_version: str) -> dict[int, dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT b.group_idx,b.entity_id,e.name AS entity_name
+                   FROM face_identity_bindings b JOIN entities e ON e.id=b.entity_id
+                   WHERE b.video_id=? AND b.asset_version=?""",
+                (video_id, asset_version),
+            ).fetchall()
+        return {int(row["group_idx"]): dict(row) for row in rows}
+
+    def bind_face_identity(
+        self, video_id: str, asset_version: str, group_idx: int, entity_id: str
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO face_identity_bindings(video_id,asset_version,group_idx,entity_id)
+                   VALUES(?,?,?,?) ON CONFLICT(video_id,asset_version,group_idx)
+                   DO UPDATE SET entity_id=excluded.entity_id""",
+                (video_id, asset_version, group_idx, entity_id),
             )
 
     def create_voice_sample(self, record: dict) -> dict:

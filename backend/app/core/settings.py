@@ -80,6 +80,7 @@ class Settings(BaseSettings):
 
     face_model: str = "buffalo_l"
     face_sample_fps: float = 2.0
+    face_gallery_cosine_threshold: float = 0.52
     face_provider: str = "cpu"
     # ONNX Runtime otherwise creates one intra-op thread per physical CPU core
     # for every InsightFace session. On the shared Ascend host that means

@@ -233,9 +233,12 @@ def test_delete_video_calls_all_collections():
         cli._ready = True
         counts = cli.delete_video("some_video_id")
 
-    expected_collections = set(_COLLECTION_CONFIGS.keys())
+    expected_collections = {
+        name for name, config in _COLLECTION_CONFIGS.items()
+        if config.get("video_scoped", True)
+    }
     assert set(counts.keys()) == expected_collections, \
-        "delete_video must target all collections"
+        "delete_video must target every video-scoped collection"
 
 
 # ---------------------------------------------------------------------------

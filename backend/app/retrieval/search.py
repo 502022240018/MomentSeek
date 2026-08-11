@@ -1031,6 +1031,20 @@ class SearchEngine:
         if not text:
             return None
         entity = self.catalog.find_entity_in_text(text)
+        if entity:
+            try:
+                from app.vector_store.milvus.milvus_client import get_milvus_client
+
+                entity_id = str(entity["id"]).replace("\\", "\\\\").replace('"', '\\"')
+                rows = get_milvus_client().collection("entity_face_samples").query(
+                    expr=f'entity_id == "{entity_id}"', output_fields=["embedding"], limit=1024
+                )
+                if rows:
+                    vectors = np.asarray([row["embedding"] for row in rows], dtype=np.float32)
+                    prototype = np.mean(vectors, axis=0)
+                    return prototype / max(float(np.linalg.norm(prototype)), 1e-12)
+            except Exception:
+                logger.warning("Milvus entity face sample lookup failed; trying legacy reference", exc_info=True)
         if entity and entity.get("embedding_path") and Path(entity["embedding_path"]).exists():
             return np.load(entity["embedding_path"])["embedding"]
         return None

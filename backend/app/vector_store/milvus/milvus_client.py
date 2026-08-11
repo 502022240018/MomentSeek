@@ -17,6 +17,8 @@ from app.core.settings import get_settings
 from .milvus_schema import (
     create_asr_schema,
     create_face_schema,
+    create_face_group_schema,
+    create_entity_face_sample_schema,
     create_ocr_schema,
     create_speaker_schema,
     create_visual_schema,
@@ -81,6 +83,12 @@ _STATIC_INDEX_CONFIGS: dict[str, dict] = {
         "index_type": "IVF_FLAT",
         "metric_type": "L2",
         "params": {"nlist": 1024},
+    },
+    "face_groups": {
+        "index_type": "IVF_FLAT", "metric_type": "L2", "params": {"nlist": 256},
+    },
+    "entity_face_samples": {
+        "index_type": "IVF_FLAT", "metric_type": "L2", "params": {"nlist": 256},
     },
     "speaker_embeddings": {
         # Migrated HNSW → DISKANN for 千万级 scale (disk-resident vectors +
@@ -169,6 +177,17 @@ _COLLECTION_CONFIGS: dict[str, dict] = {
     "face_embeddings": {
         "schema": create_face_schema,
         "index": _STATIC_INDEX_CONFIGS["face_embeddings"],
+        "video_scoped": True,
+    },
+    "face_groups": {
+        "schema": create_face_group_schema,
+        "index": _STATIC_INDEX_CONFIGS["face_groups"],
+        "video_scoped": True,
+    },
+    "entity_face_samples": {
+        "schema": create_entity_face_sample_schema,
+        "index": _STATIC_INDEX_CONFIGS["entity_face_samples"],
+        "video_scoped": False,
     },
     "speaker_embeddings": {
         "schema": create_speaker_schema,
@@ -406,7 +425,9 @@ class MilvusClient:
         """
         counts: dict[str, int] = {}
         expr = f'video_id == "{video_id}"'
-        for name in _COLLECTION_CONFIGS:
+        for name, config in _COLLECTION_CONFIGS.items():
+            if not config.get("video_scoped", True):
+                continue
             col = Collection(name)
             try:
                 result = col.delete(expr)
@@ -425,7 +446,9 @@ class MilvusClient:
         """
         counts: dict[str, int] = {}
         expr = f'video_id == "{video_id}" and asset_version == "{asset_version}"'
-        for name in _COLLECTION_CONFIGS:
+        for name, config in _COLLECTION_CONFIGS.items():
+            if not config.get("video_scoped", True):
+                continue
             col = Collection(name)
             try:
                 result = col.delete(expr)
@@ -474,6 +497,10 @@ class MilvusClient:
                 "delete_video_modality video=%s modality=%s deleted=%d",
                 video_id, modality, count,
             )
+            if modality == "face" and utility.has_collection("face_groups"):
+                groups = Collection("face_groups")
+                groups.delete(expr)
+                groups.flush()
             return count
         except Exception as exc:
             logger.warning(
@@ -496,6 +523,10 @@ class MilvusClient:
             )
             result = col.delete(expr)
             col.flush()
+            if modality == "face" and utility.has_collection("face_groups"):
+                groups = Collection("face_groups")
+                groups.delete(expr)
+                groups.flush()
             return int(getattr(result, "delete_count", 0))
         except Exception as exc:
             logger.warning(

@@ -32,6 +32,7 @@ from .milvus_schema import (
     MODEL_VERSIONS,
     asr_pk,
     face_pk,
+    face_group_pk,
     ocr_pk,
     speaker_pk,
     truncate_text_for_milvus,
@@ -466,6 +467,14 @@ class FaceMilvusIndexer:
         *,
         embeddings: np.ndarray,
         track_times_ms: np.ndarray,
+        group_embeddings: np.ndarray | None = None,
+        group_track_indices: np.ndarray | None = None,
+        group_times_ms: np.ndarray | None = None,
+        group_bboxes: np.ndarray | None = None,
+        group_qualities: np.ndarray | None = None,
+        group_durations_ms: np.ndarray | None = None,
+        group_occurrence_counts: np.ndarray | None = None,
+        group_importance_scores: np.ndarray | None = None,
     ) -> int:
         """P2 direct path: build rows from in-memory arrays and upsert."""
         emb_arr   = np.asarray(embeddings, dtype=np.float32)
@@ -489,7 +498,43 @@ class FaceMilvusIndexer:
             }
             for idx in range(len(emb_arr))
         ]
-        return _upsert_batched(col, rows, "face")
+        track_count = _upsert_batched(col, rows, "face")
+
+        group_vectors = np.asarray(group_embeddings, dtype=np.float32) if group_embeddings is not None else np.empty((0, 512), dtype=np.float32)
+        if len(group_vectors):
+            track_indices = np.asarray(group_track_indices, dtype=np.int64)
+            group_times = np.asarray(group_times_ms, dtype=np.int64)
+            bboxes = np.asarray(group_bboxes, dtype=np.float32)
+            qualities = np.asarray(group_qualities, dtype=np.float32)
+            durations = np.asarray(group_durations_ms, dtype=np.int64)
+            occurrences = np.asarray(group_occurrence_counts, dtype=np.int64)
+            importance = np.asarray(group_importance_scores, dtype=np.float32)
+            group_rows = []
+            for idx in range(len(group_vectors)):
+                group_rows.append({
+                    "pk": face_group_pk(ctx.video_id, ctx.asset_version, idx, model_ver),
+                    "video_id": ctx.video_id,
+                    "asset_version": ctx.asset_version,
+                    "model_version": model_ver,
+                    "group_idx": idx,
+                    "representative_track_idx": int(track_indices[idx]),
+                    "start_ms": int(group_times[idx, 0]),
+                    "end_ms": int(group_times[idx, 1]),
+                    "best_ms": int(group_times[idx, 2]),
+                    "bbox_x1": float(bboxes[idx, 0]),
+                    "bbox_y1": float(bboxes[idx, 1]),
+                    "bbox_x2": float(bboxes[idx, 2]),
+                    "bbox_y2": float(bboxes[idx, 3]),
+                    "representative_quality": float(qualities[idx]),
+                    "duration_ms": int(durations[idx]),
+                    "occurrence_count": int(occurrences[idx]),
+                    "importance_score": float(importance[idx]),
+                    "embedding": group_vectors[idx].tolist(),
+                })
+            group_col = ctx.client.collection("face_groups")
+            _upsert_batched(group_col, group_rows, "face")
+            group_col.flush()
+        return track_count
 
     def upsert_from_npz(self, ctx: MilvusWriteContext, npz_path: str | Path) -> int:
         """Legacy / recovery path: load NPZ and delegate to upsert_from_memory."""
