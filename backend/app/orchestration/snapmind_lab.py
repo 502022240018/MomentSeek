@@ -753,7 +753,22 @@ class SnapMindPlannerLab:
             )
         trace: dict[str, Any] = {"status": "fallback", "planner": "heuristic-v1"}
         plan_set = fallback
-        if self.settings.orchestration_enabled:
+        entity_name = str((matched_entity or {}).get("name") or "").strip()
+        deterministic_identity = bool(
+            entity_name
+            and self._identity_residual_query(fallback, query, entity_name)
+            and "face" in set(available)
+            and bool(set(available) - {"face"})
+        )
+        if deterministic_identity:
+            trace = {
+                "status": "ok",
+                "planner": "registered-identity-cascade-v1",
+                "model_call_skipped": True,
+                "reason": "registered_compound_identity_has_validated_plan_skeleton",
+                "elapsed_seconds": 0.0,
+            }
+        elif self.settings.orchestration_enabled:
             try:
                 _resolved_name, profile = self.orchestrator._profile(profile_name)
                 if profile.planner is None:
