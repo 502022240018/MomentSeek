@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from app.orchestration.retrieval_orchestration import OrchestrationError
@@ -176,6 +177,104 @@ def test_support_top_k_does_not_prune_primary_pool():
 
     assert outcome["trace"][0]["output_candidate_count"] == 2
     assert outcome["trace"][1]["output_candidate_count"] == 2
+
+
+def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnostic(tmp_path):
+    class WindowFaceSearchEngine(FakeSearchEngine):
+        def __init__(self):
+            self.global_face_calls = 0
+
+        def search(self, query, image, modalities, *args):
+            if modalities[0] == "face":
+                self.global_face_calls += 1
+                raise AssertionError("face support must not use global recall")
+            return super().search(query, image, modalities, *args)
+
+        @staticmethod
+        def _resolve_face_query(_text, _image):
+            return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    face_dir = tmp_path / "video-1"
+    face_dir.mkdir()
+    np.savez(
+        face_dir / "face.npz",
+        embeddings=np.asarray(
+            [
+                [0.8, 0.6],
+                [0.25, np.sqrt(1.0 - 0.25**2)],
+            ],
+            dtype=np.float32,
+        ),
+        track_times_ms=np.asarray(
+            [[10_000, 13_000, 11_000], [30_000, 33_000, 31_000]],
+            dtype=np.int32,
+        ),
+    )
+    orchestrator = FakeOrchestrator()
+    orchestrator.settings.index_dir = tmp_path
+    orchestrator.search_engine = WindowFaceSearchEngine()
+    lab = SnapMindPlannerLab(orchestrator)
+    face_support = _step("s2", "face.search").model_copy(update={
+        "role": "support",
+        "depends_on": ["s1"],
+        "query": "王俊凯",
+        "top_k": 2,
+        "parameters": {"identity_threshold": 0.35, "ambiguous_threshold": 0.20},
+    })
+    plan = CandidatePlan(
+        plan_id="balanced",
+        label="Balanced",
+        description="test",
+        estimated_cost="medium",
+        fusion="combsum",
+        result_limit=10,
+        early_stop_threshold=1,
+        steps=[_step("s1", "visual.search"), face_support],
+    )
+
+    outcome = lab.execute("王俊凯吃包子特写", None, plan, None)
+
+    assert orchestrator.search_engine.global_face_calls == 0
+    confirmed = next(item for item in outcome["results"] if item["start_time"] == 10)
+    ambiguous = next(item for item in outcome["results"] if item["start_time"] == 30)
+    assert confirmed["planner_evidence"]["support_source_count"] == 1
+    assert confirmed["modalities"] == ["face", "visual"]
+    assert ambiguous["planner_evidence"]["support_source_count"] == 0
+    assert ambiguous["modalities"] == ["visual"]
+    tool_trace = outcome["trace"][1]["tool_trace"]
+    assert tool_trace["strategy"] == "candidate_window_face_verification"
+    assert tool_trace["confirmed_count"] == 1
+    assert tool_trace["ambiguous_count"] == 1
+    assert tool_trace["ambiguous_matches"][0]["cosine"] == pytest.approx(0.25)
+
+
+def test_face_primary_keeps_global_recall_behavior():
+    class GlobalFaceSearchEngine(FakeSearchEngine):
+        def __init__(self):
+            self.global_face_calls = 0
+
+        def search(self, _query, _image, modalities, *_args):
+            if modalities[0] == "face":
+                self.global_face_calls += 1
+                return [_result("face", 40, 0.9)]
+            return super().search(_query, _image, modalities, *_args)
+
+    orchestrator = FakeOrchestrator()
+    orchestrator.search_engine = GlobalFaceSearchEngine()
+    lab = SnapMindPlannerLab(orchestrator)
+    face_primary = _step("s1", "face.search").model_copy(update={"role": "primary"})
+    plan = CandidatePlan(
+        plan_id="fast",
+        label="Fast",
+        description="test",
+        estimated_cost="low",
+        steps=[face_primary],
+    )
+
+    outcome = lab.execute("王俊凯", None, plan, None)
+
+    assert orchestrator.search_engine.global_face_calls == 1
+    assert outcome["results"][0]["start_time"] == 40
 
 
 def test_failed_primary_triggers_explicit_fallback(monkeypatch):
