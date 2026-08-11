@@ -50,9 +50,11 @@ from .milvus_search_visual_v2 import milvus_visual_candidates_ann
 logger = logging.getLogger(__name__)
 
 
-# Milvus ANN search params (used only for face / speaker).
+# Milvus ANN search params. face and speaker both use DISKANN now; _HNSW_EF is
+# retained only for the currently-unreachable HNSW branch in _ann_search (kept
+# for a possible future modality that indexes with HNSW). IVF_FLAT is no longer
+# used by any modality, so its nprobe constant and branch were removed.
 _HNSW_EF    = 128
-_IVF_NPROBE = 64
 
 # Per-modality metric config — static mapping, must stay in sync with
 # _COLLECTION_CONFIGS in milvus_client.py.
@@ -60,7 +62,7 @@ _MODALITY_METRIC: dict[str, str] = {
     "visual":  "COSINE",
     "asr":     "IP",
     "ocr":     "IP",
-    "face":    "L2",
+    "face":    "COSINE",   # migrated L2 → COSINE (unit vectors) with DiskANN
     "speaker": "COSINE",
 }
 
@@ -68,7 +70,7 @@ _MODALITY_METRIC: dict[str, str] = {
 _STATIC_INDEX_TYPES: dict[str, str] = {
     "asr":     "DISKANN",
     "ocr":     "DISKANN",
-    "face":    "IVF_FLAT",
+    "face":    "DISKANN",   # migrated IVF_FLAT → DISKANN (COSINE) for 千万级 scale
     "speaker": "DISKANN",   # migrated HNSW → DISKANN (COSINE) for 千万级 scale
 }
 
@@ -116,7 +118,7 @@ class MilvusServiceError(RuntimeError):
 # Index-type fail-fast verification (face / speaker share _ann_search)
 # ---------------------------------------------------------------------------
 
-# Modalities already verified this process. Keyed by modality so face(IVF_FLAT)
+# Modalities already verified this process. Keyed by modality so face(DISKANN)
 # and speaker(DISKANN) are checked against their own expected type — never a
 # shared assumption that could mis-judge one of them.
 _verified_index_modalities: set[str] = set()
@@ -130,7 +132,7 @@ def _reset_index_verification() -> None:
 
 
 def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
-    """Fail-fast if the live index type has drifted from the configured one.
+    """Fail-fast if the live ANN index configuration has drifted.
 
     A HNSW→DISKANN config change does NOT rebuild an existing collection
     (_init_collections only load()s it), so a stale collection would silently
@@ -138,18 +140,18 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
     Cached per-modality; only issues an RPC on the first search of each modality.
 
     Scope note: both ANN modalities that reach _ann_search are verified — speaker
-    (expects DISKANN) and face (expects IVF_FLAT). Each is checked against its own
-    configured type, so face is never judged against speaker's DISKANN. face
-    picked up this fail-fast alongside the speaker DiskANN migration; it is a
-    safety net (IVF_FLAT config matches IVF_FLAT collection → passes) rather than
-    a behaviour change for correctly-built collections.
+    (expects DISKANN) and face (expects DISKANN, migrated from IVF_FLAT). Each is
+    checked against its own configured type. A stale IVF_FLAT face collection that
+    predates the migration is caught here (config DISKANN != collection IVF_FLAT →
+    fail-fast), forcing a rebuild before serving instead of silently mis-searching.
 
     Transient vs structural failure: a genuine RPC/timeout error during
     introspection soft-passes (does not block search) but is NOT cached, so the
     next search retries and drift detection is not permanently disabled. Only a
     structural limitation — a lightweight client/collection that cannot introspect
     at all (AttributeError/TypeError), or a missing/non-str index type — is cached
-    to avoid re-attempting (and log-spamming) on every search.
+    to avoid re-attempting (and log-spamming) on every search. A real index must
+    match both its configured index type and metric type.
     """
     if modality in _verified_index_modalities:
         return
@@ -157,6 +159,7 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
         if modality in _verified_index_modalities:
             return
         expected = get_modality_index_type(modality)
+        expected_metric = _MODALITY_METRIC[modality]
         # col.index() (the RPC) is intentionally inside the lock so that
         # concurrent searches on first startup do not fan out duplicate
         # introspection RPCs. The lock is held for one network round-trip
@@ -171,7 +174,9 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
                 )
                 _verified_index_modalities.add(modality)
                 return
-            actual = index_info.params.get("index_type", "UNKNOWN")
+            index_params = index_info.params or {}
+            actual = index_params.get("index_type", "UNKNOWN")
+            actual_metric = index_params.get("metric_type", "UNKNOWN")
         except MilvusServiceError:
             raise
         except (AttributeError, TypeError) as exc:
@@ -206,7 +211,18 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
                 f"{expected} but collection has {actual}. Rebuild the "
                 f"{modality} collection with the new index config before serving."
             )
-        logger.debug("%s index type verified: %s", modality, actual)
+        if actual_metric != expected_metric:
+            raise MilvusServiceError(
+                f"Metric type mismatch for modality={modality!r}: config expects "
+                f"{expected_metric} but collection has {actual_metric}. Rebuild the "
+                f"{modality} vector index with the new metric before serving."
+            )
+        logger.debug(
+            "%s ANN index verified: index_type=%s metric_type=%s",
+            modality,
+            actual,
+            actual_metric,
+        )
         _verified_index_modalities.add(modality)
 
 
@@ -334,14 +350,16 @@ def _diskann_search_list_for(modality: str) -> int:
     """Return the configured DiskANN search_list for a modality.
 
     Keyed per modality so the DISKANN branch of _ann_search never silently
-    inherits another modality's tuning. Only speaker currently reaches this
-    branch (face=IVF_FLAT; visual's DiskANN path lives in
+    inherits another modality's tuning. Both face and speaker reach this branch
+    (both migrated to DISKANN; visual's DiskANN path lives in
     milvus_search_visual_v2). A future DISKANN modality must add its own entry
-    here rather than fall through to speaker's value.
+    here rather than fall through to another modality's value.
     """
     settings = get_settings()
     if modality == "speaker":
         return settings.speaker_diskann_search_list
+    if modality == "face":
+        return settings.face_diskann_search_list
     raise MilvusServiceError(
         f"_ann_search has no DiskANN search_list configured for modality={modality!r}"
     )
@@ -370,17 +388,15 @@ def _ann_search(
         # generic branch cannot misapply speaker's tuning to another modality.
         search_list = max(limit, _diskann_search_list_for(modality))
         sp = {"metric_type": metric, "params": {"search_list": search_list}}
-    elif index_type == "IVF_FLAT":
-        sp = {"metric_type": metric, "params": {"nprobe": _IVF_NPROBE}}
     elif index_type == "HNSW":
-        # Currently unreachable: face=IVF_FLAT, speaker=DISKANN, and visual's
+        # Currently unreachable: face and speaker are both DISKANN, and visual's
         # HNSW path lives in milvus_search_visual_v2 (not via _ann_search).
         # Retained for a possible future modality that indexes with HNSW.
         sp = {"metric_type": metric, "params": {"ef": _HNSW_EF}}
     else:
         raise MilvusServiceError(
             f"_ann_search does not support index_type={index_type!r} "
-            f"for modality={modality!r}; only DISKANN, IVF_FLAT and HNSW are supported."
+            f"for modality={modality!r}; only DISKANN and HNSW are supported."
         )
     try:
         span = profiler.span("milvus_rpc", modality) if profiler else nullcontext()
@@ -831,47 +847,45 @@ def milvus_face_candidates(
     query: np.ndarray,
     asset_version: str,
     limit: int,
-    threshold: float = 0.35,
+    threshold: float | None = None,
     profiler: RetrievalProfiler | None = None,
 ) -> list[Candidate]:
-    """Face track recall: ANN candidate expansion → exact cosine re-score → threshold.
+    """Face track recall: single-phase ANN with trusted COSINE distance.
 
-    Two-phase approach:
-    1. ANN search with expanded limit (limit * 2) to compensate for recall loss
-       from approximate indexing.
-    2. Retrieve embedding vectors alongside metadata; recompute exact cosine as
-       dot(query_norm, track_norm) rather than trusting the ANN distance value.
-       This eliminates floating-point approximation errors introduced by
-       IVF_FLAT quantisation and L2↔cosine conversion.
-    3. Apply the identity threshold on the exact cosine; sort and truncate.
+    Face embeddings are unit-normalised before write (faces.py), so under a
+    COSINE metric Milvus returns ``_distance`` that IS the exact cosine
+    similarity within float32 precision. DiskANN approximation only affects
+    *which* neighbours are returned, not the distance of a returned neighbour.
+    The former two-phase re-score (pull ``embedding`` back + L2→cosine formula +
+    Python ``np.dot``) was therefore pure overhead and has been removed
+    (Milvus_optimization_plan.md 方案3).
 
-    Face uses L2 metric on unit vectors.  The exact cosine is simply the dot
-    product of two unit vectors — no conversion formula needed.
+    threshold=None resolves to settings.face_identity_threshold (default 0.35,
+    ArcFace buffalo_l same-identity cutoff). It only drives the ``above_threshold``
+    display/decision flag; the cross-modal fusion score is ``face_confidence(cosine)``.
     """
+    settings = get_settings()
+    if threshold is None:
+        threshold = settings.face_identity_threshold
     query_norm = normalize(np.asarray(query, dtype=np.float32))
-    # Expand recall to guard against ANN miss-rate at the threshold boundary.
-    ann_limit = min(limit * 2, 16_384)
+    # Reranking removed → wide recall no longer needed. multiplier defaults to 1;
+    # search_list >= ann_limit is enforced in _ann_search's DISKANN branch.
+    ann_limit = min(limit * settings.face_recall_multiplier, 16_384)
     hits = _ann_search(
         client, "face", video_id, asset_version, query_norm.tolist(),
         ann_limit,
-        ["track_idx", "start_ms", "end_ms", "best_ms", "embedding"],
+        ["track_idx", "start_ms", "end_ms", "best_ms"],
         profiler,
     )
     scoring_started = time.perf_counter()
-    scored: list[tuple[float, dict]] = []
-    for hit in hits:
-        raw_emb = hit.get("embedding")
-        if raw_emb is None:
-            # Milvus reports squared L2 distance.  For unit vectors:
-            # squared_l2 = 2 - 2*cosine.
-            squared_l2 = float(hit["_distance"])
-            cosine = max(-1.0, min(1.0, 1.0 - squared_l2 / 2.0))
-        else:
-            track_vec = normalize(np.asarray(raw_emb, dtype=np.float32))
-            cosine = float(np.dot(query_norm, track_vec))
-        scored.append((cosine, hit))
-
-    # Sort by exact cosine descending, then truncate to requested limit.
+    # COSINE metric on unit vectors: _distance is the exact cosine similarity.
+    # Real Milvus ANN returns hits sorted by descending similarity; the explicit
+    # sort below enforces that contract regardless of mock order in tests, and is
+    # O(n) on an already-sorted production result. hits[:limit] drops any surplus
+    # when multiplier > 1; with multiplier=1 ann_limit==limit so it is a no-op.
+    scored: list[tuple[float, dict]] = [
+        (float(hit["_distance"]), hit) for hit in hits
+    ]
     scored.sort(key=lambda x: x[0], reverse=True)
     candidates: list[Candidate] = []
     for cosine, hit in scored[:limit]:

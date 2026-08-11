@@ -346,45 +346,6 @@ def _visual_candidates(
     return candidates
 
 
-def _face_candidates(data, query: np.ndarray, video_id: str, limit: int, threshold: float = 0.35) -> list[Candidate]:
-    if "embeddings" not in data.files or "track_times_ms" not in data.files:
-        raise ValueError("face v3 索引缺少必要数组，请重跑 face 索引")
-    embeddings = np.asarray(data["embeddings"], dtype=np.float32)
-    times = data["track_times_ms"].astype(np.int32)
-    if embeddings.ndim != 2 or times.shape != (len(embeddings), 3):
-        raise ValueError("face v3 索引数组长度不一致，请重跑 face 索引")
-    if not len(embeddings):
-        return []
-    scores = embeddings @ normalize(query)
-    candidates: list[Candidate] = []
-    for index in np.argsort(scores)[::-1]:
-        if len(candidates) >= limit:
-            break
-        index = int(index)
-        cosine = float(scores[index])
-        above = cosine >= threshold
-        confidence = face_confidence(cosine)
-        start_ms, end_ms, best_ms = [int(value) for value in times[index]]
-        detail = f"face cosine={cosine:.3f} · confidence={confidence * 100:.1f}%"
-        candidates.append(Candidate(
-            video_id=video_id,
-            start_time=_seconds(start_ms),
-            end_time=_seconds(end_ms),
-            score=confidence,
-            modality="face",
-            evidence=detail if above else detail + " · 低于阈值",
-            raw_score=cosine,
-            decision="absolute_hit" if above else "weak",
-            above_threshold=above,
-            best_time=_seconds(best_ms),
-            unit_type="track",
-            unit_id=index,
-            best_ms=best_ms,
-            features={"face_cosine": cosine},
-        ))
-    return candidates
-
-
 def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict, Path]:
     manifest, channel_manifest = require_channel_manifest(index_dir, str(video.get("name") or video["id"]), channel)
     file_name = str(channel_manifest.get("file") or "")
@@ -444,12 +405,78 @@ def _serialize_evidence(item: Candidate) -> dict:
     }
 
 _OCR_ONLY_MERGE_GAP_SECONDS = 0.35
-_OCR_MERGE_MIN_SCORE_RATIO = 0.90  # 收紧至80%，让高低分更明确分开
-_OCR_MERGE_MAX_SCORE_DROP = 0.10   # 减小至0.10，避免低分拖长高分片段
+_OCR_MERGE_MIN_SCORE_RATIO = 0.90  # 至少保留 90% 的最佳分数
+_OCR_MERGE_MAX_SCORE_DROP = 0.10   # 绝对分数差不超过 0.10
+
+# Face-only 合并的 cosine 相似度带宽。face track 是"同一人连续出现"的语义单元，
+# 时间相邻的两条 track 未必是同一个人。只有当两条 track 的 cosine（raw_score）
+# 落在同一带宽内时才合并，避免把目标人脸片段和非目标人脸片段拼成一个长片段
+# （否则显示分取组内最高分、evidence 却混入低分非目标项，导致分数/文字不符）。
+_FACE_MERGE_MAX_COSINE_DROP = 0.15
+
+
+def _face_scores_compatible(group: list[Candidate], candidate: Candidate) -> bool:
+    """Face-only 合并时，避免不同人脸（cosine 差距大）被拼进同一片段。
+
+    规则：
+    - candidate 必须是 face 模态；
+    - group 里必须已有 face 命中；
+    - candidate 的 cosine（raw_score）不能比 group 内最佳 face cosine 低太多，
+      也不能高太多——对称带宽，保证同组 track 属于同一相似度层级。
+
+    raw_score 缺失时（理论上 face 恒有）退化为仅按时间合并，返回 True。
+    组内无可用 cosine 时同样退化（对称处理，与 docstring 承诺一致）。
+    """
+    if candidate.modality != "face":
+        return False
+
+    # 检查组内是否有 face 命中
+    if not any(item.modality == "face" for item in group):
+        return False
+
+    group_cosines = [
+        float(item.raw_score)
+        for item in group
+        if item.modality == "face" and item.raw_score is not None
+    ]
+    # 组内无可用 cosine 或候选无 cosine → 退化为纯时间合并
+    if not group_cosines or candidate.raw_score is None:
+        return True
+
+    cand_cosine = float(candidate.raw_score)
+    best_cosine = max(group_cosines)
+    worst_cosine = min(group_cosines)
+    # 对称带宽：candidate 与组内最强/最弱 face 都不能相差超过阈值，
+    # 防止高分 track 被并入低分锚点组，或反之。
+    return (
+        cand_cosine >= best_cosine - _FACE_MERGE_MAX_COSINE_DROP
+        and cand_cosine <= worst_cosine + _FACE_MERGE_MAX_COSINE_DROP
+    )
+
+
+
+def _apply_global_threshold(candidates: list[Candidate], modality: str) -> None:
+    """对指定模态的候选应用全局动态阈值。
+
+    规则：
+    - 阈值 = max(0.10, 全局最高分 * 0.3)
+    - 低于阈值的候选标记 above_threshold=False 并在 evidence 添加 "· 低于阈值"
+    """
+    modality_candidates = [c for c in candidates if c.modality == modality]
+    if not modality_candidates:
+        return
+
+    global_top_score = max(float(c.score) for c in modality_candidates)
+    global_threshold = max(0.10, global_top_score * 0.3)
+
+    for candidate in modality_candidates:
+        candidate.above_threshold = float(candidate.score) >= global_threshold
+        if not candidate.above_threshold and " · 低于阈值" not in (candidate.evidence or ""):
+            candidate.evidence = (candidate.evidence or "") + " · 低于阈值"
+
 
 def _ocr_scores_compatible(group: list[Candidate], candidate: Candidate) -> bool:
-    """
-    OCR-only 合并时，避免高分命中被明显低分命中拖长。
+    """OCR-only 合并时，避免高分命中被明显低分命中拖长。
 
     规则：
     - candidate 必须是 OCR 模态；
@@ -457,6 +484,8 @@ def _ocr_scores_compatible(group: list[Candidate], candidate: Candidate) -> bool
     - candidate 分数不能比 group 里最佳 OCR 命中低太多。
 
     注意：不再检查 above_threshold，聚合只基于分数差异。
+
+    【已被 _groups_ocr_score_first 替代，保留以备将来独立 OCR 合并场景】
     """
     if candidate.modality != "ocr":
         return False
@@ -485,8 +514,7 @@ def _should_merge_ocr_only(
     group: list[Candidate],
     candidate: Candidate,
 ) -> bool:
-    """
-    OCR-only 结果使用更严格的帧级合并策略。
+    """OCR-only 结果使用更严格的帧级合并策略。
 
     只允许：
     - OCR 与 OCR 合并；
@@ -498,6 +526,8 @@ def _should_merge_ocr_only(
 
     不设置最大合并时长：
     如果同一段 OCR 文本持续稳定出现很久，它应该保留为一个连续命中片段。
+
+    【已被 _groups_ocr_score_first 替代，保留以备将来独立 OCR 合并场景】
     """
     if candidate.modality != "ocr":
         return False
@@ -506,11 +536,6 @@ def _should_merge_ocr_only(
 
     group_end = max(item.end_time for item in group)
 
-    # 只允许重叠或几乎直接相邻。
-    # 例如 frame_window_ms=800 且 1fps 时：
-    # 10.0s -> 9.6-10.4
-    # 11.0s -> 10.6-11.4
-    # gap=0.2，可以合并。
     gap = candidate.start_time - group_end
     if gap > _OCR_ONLY_MERGE_GAP_SECONDS:
         return False
@@ -521,14 +546,35 @@ def _should_merge_ocr_only(
     return True
 
 
+def _temporal_gap(group: list[Candidate], candidate: Candidate) -> float:
+    """Return the non-negative time gap between a group and a candidate."""
+    group_start = min(item.start_time for item in group)
+    group_end = max(item.end_time for item in group)
+    return max(
+        candidate.start_time - group_end,
+        group_start - candidate.end_time,
+        0.0,
+    )
+
+
 def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_duration: float) -> bool:
+    """判断候选是否应合并到组内。
+
+    通用规则：
+    - 同一视频
+    - 合并后总时长不超过 max_duration
+    - 按模态分支判断时间/分数兼容性
+
+    关键修复（2026-08-11）：
+    - 改用双向间隙判断（候选在组前/后都正确计算间隙），修复单向 `near` 导致的
+      "候选早于组也判为相邻"的问题。
+    """
     if group[0].video_id != candidate.video_id:
         return False
 
     group_modalities = {item.modality for item in group}
 
-    # OCR-only 使用更严格的帧级合并规则。
-    # 不再使用全局 merge_gap=2，避免弱命中拖长结果时间段。
+    # OCR-only 使用更严格的帧级合并规则（已死代码，保留以备将来）
     if candidate.modality == "ocr" and group_modalities == {"ocr"}:
         return _should_merge_ocr_only(group, candidate)
 
@@ -540,7 +586,18 @@ def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_
         return False
 
     overlaps = candidate.start_time < group_end and candidate.end_time > group_start
-    near = candidate.start_time <= group_end + gap
+
+    # 双向间隙判断：候选在组前（group_start - candidate.end_time）或
+    # 组后（candidate.start_time - group_end），取两者中的正值（无间隙时为0）
+    gap_between = _temporal_gap(group, candidate)
+    near = gap_between <= gap
+
+    # Face-only 合并须额外满足 cosine 带宽约束。face track 是"同一人连续出现"
+    # 的语义单元；仅凭时间相邻（gap≤2s）就合并，会把目标人脸和时间上恰好邻近的
+    # 非目标人脸拼成一个长片段，进而显示分取组内最高分、evidence 混入低分非目标项，
+    # 造成"分数 99% 但明细却是 cosine=-0.01 · 低于阈值"的不一致。
+    if candidate.modality == "face" and group_modalities == {"face"}:
+        return near and _face_scores_compatible(group, candidate)
 
     # Visual buckets are already the display granularity. Do not chain adjacent
     # visual-only hits into a full-video result; merge them only when another
@@ -578,6 +635,9 @@ def _groups_ocr_score_first(candidates: list[Candidate]) -> list[list[Candidate]
         # 按分数降序（用于选种子）
         score_sorted = sorted(video_candidates, key=lambda c: -float(c.score))
 
+        # 预建索引映射，避免 O(n²)
+        candidate_to_idx = {id(c): i for i, c in enumerate(time_sorted)}
+
         used_ids = set()  # 记录已聚合的候选
 
         for seed in score_sorted:
@@ -596,7 +656,7 @@ def _groups_ocr_score_first(candidates: list[Candidate]) -> list[list[Candidate]
                 seed_score - _OCR_MERGE_MAX_SCORE_DROP,
             )
 
-            seed_idx = time_sorted.index(seed)
+            seed_idx = candidate_to_idx[seed_id]
 
             # === 向左扩展（时间更早的帧）===
             for i in range(seed_idx - 1, -1, -1):
@@ -650,7 +710,18 @@ def _groups_ocr_score_first(candidates: list[Candidate]) -> list[list[Candidate]
 
 
 def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -> list[list[Candidate]]:
-    # OCR-only 候选使用新的分数优先算法
+    """将候选聚合为组。
+
+    算法：
+    1. OCR 使用分数优先聚合（_groups_ocr_score_first），从高分种子向两边扩展
+    2. 非 OCR 候选遍历所有现存组，选择时间间隔最小的可合并组
+    3. 最终按时间排序保证展示稳定
+
+    关键修复（2026-08-11）：
+    - 非 OCR 候选改为"遍历所有组择优"，修复混合模态下候选合并到错误 OCR 组的问题。
+      旧逻辑只比对 groups[-1]，但 OCR 组已按分数（非时间）顺序插入，导致时间匹配的
+      早期组被跳过。
+    """
     ocr_candidates = [c for c in candidates if c.modality == "ocr"]
     non_ocr_candidates = [c for c in candidates if c.modality != "ocr"]
 
@@ -658,7 +729,6 @@ def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -
 
     # OCR 使用分数优先聚合
     if ocr_candidates:
-        # 检查是否是纯 OCR 场景
         if not non_ocr_candidates:
             # 纯 OCR，直接使用新算法
             return _groups_ocr_score_first(ocr_candidates)
@@ -667,14 +737,21 @@ def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -
             ocr_groups = _groups_ocr_score_first(ocr_candidates)
             groups.extend(ocr_groups)
 
-    # 非 OCR 候选使用原有的时间优先算法
+    # 非 OCR 候选遍历所有组，优先并入时间上最近的组。
+    # 时间间隔相同时，min() 保留现有组顺序作为稳定 tie-breaker。
     for candidate in sorted(non_ocr_candidates, key=lambda item: (item.video_id, item.start_time, item.end_time)):
-        if groups and _should_merge(groups[-1], candidate, gap, max_duration):
-            groups[-1].append(candidate)
-            continue
-        groups.append([candidate])
+        target_group = min(
+            (g for g in groups if _should_merge(g, candidate, gap, max_duration)),
+            key=lambda g: _temporal_gap(g, candidate),
+            default=None,
+        )
+        if target_group is not None:
+            target_group.append(candidate)
+        else:
+            groups.append([candidate])
 
-    return groups
+    # 按时间排序保证展示稳定（OCR 组按分数插入，非 OCR 合并后可能乱序）
+    return sorted(groups, key=lambda g: (g[0].video_id, min(item.start_time for item in g)))
 
 
 def _fuse_candidate_groups(
@@ -807,10 +884,14 @@ class SearchEngine:
         if self._face_encoder is None:
             from app.encoders.face import FaceEncoder
 
+            # Provider/device wired from settings (was hardcoded cpu/0), matching
+            # the index side (stage_executor.py) so query-side reference-image
+            # encoding can use the same NPU/GPU. face_provider defaults to "cpu",
+            # so behaviour is unchanged unless explicitly configured otherwise.
             self._face_encoder = FaceEncoder(
                 self.settings.face_model,
-                "cpu",
-                0,
+                self.settings.face_provider,
+                self.settings.npu_device_id,
                 str(self.settings.app_model_dir / "insightface"),
                 self.settings.face_ort_intra_op_threads,
                 self.settings.face_ort_inter_op_threads,
@@ -1074,35 +1155,6 @@ class SearchEngine:
             or self.settings.asr_semantic_model
         )
 
-    def _candidates_for_video(
-        self,
-        video: dict,
-        *,
-        text: str | None,
-        modalities: list[str],
-        limit: int,
-        visual_profile: str,
-        visual_queries: dict[str, np.ndarray],
-        face_query: np.ndarray | None,
-        channel_limits: dict[str, int],
-        semantic_queries: dict[str, np.ndarray | None],
-    ) -> list[Candidate]:
-        candidates = []
-        indexed = set(video.get("indexed_modalities") or [])
-        if "visual" in modalities and "visual" in indexed:
-            candidates.extend(self._visual_for_video(
-                video,
-                visual_profile,
-                channel_limits["visual"],
-                visual_queries,
-            ))
-        if "face" in modalities and face_query is not None and "face" in indexed:
-            candidates.extend(self._face_for_video(video, face_query, channel_limits["face"]))
-        # ASR now uses Milvus DiskANN + BM25 hybrid search exclusively
-        # (see milvus_asr_candidates_hybrid). The NPZ full-scan path has been
-        # removed; ASR candidates are produced only via _milvus_candidates_for_video.
-        return candidates
-
     def _milvus_candidates_for_video(
         self,
         video: dict,
@@ -1165,7 +1217,7 @@ class SearchEngine:
                     channel_manifest, str(video.get("name") or video_id), "face"
                 ),
                 channel_limits["face"],
-                0.35,
+                None,  # threshold=None → settings.face_identity_threshold
                 profiler,
             ))
         if "asr" in modalities and text and "asr" in indexed:
@@ -1437,31 +1489,9 @@ class SearchEngine:
             prefetched_rows.clear()
             modality_rows.clear()
 
-        # Apply global dynamic threshold to OCR candidates across all videos
-        ocr_candidates = [c for c in candidates if c.modality == "ocr"]
-        if ocr_candidates:
-            global_top_score = max(float(c.score) for c in ocr_candidates)
-            global_threshold = max(0.10, global_top_score * 0.3)  # At least 0.10, or 30% of global top score
-
-            for candidate in ocr_candidates:
-                candidate.above_threshold = float(candidate.score) >= global_threshold
-                # Update evidence text to include threshold marker if below threshold
-                if not candidate.above_threshold and " · 低于阈值" not in candidate.evidence:
-                    candidate.evidence += " · 低于阈值"
-
-        # Apply global dynamic threshold to ASR candidates across all videos.
-        # Hybrid scores (dense IP + unbounded BM25) are not in [0,1], so the
-        # threshold must be derived from the observed score distribution rather
-        # than hard-coded — mirrors the OCR block above.
-        asr_candidates = [c for c in candidates if c.modality == "asr"]
-        if asr_candidates:
-            global_top_score = max(float(c.score) for c in asr_candidates)
-            global_threshold = max(0.10, global_top_score * 0.3)  # At least 0.10, or 30% of global top score
-
-            for candidate in asr_candidates:
-                candidate.above_threshold = float(candidate.score) >= global_threshold
-                if not candidate.above_threshold and " · 低于阈值" not in candidate.evidence:
-                    candidate.evidence += " · 低于阈值"
+        # Apply global dynamic threshold to OCR and ASR candidates
+        _apply_global_threshold(candidates, "ocr")
+        _apply_global_threshold(candidates, "asr")
 
         fusion_span = (
             profiler.span("local_processing", "fusion")

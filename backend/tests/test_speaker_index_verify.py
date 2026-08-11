@@ -1,10 +1,12 @@
-"""Unit tests for the per-modality fail-fast index-type verification.
+"""Unit tests for the per-modality fail-fast ANN index verification.
 
 A HNSW→DISKANN config change does not rebuild an existing collection, so a stale
 collection would silently break DiskANN search. ``_verify_ann_index_type_once``
 surfaces that drift explicitly. These tests also guard the key correctness
-property: the check is keyed per modality, so face (IVF_FLAT) is never judged
-against speaker's expected DISKANN type.
+property: the check is keyed per modality. Both face and speaker now expect
+DISKANN (face migrated IVF_FLAT → DISKANN), and each is checked against its own
+configured type and metric; a stale IVF_FLAT/L2 face collection predating the
+migration is caught here rather than silently breaking search.
 """
 from __future__ import annotations
 
@@ -24,10 +26,16 @@ _VIDEO_ID = "verify-video"
 _ASSET_VERSION = "1"
 
 
-def _make_client(actual_index_type: str) -> tuple[MagicMock, MagicMock]:
+def _make_client(
+    actual_index_type: str,
+    actual_metric_type: str = "COSINE",
+) -> tuple[MagicMock, MagicMock]:
     collection = MagicMock()
     collection.search.return_value = [[]]
-    collection.index.return_value.params = {"index_type": actual_index_type}
+    collection.index.return_value.params = {
+        "index_type": actual_index_type,
+        "metric_type": actual_metric_type,
+    }
     client = MagicMock()
     client.collection_for.return_value = collection
     return client, collection
@@ -61,13 +69,35 @@ def test_speaker_diskann_collection_passes():
     collection.search.assert_called_once()
 
 
-def test_face_ivf_flat_not_judged_against_speaker_type():
-    """Face expects IVF_FLAT — verification must use face's own expected type,
-    not speaker's DISKANN. An IVF_FLAT face collection must pass cleanly."""
+def test_face_diskann_collection_passes():
+    """Face migrated IVF_FLAT → DISKANN; a matching DISKANN collection passes."""
     _reset_index_verification()
-    client, collection = _make_client("IVF_FLAT")
+    client, collection = _make_client("DISKANN")
 
     milvus_face_candidates(
         client, _VIDEO_ID, _unit_query(512), _ASSET_VERSION, limit=10
     )
     collection.search.assert_called_once()
+
+
+def test_face_stale_ivf_flat_collection_fails_fast():
+    """A stale IVF_FLAT face collection predating the DISKANN migration must
+    raise, so the drift is surfaced before serving instead of silently mis-searching."""
+    _reset_index_verification()
+    client, _ = _make_client("IVF_FLAT")
+
+    with pytest.raises(MilvusServiceError, match="Index type mismatch"):
+        milvus_face_candidates(
+            client, _VIDEO_ID, _unit_query(512), _ASSET_VERSION, limit=10
+        )
+
+
+def test_face_stale_l2_metric_fails_fast():
+    """DISKANN alone is insufficient; Face must also use COSINE."""
+    _reset_index_verification()
+    client, _ = _make_client("DISKANN", "L2")
+
+    with pytest.raises(MilvusServiceError, match="Metric type mismatch"):
+        milvus_face_candidates(
+            client, _VIDEO_ID, _unit_query(512), _ASSET_VERSION, limit=10
+        )

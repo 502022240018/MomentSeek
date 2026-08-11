@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     face_ort_intra_op_threads: int = 8
     face_ort_inter_op_threads: int = 1
 
+    # Face retrieval configuration (DiskANN + COSINE, no re-scoring).
+    # identity_threshold only drives the above_threshold/decision display flag;
+    # it does not gate cross-modal fusion (fusion uses score=confidence).
+    face_identity_threshold: float = 0.35   # ArcFace (buffalo_l) same-person cutoff
+    face_recall_multiplier: int = 1         # ann_limit = limit * this (re-score removed → 1)
+    face_diskann_search_list: int = 128     # DiskANN search_list (dynamically raised to >= ann_limit)
+
     asr_engine: str = "auto"
     # Used by ASR_ENGINE=whisper or ASR_ENGINE=faster-whisper. In auto mode this
     # is also the lightweight language probe model and the non-Chinese ASR path.
@@ -246,6 +253,20 @@ class Settings(BaseSettings):
     def validate_speaker_identity_threshold(cls, value: float) -> float:
         if not -1.0 <= value <= 1.0:
             raise ValueError("speaker_identity_threshold must be between -1.0 and 1.0")
+        return value
+
+    @field_validator("face_diskann_search_list", "face_recall_multiplier")
+    @classmethod
+    def validate_face_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Face retrieval parameters must be greater than 0")
+        return value
+
+    @field_validator("face_identity_threshold")
+    @classmethod
+    def validate_face_identity_threshold(cls, value: float) -> float:
+        if not -1.0 <= value <= 1.0:
+            raise ValueError("face_identity_threshold must be between -1.0 and 1.0")
         return value
 
     @field_validator("milvus_search_video_batch_size")
