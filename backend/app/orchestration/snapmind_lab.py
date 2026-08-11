@@ -477,6 +477,19 @@ class SnapMindPlannerLab:
                 step.depends_on = [item for item in step.depends_on if any(
                     accepted_step.step_id == item for accepted_step in accepted
                 )]
+                if step.role == "fallback":
+                    primary_ids = [
+                        accepted_step.step_id
+                        for accepted_step in accepted
+                        if accepted_step.role == "primary"
+                        and accepted_step.operation == "search"
+                    ]
+                    if step.fallback_for not in primary_ids:
+                        if not primary_ids:
+                            continue
+                        original_fallback_for = step.fallback_for
+                        step.fallback_for = primary_ids[-1]
+                        step.parameters["fallback_retargeted_from"] = original_fallback_for
                 accepted.append(step)
             if not accepted:
                 fallback = self.fallback_generator.generate(query, available_modalities, has_query_image)
