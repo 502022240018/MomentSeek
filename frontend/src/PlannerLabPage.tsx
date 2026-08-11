@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import {
   api, CandidatePlan, EvidenceRole, IdentityClarification, PlanSetResponse, PlannerExecution, PlanStep,
-  PlannerLabCapabilities, PlannerMode, SearchResult, Video,
+  Folder, PlannerLabCapabilities, PlannerMode, SearchResult, Video,
 } from "./api";
 
 function clock(seconds: number) {
@@ -51,8 +51,9 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-export function PlannerLabPage({ videos, capability, setNotice }: {
+export function PlannerLabPage({ videos, folders, capability, setNotice }: {
   videos: Video[];
+  folders: Folder[];
   capability: PlannerLabCapabilities;
   setNotice: (value: string) => void;
 }) {
@@ -61,6 +62,7 @@ export function PlannerLabPage({ videos, capability, setNotice }: {
   const [image, setImage] = useState<File>();
   const [mode, setMode] = useState<PlannerMode>("assist");
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
+  const [expandedFolderIds, setExpandedFolderIds] = useState<string[]>([]);
   const [scopeOpen, setScopeOpen] = useState(false);
   const [scopeSearch, setScopeSearch] = useState("");
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
@@ -81,7 +83,32 @@ export function PlannerLabPage({ videos, capability, setNotice }: {
   const nextStep = execution?.executed_steps ?? 0;
   const canEdit = mode === "assist";
   const scope = selectedVideoIds.length ? selectedVideoIds : undefined;
-  const filteredVideos = ready.filter(video => video.name.toLowerCase().includes(scopeSearch.toLowerCase()));
+  const normalizedScopeSearch = scopeSearch.trim().toLowerCase();
+  const scopeGroups = useMemo(() => {
+    const groups = folders.map(folder => ({
+      id: folder.id,
+      name: folder.name,
+      videos: ready.filter(video => folder.kind === "default"
+        ? !video.folder_ids.length
+        : video.folder_ids.includes(folder.id)),
+    }));
+    const covered = new Set(groups.flatMap(group => group.videos.map(video => video.id)));
+    const ungrouped = ready.filter(video => !covered.has(video.id));
+    if (ungrouped.length) groups.push({ id: "__ungrouped__", name: "未分类视频", videos: ungrouped });
+    return groups;
+  }, [folders, ready]);
+  const filteredScopeGroups = scopeGroups.map(group => {
+    const folderMatched = group.name.toLowerCase().includes(normalizedScopeSearch);
+    return {
+      ...group,
+      visibleVideos: folderMatched || !normalizedScopeSearch
+        ? group.videos
+        : group.videos.filter(video => video.name.toLowerCase().includes(normalizedScopeSearch)),
+    };
+  }).filter(group => !normalizedScopeSearch || group.visibleVideos.length);
+  const selectedFolderCount = scopeGroups.filter(group =>
+    group.videos.length > 0 && group.videos.every(video => selectedVideoIds.includes(video.id))
+  ).length;
   const toolMap = useMemo(
     () => Object.fromEntries(capability.capabilities.map(item => [item.tool_id, item])),
     [capability],
@@ -225,6 +252,15 @@ export function PlannerLabPage({ videos, capability, setNotice }: {
   const toggleVideo = (id: string) => setSelectedVideoIds(value =>
     value.includes(id) ? value.filter(item => item !== id) : [...value, id]
   );
+  const toggleFolder = (videoIds: string[]) => setSelectedVideoIds(value => {
+    const selected = new Set(value);
+    const allSelected = videoIds.length > 0 && videoIds.every(id => selected.has(id));
+    videoIds.forEach(id => allSelected ? selected.delete(id) : selected.add(id));
+    return [...selected];
+  });
+  const toggleFolderExpanded = (folderId: string) => setExpandedFolderIds(value =>
+    value.includes(folderId) ? value.filter(id => id !== folderId) : [...value, folderId]
+  );
 
   return <div className="planner-lab-v2">
     <section className="lab-hero">
@@ -251,12 +287,25 @@ export function PlannerLabPage({ videos, capability, setNotice }: {
           <textarea value={query} onChange={event => setQuery(event.target.value)} placeholder="例如：找到厨师一边做菜，一边和客人讨论菜品的片段…" />
           <div className="query-canvas-footer">
             <label className={`image-attach ${image ? "attached" : ""}`}><input type="file" accept="image/*" onChange={event => setImage(event.target.files?.[0])} /><span>{image ? "✓" : "+"}</span><div><b>{image ? image.name : "添加参考图"}</b><small>{image ? "点击更换图片" : "人物、物体或视觉风格"}</small></div></label>
-            <button type="button" className="scope-trigger" onClick={() => setScopeOpen(value => !value)}><span>▣</span><div><b>{selectedVideoIds.length ? `${selectedVideoIds.length} 个视频` : "全部可检索视频"}</b><small>{ready.length} 个视频已就绪</small></div><em>{scopeOpen ? "⌃" : "⌄"}</em></button>
+            <button type="button" className="scope-trigger" onClick={() => setScopeOpen(value => !value)}><span>▣</span><div><b>{selectedVideoIds.length ? `${selectedVideoIds.length} 个视频` : "全部可检索视频"}</b><small>{selectedVideoIds.length ? `${selectedFolderCount} 个完整文件夹 · 共 ${ready.length} 个视频可选` : `${scopeGroups.length} 个文件夹 · ${ready.length} 个视频已就绪`}</small></div><em>{scopeOpen ? "⌃" : "⌄"}</em></button>
           </div>
           {scopeOpen && <div className="scope-popover">
-            <div className="scope-search"><span>⌕</span><input value={scopeSearch} onChange={event => setScopeSearch(event.target.value)} placeholder="搜索视频名称" /><button type="button" onClick={() => setSelectedVideoIds([])}>选择全部</button></div>
-            <div className="scope-list">{filteredVideos.slice(0, 80).map(video => <label key={video.id} className={selectedVideoIds.includes(video.id) ? "selected" : ""}><input type="checkbox" checked={selectedVideoIds.includes(video.id)} onChange={() => toggleVideo(video.id)} /><span className="scope-check">✓</span><div><b>{video.name}</b><small>{clock(video.duration)} · {video.indexed_modalities.join(" / ")}</small></div></label>)}</div>
-            <div className="scope-footer"><span>{selectedVideoIds.length ? `已选择 ${selectedVideoIds.length} 个视频` : "未选择时检索全部视频"}</span><button type="button" onClick={() => setScopeOpen(false)}>完成</button></div>
+            <div className="scope-search"><span>⌕</span><input value={scopeSearch} onChange={event => setScopeSearch(event.target.value)} placeholder="搜索文件夹或视频名称" /><button type="button" onClick={() => setSelectedVideoIds([])}>检索全部</button></div>
+            <div className="scope-list scope-folder-list">{filteredScopeGroups.map(group => {
+              const groupVideoIds = group.videos.map(video => video.id);
+              const selectedCount = groupVideoIds.filter(id => selectedVideoIds.includes(id)).length;
+              const allSelected = groupVideoIds.length > 0 && selectedCount === groupVideoIds.length;
+              const partiallySelected = selectedCount > 0 && !allSelected;
+              const expanded = !!normalizedScopeSearch || expandedFolderIds.includes(group.id);
+              return <section className="scope-folder-group" key={group.id}>
+                <div className={`scope-folder-head ${allSelected ? "selected" : ""} ${partiallySelected ? "partial" : ""}`}>
+                  <button type="button" className="scope-folder-toggle" onClick={() => toggleFolderExpanded(group.id)} aria-expanded={expanded}><span>{expanded ? "⌄" : "›"}</span><i>□</i><div><b>{group.name}</b><small>{selectedCount ? `已选 ${selectedCount} / ${group.videos.length}` : `${group.videos.length} 个可检索视频`}</small></div></button>
+                  <button type="button" className="scope-folder-select" disabled={!groupVideoIds.length} onClick={() => toggleFolder(groupVideoIds)}><span>{allSelected ? "✓" : partiallySelected ? "−" : ""}</span>{allSelected ? "清空" : "全选"}</button>
+                </div>
+                {expanded && <div className="scope-folder-videos">{group.visibleVideos.length ? group.visibleVideos.map(video => <label key={video.id} className={selectedVideoIds.includes(video.id) ? "selected" : ""}><input type="checkbox" checked={selectedVideoIds.includes(video.id)} onChange={() => toggleVideo(video.id)} /><span className="scope-check">✓</span><div><b>{video.name}</b><small>{clock(video.duration)} · {video.indexed_modalities.join(" / ")}</small></div></label>) : <div className="scope-empty">该文件夹暂无可检索视频</div>}</div>}
+              </section>;
+            })}{!filteredScopeGroups.length && <div className="scope-empty">没有匹配的文件夹或视频</div>}</div>
+            <div className="scope-footer"><span>{selectedVideoIds.length ? `已选择 ${selectedVideoIds.length} 个视频 · ${selectedFolderCount} 个完整文件夹` : "未选择时检索全部视频"}</span><button type="button" onClick={() => setScopeOpen(false)}>完成</button></div>
           </div>}
         </div>
         <div className="query-examples"><span>试试这些</span>{examples.map(item => <button type="button" key={item} onClick={() => setQuery(item)}>{item}</button>)}</div>
