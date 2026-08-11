@@ -465,17 +465,6 @@ class SnapMindPlannerLab:
                 if step.role == "fallback" and not step.fallback_for:
                     continue
                 step.query = step.query.strip() or query
-                if matched_entity and step.tool_id == "visual.search":
-                    entity_name = str(matched_entity.get("name") or "").strip()
-                    if entity_name and entity_name in step.query:
-                        original_query = step.query
-                        visual_query = " ".join(
-                            original_query.replace(entity_name, " ").split()
-                        ).strip(" ,，、;；:：")
-                        if visual_query:
-                            step.query = visual_query
-                            step.parameters["original_query"] = original_query
-                            step.parameters["identity_removed_from_query"] = entity_name
                 step.depends_on = [item for item in step.depends_on if any(
                     accepted_step.step_id == item for accepted_step in accepted
                 )]
