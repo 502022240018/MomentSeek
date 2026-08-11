@@ -338,6 +338,7 @@ class MomentNode:
     verifier_contributions: dict[str, float] = field(default_factory=dict)
     support_caps: dict[str, float] = field(default_factory=dict)
     constraint_results: dict[str, bool] = field(default_factory=dict)
+    diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
     raw_scores: dict[str, float] = field(default_factory=dict)
     evidence: list[dict[str, Any]] = field(default_factory=list)
     primary_score: float = 0.0
@@ -1066,12 +1067,20 @@ class SnapMindPlannerLab:
                 if cosine < confirmed_threshold:
                     if cosine >= ambiguous_threshold:
                         trace["ambiguous_count"] += 1
+                        node.diagnostics[f"{step.step_id}:face"] = {
+                            **diagnostic,
+                            "status": "ambiguous",
+                        }
                         ambiguous.append(diagnostic)
                     else:
                         trace["rejected_count"] += 1
                     continue
 
                 trace["confirmed_count"] += 1
+                node.diagnostics[f"{step.step_id}:face"] = {
+                    **diagnostic,
+                    "status": "confirmed",
+                }
                 detail = (
                     f"[candidate_window] face cosine={cosine:.3f} · "
                     f"confidence={confidence * 100:.1f}% · confirmed"
@@ -1122,6 +1131,67 @@ class SnapMindPlannerLab:
     ) -> list[dict[str, Any]]:
         return [item for item in results if self._find_node(nodes, item) is not None]
 
+    @staticmethod
+    def _select_rerank_nodes(
+        nodes: list[MomentNode], step: PlanStep
+    ) -> tuple[list[MomentNode], dict[str, Any]]:
+        ordered = sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)
+        pool = str(step.parameters.get("candidate_pool", "current_top_k"))
+        trace: dict[str, Any] = {
+            "strategy": pool,
+            "input_candidate_count": len(ordered),
+        }
+        if pool != "face_evidence":
+            selected = ordered[: step.top_k]
+            trace["selected_candidate_count"] = len(selected)
+            return selected, trace
+
+        identity_step_id = str(step.parameters.get("identity_step_id", "")).strip()
+        raw_statuses = step.parameters.get(
+            "include_face_statuses", ["confirmed", "ambiguous"]
+        )
+        if isinstance(raw_statuses, str):
+            raw_statuses = [raw_statuses]
+        statuses = {
+            str(value)
+            for value in raw_statuses
+            if str(value) in {"confirmed", "ambiguous"}
+        }
+        if not statuses:
+            statuses = {"confirmed", "ambiguous"}
+        diagnostic_key = f"{identity_step_id}:face" if identity_step_id else ""
+
+        selected: list[MomentNode] = []
+        status_counts = {"confirmed": 0, "ambiguous": 0}
+        for node in ordered:
+            if diagnostic_key:
+                diagnostic = node.diagnostics.get(diagnostic_key)
+            else:
+                diagnostic = next(
+                    (
+                        value
+                        for key, value in reversed(list(node.diagnostics.items()))
+                        if key.endswith(":face")
+                    ),
+                    None,
+                )
+            status = str((diagnostic or {}).get("status", ""))
+            if status not in statuses:
+                continue
+            status_counts[status] += 1
+            selected.append(node)
+            if len(selected) >= step.top_k:
+                break
+        trace.update(
+            {
+                "identity_step_id": identity_step_id or None,
+                "include_face_statuses": sorted(statuses),
+                "status_counts": status_counts,
+                "selected_candidate_count": len(selected),
+            }
+        )
+        return selected, trace
+
     def _rerank_step(
         self, query: str, nodes: list[MomentNode], step: PlanStep
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1130,9 +1200,14 @@ class SnapMindPlannerLab:
         _profile_name, profile = self.orchestrator._profile(None)
         if profile.reranker is None:
             raise OrchestrationError("当前编排 Profile 没有 reranker")
-        candidates = self._serialize_results(nodes, min(step.top_k, len(nodes)))
+        selected_nodes, pool_trace = self._select_rerank_nodes(nodes, step)
+        candidates = self._serialize_results(selected_nodes, len(selected_nodes))
         if not candidates:
-            return [], {"status": "skipped", "reason": "no_candidates"}
+            return [], {
+                "status": "skipped",
+                "reason": "no_candidates",
+                "candidate_pool": pool_trace,
+            }
         retrieval_plan = RetrievalPlan(
             query_intent="planner_lab_rerank",
             modalities=["visual"],
@@ -1146,9 +1221,12 @@ class SnapMindPlannerLab:
                 score_weight=float(step.parameters.get("score_weight", 0.8)),
             ),
         )
-        return self.orchestrator._run_reranker(
+        results, tool_trace = self.orchestrator._run_reranker(
             profile, query, retrieval_plan, candidates
         )
+        tool_trace = dict(tool_trace or {})
+        tool_trace["candidate_pool"] = pool_trace
+        return results, tool_trace
 
     @staticmethod
     def _filter(nodes: list[MomentNode], step: PlanStep) -> list[MomentNode]:
@@ -1198,6 +1276,7 @@ class SnapMindPlannerLab:
                             key: round(value, 6) for key, value in node.verifier_contributions.items()
                         },
                         "constraint_results": dict(node.constraint_results),
+                        "diagnostics": dict(node.diagnostics),
                         "primary_score": round(node.primary_score, 6),
                         "support_bonus": round(node.support_bonus, 6),
                         "verifier_score": (
