@@ -48,6 +48,7 @@ vendor-wheels/               Ascend ARM64必须固定的离线wheels
 ```
 
 平台架构、模块分层与扩展指南见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+SnapMind 风格的交互式检索实验见 [docs/PLANNER_LAB.md](docs/PLANNER_LAB.md)。
 需要从源码制作镜像时阅读 [docs/IMAGE_BUILD.md](docs/IMAGE_BUILD.md)；拿到镜像后，按
 [docs/DEPLOYMENT_ASCEND.md](docs/DEPLOYMENT_ASCEND.md) 部署。
 已有视频从旧索引切换时，按 [docs/MILVUS_ONLY_MIGRATION.md](docs/MILVUS_ONLY_MIGRATION.md)

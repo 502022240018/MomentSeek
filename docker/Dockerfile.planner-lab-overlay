@@ -1,0 +1,23 @@
+# Fast experimental overlay for a server that already has a validated
+# MomentSeek Ascend image. It preserves the base image's model/runtime stack and
+# orchestration registry, replacing only application code and frontend assets.
+ARG BASE_IMAGE
+FROM node:20-alpine AS frontend-build
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM ${BASE_IMAGE}
+USER root
+WORKDIR /app/backend
+# Preserve the validated base image's retrieval/Milvus implementation. The
+# server can therefore keep using its existing index schema while the lab adds
+# only its isolated orchestration surface.
+COPY backend/app/main.py ./app/main.py
+COPY backend/app/api/planner_lab_routes.py ./app/api/planner_lab_routes.py
+COPY backend/app/orchestration/snapmind_lab.py ./app/orchestration/snapmind_lab.py
+COPY deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt ./deploy/orchestration/prompts/snapmind-planner-v1.txt
+COPY deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt ./deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt
+COPY --from=frontend-build /src/frontend/dist ./app/static

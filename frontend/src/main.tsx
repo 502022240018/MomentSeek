@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ColorGradingCapability, ColorGradingTask, Entity, FaceGalleryView, Folder, Job, OrchestrationProfile, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
+import { api, ColorGradingCapability, ColorGradingTask, Entity, FaceGalleryView, Folder, Job, OrchestrationProfile, PlannerLabCapabilities, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
 import { ColorGradingPage } from "./ColorGradingPage";
+import { PlannerLabPage } from "./PlannerLabPage";
 import {
   defaultIndexConfiguration,
   IndexConfiguration,
@@ -12,7 +13,7 @@ import {
 } from "./indexing";
 import "./styles.css";
 
-type Page = "overview" | "indexes" | "assets" | "entities" | "search" | "grading";
+type Page = "overview" | "indexes" | "assets" | "entities" | "search" | "planner" | "grading";
 
 const icons: Record<Page, string> = {
   overview: "⌂",
@@ -20,6 +21,7 @@ const icons: Record<Page, string> = {
   assets: "+",
   entities: "◎",
   search: "⌕",
+  planner: "◇",
   grading: "◐",
 };
 
@@ -29,6 +31,7 @@ const labels: Record<Page, string> = {
   assets: "视频资产",
   entities: "人物库",
   search: "检索",
+  planner: "Planner Lab",
   grading: "视频仿色",
 };
 
@@ -61,6 +64,7 @@ function App() {
   const [entities, setEntities] = useState<Entity[]>([]);
   const [gradingStatus, setGradingStatus] = useState<ColorGradingCapability>();
   const [gradingTasks, setGradingTasks] = useState<ColorGradingTask[]>([]);
+  const [plannerCapability, setPlannerCapability] = useState<PlannerLabCapabilities>();
   const [notice, setNotice] = useState<string>("");
 
   const refresh = async () => {
@@ -92,6 +96,7 @@ function App() {
   };
 
   useEffect(() => {
+    api.plannerLabCapabilities().then(setPlannerCapability).catch(() => undefined);
     refresh();
     const timer = window.setInterval(refresh, 3000);
     return () => window.clearInterval(timer);
@@ -109,6 +114,7 @@ function App() {
             "assets",
             "entities",
             "search",
+            ...(plannerCapability?.enabled ? ["planner" as Page] : []),
             ...(gradingStatus?.enabled ? ["grading" as Page] : []),
           ] as Page[]).map(item => (
             <button key={item} className={page === item ? "active" : ""} onClick={() => setPage(item)}>
@@ -130,6 +136,7 @@ function App() {
         {notice && <div className="notice" onClick={() => setNotice("")}>{notice}<span>×</span></div>}
         <section className="page-content">
           {page === "search" && <SearchPage videos={videos} folders={folders} setNotice={setNotice} />}
+          {page === "planner" && plannerCapability && <PlannerLabPage videos={videos} capability={plannerCapability} setNotice={setNotice} />}
           {page === "assets" && <AssetsPage videos={videos} folders={folders} refresh={refresh} setNotice={setNotice} />}
           {page === "indexes" && <IndexesPage jobs={jobs} videos={videos} refresh={refresh} setNotice={setNotice} />}
           {page === "entities" && <EntitiesPage entities={entities} videos={videos} refresh={refresh} setNotice={setNotice} />}
