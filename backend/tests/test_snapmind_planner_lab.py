@@ -418,6 +418,33 @@ def test_identity_clarification_ignores_hallucinated_or_image_resolved_mentions(
     assert lab._identity_clarifications("周杰伦弹钢琴", plan_set, None, True) == []
 
 
+def test_sanitizer_retargets_fallback_from_verifier_to_previous_primary():
+    lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["visual"]))
+    plan_set = HeuristicPlanGenerator().generate("弹钢琴近景", ["visual"], False)
+    deep = next(plan for plan in plan_set.plans if plan.plan_id == "deep")
+    primary = _step("s1", "visual.search")
+    verifier = PlanStep(
+        step_id="s2",
+        tool_id="vlm.rerank",
+        operation="rerank",
+        role="verifier",
+        query="弹钢琴近景",
+    )
+    fallback = _step("s3", "visual.search").model_copy(update={
+        "role": "fallback",
+        "fallback_for": "s2",
+    })
+    deep.steps = [primary, verifier, fallback]
+
+    sanitized = lab._sanitize_plan_set(plan_set, ["visual"], False, "弹钢琴近景")
+    sanitized_deep = next(plan for plan in sanitized.plans if plan.plan_id == "deep")
+    sanitized_fallback = next(step for step in sanitized_deep.steps if step.role == "fallback")
+
+    assert sanitized_fallback.fallback_for == "s1"
+    assert sanitized_fallback.parameters["fallback_retargeted_from"] == "s2"
+    lab._validate_plan(sanitized_deep)
+
+
 def test_ranking_stability_cannot_skip_pending_verifier(monkeypatch):
     lab = SnapMindPlannerLab(FakeOrchestrator(orchestration_enabled=True))
     visual = _step("s1", "visual.search")
