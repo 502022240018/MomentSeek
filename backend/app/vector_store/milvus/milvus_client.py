@@ -78,9 +78,19 @@ _STATIC_INDEX_CONFIGS: dict[str, dict] = {
         },
     },
     "face_embeddings": {
-        "index_type": "IVF_FLAT",
-        "metric_type": "L2",
-        "params": {"nlist": 1024},
+        # Migrated IVF_FLAT → DISKANN for 千万级 scale (disk-resident vectors +
+        # PQ in memory). Face is the highest-dimension modality (512), so the
+        # memory saving is the largest of all modalities. COSINE retained: face
+        # embeddings are unit-normalised ArcFace vectors (faces.py), and
+        # visual/speaker proved DiskANN supports COSINE in this stack.
+        "index_type": "DISKANN",
+        "metric_type": "COSINE",
+        "params": {
+            "max_degree": 56,
+            "search_list_size": 128,
+            "pq_code_budget_gb": 0.125,
+            "build_dram_budget_gb": 32.0,
+        },
     },
     "speaker_embeddings": {
         # Migrated HNSW → DISKANN for 千万级 scale (disk-resident vectors +

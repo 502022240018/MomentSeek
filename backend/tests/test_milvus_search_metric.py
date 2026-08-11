@@ -1,7 +1,8 @@
-"""Unit tests for milvus_search metric-type lookup and L2→cosine conversion.
+"""Unit tests for milvus_search metric-type lookup and face COSINE scoring.
 
 These tests do NOT require a running Milvus instance — they verify the static
-lookup tables and conversion math that were incorrect before the fix.
+lookup tables and that face candidate scoring trusts the COSINE distance
+returned by Milvus (post IVF_FLAT/L2 → DISKANN/COSINE migration).
 """
 from __future__ import annotations
 
@@ -74,7 +75,7 @@ def test_modality_index_type_matches_collection_configs():
     ("visual",  "COSINE",   None),  # Visual uses dynamic config (DISKANN or HNSW)
     ("asr",     "IP",       "DISKANN"),  # ASR now uses DISKANN
     ("ocr",     "IP",       "DISKANN"),  # OCR now uses DISKANN
-    ("face",    "L2",       "IVF_FLAT"),
+    ("face",    "COSINE",   "DISKANN"),  # migrated IVF_FLAT/L2 → DISKANN/COSINE for 千万级 scale
     ("speaker", "COSINE",   "DISKANN"),  # migrated HNSW → DISKANN for 千万级 scale
 ])
 def test_per_modality_metric_and_index(modality, expected_metric, expected_index):
@@ -134,37 +135,25 @@ def test_visual_ann_uses_supported_retrieval_profiler_api():
 
 
 # ---------------------------------------------------------------------------
-# 3. L2 → cosine conversion (face modality)
+# 3. Face trusted-COSINE distance (post IVF_FLAT/L2 → DISKANN/COSINE migration)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("cosine", [-1.0, -0.5, 0.0, 0.35, 0.5, 0.8, 0.9, 1.0])
-def test_l2_cosine_round_trip(cosine):
-    """Milvus squared-L2 converts to cosine exactly for unit vectors."""
-    # Milvus L2 metric returns the squared Euclidean distance.
-    l2 = max(0.0, 2.0 * (1.0 - cosine))
-    recovered = 1.0 - l2 / 2.0
-    assert abs(recovered - cosine) < 1e-6, (
-        f"cosine={cosine} → L2={l2:.6f} → recovered={recovered:.6f}"
-    )
+def test_face_candidates_trusts_cosine_distance():
+    """milvus_face_candidates must trust Milvus' COSINE _distance directly.
 
-
-def test_face_candidates_l2_to_cosine_conversion():
-    """milvus_face_candidates must convert L2 distances to cosine before scoring.
-
-    We mock the _search internals by patching the client's collection_for to
-    return an object whose .search() method yields known L2 values, then verify
-    that the resulting Candidate.raw_score equals the expected cosine.
+    Post-migration, face_embeddings uses DISKANN + COSINE on unit vectors, so
+    Milvus returns ``_distance`` that IS the exact cosine similarity. The former
+    two-phase L2→cosine re-score was removed; this test mocks .search() to yield a
+    known cosine value and verifies Candidate.raw_score equals it (no conversion,
+    and no dependency on an ``embedding`` output field).
     """
     from unittest.mock import MagicMock
 
-    # Known cosine value we want to recover
+    # COSINE metric returns the cosine similarity directly as the distance.
     cosine_expected = 0.72
-    # Squared L2 distance corresponding to that cosine for normalized vectors.
-    l2_dist = 2.0 * (1.0 - cosine_expected)
 
-    # Build a fake Milvus hit object
     fake_hit = MagicMock()
-    fake_hit.distance = l2_dist
+    fake_hit.distance = cosine_expected
     fake_hit.entity.get = lambda field, default=None: {
         "track_idx": 0,
         "start_ms":  0,
@@ -174,7 +163,6 @@ def test_face_candidates_l2_to_cosine_conversion():
 
     fake_results = [[fake_hit]]
 
-    # Fake collection whose .search() returns our synthetic L2 result
     fake_col = MagicMock()
     fake_col.search.return_value = fake_results
 
