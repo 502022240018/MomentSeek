@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import {
-  api, CandidatePlan, EvidenceRole, PlanSetResponse, PlannerExecution, PlanStep,
+  api, CandidatePlan, EvidenceRole, IdentityClarification, PlanSetResponse, PlannerExecution, PlanStep,
   PlannerLabCapabilities, PlannerMode, SearchResult, Video,
 } from "./api";
 
@@ -73,8 +73,11 @@ export function PlannerLabPage({ videos, capability, setNotice }: {
   const [running, setRunning] = useState(false);
   const [playing, setPlaying] = useState<SearchResult>();
   const [expandedResult, setExpandedResult] = useState("");
+  const [identityChoices, setIdentityChoices] = useState<Record<string, "generic_visual" | "keep_original">>({});
 
   const selectedPlan = planSet?.plans.find(plan => plan.plan_id === selectedPlanId);
+  const clarifications = planSet?.clarifications ?? [];
+  const unresolvedClarifications = clarifications.filter(item => !identityChoices[item.clarification_id]);
   const nextStep = execution?.executed_steps ?? 0;
   const canEdit = mode === "assist";
   const scope = selectedVideoIds.length ? selectedVideoIds : undefined;
@@ -90,6 +93,7 @@ export function PlannerLabPage({ videos, capability, setNotice }: {
     setPlanning(true);
     setExecution(undefined);
     setExecutionHistory([]);
+    setIdentityChoices({});
     try {
       const value = await api.plannerLabPlans({
         queryText: query.trim(), queryImage: image, videoIds: scope, mode,
@@ -109,6 +113,45 @@ export function PlannerLabPage({ videos, capability, setNotice }: {
     } : value);
     setExecution(undefined);
     setExecutionHistory([]);
+  };
+
+  const resolveIdentity = (
+    clarification: IdentityClarification,
+    choice: "generic_visual" | "keep_original",
+  ) => {
+    const transform = (value: PlanSetResponse | undefined) => value ? {
+      ...value,
+      plans: value.plans.map(plan => ({
+        ...plan,
+        steps: plan.steps.map(step => step.tool_id !== "visual.search" ? step : {
+          ...step,
+          query: choice === "generic_visual" && clarification.visual_fallback_query
+            ? clarification.visual_fallback_query : step.query,
+          parameters: {
+            ...step.parameters,
+            identity_resolution: choice,
+            identity_name: clarification.name,
+            ...(choice === "generic_visual" ? { identity_original_query: step.query } : {}),
+          },
+        }),
+      })),
+    } : value;
+    setPlanSet(transform);
+    setOriginalPlanSet(transform);
+    setIdentityChoices(value => ({ ...value, [clarification.clarification_id]: choice }));
+    setExecution(undefined);
+    setExecutionHistory([]);
+  };
+
+  const attachIdentityReference = (file?: File) => {
+    if (!file) return;
+    setImage(file);
+    setPlanSet(undefined);
+    setOriginalPlanSet(undefined);
+    setIdentityChoices({});
+    setExecution(undefined);
+    setExecutionHistory([]);
+    setNotice("参考图已添加，请重新生成策略；系统将使用图片人物证据。");
   };
 
   const updateStep = (stepId: string, update: Partial<PlanStep>) => {
@@ -149,6 +192,9 @@ export function PlannerLabPage({ videos, capability, setNotice }: {
 
   const execute = async (runAll = false) => {
     if (!selectedPlan) return;
+    if (unresolvedClarifications.length) {
+      return setNotice("请先确认未注册人物的检索方式，再执行计划");
+    }
     const maxSteps = mode === "auto" || runAll ? undefined : Math.min(nextStep + 1, selectedPlan.steps.length);
     await runPlan(selectedPlan, maxSteps);
   };
@@ -229,6 +275,19 @@ export function PlannerLabPage({ videos, capability, setNotice }: {
 
     {planSet && !planning && <section id="strategy-section" className="strategy-section">
       <div className="strategy-heading"><div className="section-title"><span>03</span><div><h3>选择一条检索路线</h3><p>三套方案使用不同的速度、覆盖度与精度取舍</p></div></div><div className="generated-by"><span className={planSet.planner_trace.status === "ok" ? "ok" : "fallback"}>✦</span><div><b>{planSet.planner_trace.status === "ok" ? "Qwen3.5 已生成" : "已使用备用计划"}</b><small>{planSet.query_intent}</small></div></div></div>
+      {!!clarifications.length && <div className="identity-clarifications">{clarifications.map(item => {
+        const choice = identityChoices[item.clarification_id];
+        return <article className={`identity-clarification ${choice ? "resolved" : ""}`} key={item.clarification_id}>
+          <div className="identity-clarification-icon">?</div>
+          <div className="identity-clarification-copy"><small>人物身份待确认</small><h4>{item.name}</h4><p>{item.message}</p><em>普通人物解释：{item.visual_fallback_query}</em></div>
+          <div className="identity-clarification-actions">
+            <label><input type="file" accept="image/*" onChange={event => attachIdentityReference(event.target.files?.[0])} /><span>上传参考图后重生成</span></label>
+            <button type="button" className={choice === "generic_visual" ? "selected" : ""} onClick={() => resolveIdentity(item, "generic_visual")}>按普通人物继续</button>
+            <button type="button" className={choice === "keep_original" ? "selected" : ""} onClick={() => resolveIdentity(item, "keep_original")}>保留原文继续</button>
+          </div>
+          {choice && <strong>✓ {choice === "generic_visual" ? "已改用普通人物解释" : "已确认保留原文"}</strong>}
+        </article>;
+      })}</div>}
       <div className="strategy-cards">{planSet.plans.map(plan => {
         const meta = planMeta[plan.plan_id] || planMeta.balanced;
         const tools = [...new Set(plan.steps.map(step => step.tool_id))];

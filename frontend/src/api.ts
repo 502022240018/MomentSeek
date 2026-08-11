@@ -169,10 +169,17 @@ export type CandidatePlan = {
   estimated_cost: "low" | "medium" | "high"; fusion: "rrf" | "combsum" | "combmnz";
   result_limit: number; early_stop_threshold: number; steps: PlanStep[];
 };
+export type IdentityClarification = {
+  clarification_id: string; kind: "unregistered_identity"; name: string;
+  message: string; visual_fallback_query: string; rationale?: string;
+  options: Array<"upload_reference" | "generic_visual" | "keep_original">;
+};
 export type PlanSetResponse = {
   mode: PlannerMode; query_intent: string; constraints: string[]; negative_constraints: string[];
   available_modalities: string[]; plans: CandidatePlan[];
   matched_entity?: { id?: string; name?: string } | null;
+  identity_mentions?: Array<{ name: string; visual_fallback_query: string; rationale?: string }>;
+  clarifications?: IdentityClarification[];
   planner_trace: Record<string, any>; scope: Record<string, any>;
 };
 export type PlannerExecution = {
