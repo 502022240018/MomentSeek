@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     orchestration_fail_open: bool = True
     orchestration_trace_enabled: bool = True
     orchestration_trace_path: Path = Path("runtime/orchestration-traces.jsonl")
+    # Isolated SnapMind-style experiment. It has separate routes/UI and never
+    # changes the behaviour of /api/search.
+    planner_lab_enabled: bool = True
+    planner_lab_prompt_path: Path = Path(
+        "deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt"
+    )
 
     # Query encoders live in the API process, independently from indexing
     # workers. Production can pay model load/kernel compilation during startup

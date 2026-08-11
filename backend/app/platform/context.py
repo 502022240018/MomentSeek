@@ -27,6 +27,7 @@ from app.execution import worker
 from app.integrations.color_grading import ColorGradingManager
 from app.media import media
 from app.orchestration.retrieval_orchestration import SearchOrchestrator
+from app.orchestration.snapmind_lab import SnapMindPlannerLab
 from app.retrieval.search import SearchEngine
 
 # Media / worker entry points shared by routes (patchable in tests).
@@ -42,6 +43,7 @@ settings = get_settings()
 catalog = Catalog(settings.db_path)
 search_engine = SearchEngine(settings, catalog)
 search_orchestrator = SearchOrchestrator(settings, catalog, search_engine)
+planner_lab = SnapMindPlannerLab(search_orchestrator)
 
 # Indexer daemon supervision (daemon mode only).
 _indexer_daemon_process: subprocess.Popen | None = None

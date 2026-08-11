@@ -78,6 +78,7 @@ backend/app/
 │     retrieval_metrics.py  检索性能剖析（RetrievalProfiler）
 ├─ orchestration/           检索编排层（在 retrieval 之上）
 │     retrieval_orchestration.py  LLM planner/reranker（OpenAI 兼容 provider）
+│     snapmind_lab.py              三候选交互计划、增量融合与审计实验
 ├─ vector_store/            向量存储层（纯基础设施）
 │     └─ milvus/            client / schema / indexer / search / 锁 / 版本 / 离线恢复工具
 ├─ execution/               后台执行层
@@ -163,6 +164,7 @@ Milvus                       五通道向量 collection（模型版本参与主�
 | `job_routes` | `GET /api/jobs*`、`POST .../cancel` | 索引任务查询与取消 |
 | `entity_routes` | `/api/entities*`（含 voice-samples） | 人物库：参考脸、声纹样本 |
 | `search_routes` | `POST /api/search`、`GET /api/orchestration/profiles` | 多模态检索与编排配置 |
+| `planner_lab_routes` | `GET /api/planner-lab/capabilities`、`POST /plans`、`POST /execute` | SnapMind 风格交互式实验 |
 | `speaker_routes` | `/api/videos/{id}/speakers*`、`POST /api/voice-search*` | 说话人视图、声音检索 |
 | `color_grading_routes` | `/api/color-grading/*` | 视频仿色任务（可选能力） |
 

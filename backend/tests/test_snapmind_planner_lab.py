@@ -1,0 +1,417 @@
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from app.orchestration.retrieval_orchestration import OrchestrationError
+from app.orchestration.snapmind_lab import (
+    CandidatePlan,
+    HeuristicPlanGenerator,
+    PlanStep,
+    SnapMindPlannerLab,
+)
+
+
+def _result(modality: str, start: float, score: float) -> dict:
+    return {
+        "video_id": "video-1",
+        "video_name": "demo.mp4",
+        "start_time": start,
+        "end_time": start + 3,
+        "score": score,
+        "modalities": [modality],
+        "media_url": "/api/videos/video-1/media",
+        "clip_url": f"/api/videos/video-1/clip?start={start}",
+        "above_threshold": True,
+        "evidence": [{"modality": modality, "score": score, "detail": f"{modality}-{start}"}],
+    }
+
+
+class FakeSearchEngine:
+    def search(self, _query, _image, modalities, *_args):
+        modality = modalities[0]
+        if modality == "visual":
+            return [_result("visual", 10, 0.9), _result("visual", 30, 0.2)]
+        if modality == "asr":
+            return [_result("asr", 11, 0.8), _result("asr", 50, 0.1)]
+        return []
+
+
+class FakeCatalog:
+    def __init__(self, entity=None):
+        self.entity = entity
+
+    def find_entity_in_text(self, _query):
+        return self.entity
+
+
+class FakeOrchestrator:
+    def __init__(
+        self,
+        orchestration_enabled: bool = False,
+        entity=None,
+        modalities=None,
+    ):
+        self.settings = SimpleNamespace(
+            orchestration_enabled=orchestration_enabled,
+            orchestration_fail_open=True,
+            orchestration_trace_enabled=False,
+            planner_lab_enabled=True,
+            planner_lab_prompt_path=Path("unused"),
+        )
+        self.catalog = FakeCatalog(entity)
+        self.search_engine = FakeSearchEngine()
+        self.traces = []
+        self.modalities = modalities or ["visual", "asr"]
+
+    def _available_modalities(self, _video_ids):
+        return self.modalities
+
+    def _write_trace(self, trace):
+        self.traces.append(trace)
+
+
+def _step(step_id: str, tool_id: str) -> PlanStep:
+    return PlanStep(
+        step_id=step_id,
+        tool_id=tool_id,
+        operation="search",
+        query="舞台演讲",
+        weight=1,
+        top_k=20,
+        rationale="test",
+    )
+
+
+def test_fallback_always_returns_three_distinct_plans():
+    plan_set = HeuristicPlanGenerator().generate(
+        "演讲者随后展示屏幕上的标题", ["visual", "asr", "ocr"], False
+    )
+
+    assert [plan.plan_id for plan in plan_set.plans] == ["fast", "balanced", "deep"]
+    assert len({tuple(step.tool_id for step in plan.steps) for plan in plan_set.plans}) == 3
+    assert all(1 <= len(plan.steps) <= 6 for plan in plan_set.plans)
+
+
+def test_cross_modal_results_merge_into_one_auditable_moment():
+    orchestrator = FakeOrchestrator()
+    lab = SnapMindPlannerLab(orchestrator)
+    plan = CandidatePlan(
+        plan_id="balanced",
+        label="Balanced",
+        description="test",
+        estimated_cost="medium",
+        fusion="combsum",
+        result_limit=10,
+        early_stop_threshold=1,
+        steps=[_step("s1", "visual.search"), _step("s2", "asr.search")],
+    )
+
+    outcome = lab.execute("舞台演讲", None, plan, None)
+
+    merged = next(item for item in outcome["results"] if item["start_time"] == 10)
+    assert merged["end_time"] == 14
+    assert merged["planner_evidence"]["source_count"] == 2
+    assert set(merged["planner_evidence"]["source_contrib"]) == {"visual.search", "asr.search"}
+    assert outcome["trace"][1]["top_k_jaccard"] > 0
+    assert orchestrator.traces[0]["trace_type"] == "snapmind_planner_lab"
+
+
+def test_repeating_same_tool_does_not_fake_independent_consensus():
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    plan = CandidatePlan(
+        plan_id="deep",
+        label="Deep",
+        description="test",
+        estimated_cost="high",
+        fusion="combmnz",
+        result_limit=10,
+        early_stop_threshold=1,
+        steps=[_step("s1", "visual.search"), _step("s2", "visual.search")],
+    )
+
+    outcome = lab.execute("舞台演讲", None, plan, None)
+
+    assert all(item["planner_evidence"]["source_count"] == 1 for item in outcome["results"])
+
+
+def test_support_enriches_primary_but_cannot_create_candidates():
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    support = _step("s2", "asr.search").model_copy(update={
+        "role": "support", "depends_on": ["s1"], "support_bonus_cap": 0.2,
+    })
+    plan = CandidatePlan(
+        plan_id="balanced", label="Balanced", description="test", estimated_cost="medium",
+        fusion="combsum", result_limit=10, early_stop_threshold=1,
+        steps=[_step("s1", "visual.search"), support],
+    )
+
+    outcome = lab.execute("舞台演讲", None, plan, None)
+
+    assert {item["start_time"] for item in outcome["results"]} == {10.0, 30.0}
+    assert outcome["trace"][1]["quality_metrics"]["matched_existing_count"] == 1
+    assert outcome["trace"][1]["quality_metrics"]["unmatched_result_count"] == 1
+    enriched = next(item for item in outcome["results"] if item["start_time"] == 10)
+    evidence = enriched["planner_evidence"]
+    assert evidence["primary_source_count"] == 1
+    assert evidence["support_source_count"] == 1
+    assert evidence["support_bonus"] <= evidence["primary_score"] * 0.2 + 1e-6
+
+
+def test_support_top_k_does_not_prune_primary_pool():
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    support = _step("s2", "asr.search").model_copy(update={
+        "role": "support", "depends_on": ["s1"], "top_k": 1,
+    })
+    plan = CandidatePlan(
+        plan_id="balanced", label="Balanced", description="test", estimated_cost="medium",
+        result_limit=1, early_stop_threshold=1,
+        steps=[_step("s1", "visual.search"), support],
+    )
+
+    outcome = lab.execute("test", None, plan, None)
+
+    assert outcome["trace"][0]["output_candidate_count"] == 2
+    assert outcome["trace"][1]["output_candidate_count"] == 2
+
+
+def test_failed_primary_triggers_explicit_fallback(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    monkeypatch.setattr(
+        lab,
+        "_search_step",
+        lambda _query, _image, step, _videos: []
+        if step.tool_id == "visual.search" else [_result("asr", 50, 0.8)],
+    )
+    fallback = _step("s2", "asr.search").model_copy(update={
+        "role": "fallback", "fallback_for": "s1",
+    })
+    plan = CandidatePlan(
+        plan_id="deep", label="Deep", description="test", estimated_cost="high",
+        steps=[_step("s1", "visual.search"), fallback],
+    )
+
+    outcome = lab.execute("舞台演讲", None, plan, None)
+
+    assert outcome["trace"][0]["decision"] == "skipped"
+    assert outcome["trace"][0]["decision_reason"] == "insufficient_results"
+    assert outcome["trace"][1]["effective_role"] == "fallback"
+    assert outcome["trace"][1]["decision"] == "accepted"
+    assert outcome["results"][0]["start_time"] == 50
+
+
+def test_support_is_promoted_when_primary_pool_is_empty(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    monkeypatch.setattr(
+        lab,
+        "_search_step",
+        lambda _query, _image, step, _videos: []
+        if step.tool_id == "visual.search" else [_result("asr", 50, 0.8)],
+    )
+    support = _step("s2", "asr.search").model_copy(update={
+        "role": "support", "depends_on": ["s1"],
+    })
+    plan = CandidatePlan(
+        plan_id="balanced", label="Balanced", description="test", estimated_cost="medium",
+        steps=[_step("s1", "visual.search"), support],
+    )
+
+    outcome = lab.execute("test", None, plan, None)
+
+    assert outcome["trace"][1]["effective_role"] == "fallback"
+    assert outcome["trace"][1]["decision_reason"] == "support_promoted_for_empty_primary_pool"
+    assert outcome["results"][0]["planner_evidence"]["primary_source_count"] == 1
+
+
+def test_over_restrictive_filter_rolls_back_to_checkpoint():
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    constraint = PlanStep(
+        step_id="s2", tool_id="confidence.filter", operation="filter", role="constraint",
+        depends_on=["s1"], query="test", top_k=20, rationale="strict",
+        parameters={"min_score": 99, "min_sources": 2},
+    )
+    plan = CandidatePlan(
+        plan_id="deep", label="Deep", description="test", estimated_cost="high",
+        steps=[_step("s1", "visual.search"), constraint],
+    )
+
+    outcome = lab.execute("test", None, plan, None)
+
+    assert outcome["trace"][1]["decision"] == "rolled_back"
+    assert outcome["trace"][1]["decision_reason"] == "constraint_too_restrictive"
+    assert len(outcome["results"]) == 2
+
+
+def test_flat_multi_hit_step_is_rolled_back(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    monkeypatch.setattr(
+        lab,
+        "_search_step",
+        lambda *_args: [_result("visual", 10, 0.5), _result("visual", 30, 0.5)],
+    )
+    plan = CandidatePlan(
+        plan_id="fast", label="Fast", description="test", estimated_cost="low",
+        fusion="combsum", steps=[_step("s1", "visual.search")],
+    )
+
+    outcome = lab.execute("test", None, plan, None)
+
+    assert outcome["trace"][0]["decision"] == "rolled_back"
+    assert outcome["trace"][0]["decision_reason"] == "flat_score_distribution"
+    assert outcome["results"] == []
+
+
+def test_support_tool_error_keeps_primary_checkpoint(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    original = lab._search_step
+
+    def fail_support(query, image, step, videos):
+        if step.tool_id == "asr.search":
+            raise RuntimeError("temporary outage")
+        return original(query, image, step, videos)
+
+    monkeypatch.setattr(lab, "_search_step", fail_support)
+    support = _step("s2", "asr.search").model_copy(update={
+        "role": "support", "depends_on": ["s1"], "failure_policy": "rollback",
+    })
+    plan = CandidatePlan(
+        plan_id="balanced", label="Balanced", description="test", estimated_cost="medium",
+        steps=[_step("s1", "visual.search"), support],
+    )
+
+    outcome = lab.execute("test", None, plan, None)
+
+    assert outcome["trace"][1]["decision"] == "rolled_back"
+    assert outcome["trace"][1]["decision_reason"] == "tool_error:RuntimeError"
+    assert len(outcome["results"]) == 2
+
+
+def test_vlm_reranker_is_an_explicit_traced_tool(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator(orchestration_enabled=True))
+    rerank = PlanStep(
+        step_id="s2",
+        tool_id="vlm.rerank",
+        operation="rerank",
+        query="舞台演讲",
+        weight=1,
+        top_k=10,
+        rationale="test",
+    )
+    plan = CandidatePlan(
+        plan_id="deep",
+        label="Deep",
+        description="test",
+        estimated_cost="high",
+        fusion="combsum",
+        result_limit=10,
+        early_stop_threshold=1,
+        steps=[_step("s1", "visual.search"), rerank],
+    )
+    monkeypatch.setattr(
+        lab,
+        "_rerank_step",
+        lambda _query, _nodes, _step: ([_result("visual", 10, 0.99)], {"status": "ok", "model": "qwen3.5"}),
+    )
+
+    outcome = lab.execute("舞台演讲", None, plan, None)
+
+    assert outcome["trace"][1]["step"]["tool_id"] == "vlm.rerank"
+    assert outcome["trace"][1]["tool_trace"]["model"] == "qwen3.5"
+    assert "vlm.rerank" in outcome["results"][0]["planner_evidence"]["source_contrib"]
+
+
+def test_deployed_reranker_contract_uses_rerank_score_for_final_order(monkeypatch):
+    """The deployed reranker preserves retrieval ``score`` and adds rerank_score."""
+    lab = SnapMindPlannerLab(FakeOrchestrator(orchestration_enabled=True))
+    rerank = PlanStep(
+        step_id="s2",
+        tool_id="vlm.rerank",
+        operation="rerank",
+        role="verifier",
+        query="黄晓明在前台学习收银机操作",
+        weight=1,
+        top_k=10,
+        rationale="verify the full query",
+        parameters={"score_weight": 0.8},
+    )
+    plan = CandidatePlan(
+        plan_id="deep",
+        label="Deep",
+        description="test",
+        estimated_cost="high",
+        fusion="combsum",
+        result_limit=10,
+        early_stop_threshold=1,
+        steps=[_step("s1", "visual.search"), rerank],
+    )
+    original = [_result("visual", 10, 0.9), _result("visual", 30, 0.2)]
+    reranked = []
+    for item, rerank_score, relevance in (
+        (original[0], 0.01, "possibly_relevant"),
+        (original[1], 0.9983, "highly_relevant"),
+    ):
+        candidate = dict(item)
+        candidate["retrieval_score"] = candidate["score"]
+        candidate["rerank_score"] = rerank_score
+        candidate["rerank_relevance"] = relevance
+        reranked.append(candidate)
+    monkeypatch.setattr(lab, "_rerank_step", lambda *_args: (reranked, {"status": "ok"}))
+
+    outcome = lab.execute("黄晓明在前台学习收银机操作", None, plan, None)
+
+    assert outcome["results"][0]["start_time"] == 30
+    assert outcome["results"][0]["planner_evidence"]["raw_scores"]["vlm.rerank"] == pytest.approx(0.9983)
+
+
+def test_registered_entity_is_exposed_and_injected_into_plans():
+    orchestrator = FakeOrchestrator(
+        entity={"id": "person-1", "name": "黄晓明", "embedding_path": "entity.npz"},
+        modalities=["visual", "face", "asr", "ocr"],
+    )
+    lab = SnapMindPlannerLab(orchestrator)
+
+    proposal = lab.propose("黄晓明在前台学习收银机操作", "auto", None, False)
+
+    assert proposal["matched_entity"]["name"] == "黄晓明"
+    for plan in proposal["plans"]:
+        assert any(step["tool_id"] == "face.search" for step in plan["steps"])
+
+
+def test_reranker_cannot_run_before_retrieval():
+    lab = SnapMindPlannerLab(FakeOrchestrator(orchestration_enabled=True))
+    plan = CandidatePlan(
+        plan_id="deep", label="Deep", description="test", estimated_cost="high",
+        steps=[PlanStep(
+            step_id="s1", tool_id="vlm.rerank", operation="rerank", query="test",
+            weight=1, top_k=10, rationale="invalid",
+        )],
+    )
+
+    with pytest.raises(OrchestrationError, match="必须放在"):
+        lab.execute("test", None, plan, None)
+
+
+def test_llm_step_ids_are_canonicalized_before_validation():
+    payload = {
+        "plans": [
+            {"steps": [
+                {"step_id": "primary", "parameters": {"query": "改写", "top_k": 17, "weight": 0.7}},
+                {"step_id": "support", "depends_on": ["primary"]},
+                {"step_id": "backup", "fallback_for": "primary"},
+            ]},
+            {"steps": [{"step_id": "anything"}]},
+        ]
+    }
+
+    normalized = SnapMindPlannerLab._normalize_llm_payload(payload)
+
+    assert [step["step_id"] for step in normalized["plans"][0]["steps"]] == ["s1", "s2", "s3"]
+    assert normalized["plans"][0]["steps"][1]["depends_on"] == ["s1"]
+    assert normalized["plans"][0]["steps"][2]["fallback_for"] == "s1"
+    assert normalized["plans"][1]["steps"][0]["step_id"] == "s1"
+    assert normalized["plans"][0]["steps"][0]["query"] == "改写"
+    assert normalized["plans"][0]["steps"][0]["top_k"] == 17
+    assert normalized["plans"][0]["steps"][0]["weight"] == 0.7
+    assert normalized["plans"][0]["steps"][0]["parameters"] == {}
