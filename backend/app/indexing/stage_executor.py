@@ -238,6 +238,7 @@ def _run_face(context: StageContext) -> dict:
         prefer_ffmpeg=settings.frame_reader == "ffmpeg",
         ort_intra_op_threads=settings.face_ort_intra_op_threads,
         ort_inter_op_threads=settings.face_ort_inter_op_threads,
+        gallery_cosine_threshold=settings.face_gallery_cosine_threshold,
         milvus_ctx=context.milvus_ctx,
     )
     _write_manifest("face", context, result)
