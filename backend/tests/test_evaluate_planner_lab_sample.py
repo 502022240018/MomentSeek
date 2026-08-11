@@ -95,3 +95,21 @@ def test_partial_report_counts_only_selected_groups(tmp_path):
     assert report["overall"]["query_count"] == 1
     assert report["sample_query_count"] == 2
     assert report["pending_query_count"] == 1
+
+
+def test_select_run_groups_supports_exact_query_ids():
+    groups = [
+        _group("q1", "A", "first"),
+        _group("q2", "B", "second"),
+        _group("q3", "C", "third"),
+    ]
+
+    selected = evaluation.select_run_groups(groups, ["q3", "q1"], limit=None)
+
+    assert [row["semantic_query_id"] for row in selected] == ["q3", "q1"]
+    try:
+        evaluation.select_run_groups(groups, ["missing"], limit=None)
+    except ValueError as exc:
+        assert "missing" in str(exc)
+    else:
+        raise AssertionError("unknown query IDs must fail")
