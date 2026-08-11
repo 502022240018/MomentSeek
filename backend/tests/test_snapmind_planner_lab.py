@@ -536,6 +536,13 @@ def test_registered_compound_identity_uses_candidate_window_face_and_bounded_rer
     proposal = lab.propose("王俊凯吃包子近景", "auto", None, False)
     plans = {plan["plan_id"]: plan for plan in proposal["plans"]}
 
+    assert proposal["planner_trace"] == {
+        "status": "ok",
+        "planner": "registered-identity-cascade-v1",
+        "model_call_skipped": True,
+        "reason": "registered_compound_identity_has_validated_plan_skeleton",
+        "elapsed_seconds": 0.0,
+    }
     fast_steps = plans["fast"]["steps"]
     assert [(step["tool_id"], step["role"], step["top_k"]) for step in fast_steps] == [
         ("visual.search", "primary", 100),
