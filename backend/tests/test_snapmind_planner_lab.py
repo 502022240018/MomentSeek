@@ -379,6 +379,87 @@ def test_registered_entity_is_exposed_and_injected_into_plans():
         assert any(step["tool_id"] == "face.search" for step in plan["steps"])
 
 
+def test_ranking_stability_cannot_skip_pending_verifier(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator(orchestration_enabled=True))
+    visual = _step("s1", "visual.search")
+    support = _step("s2", "asr.search").model_copy(update={
+        "role": "support",
+        "depends_on": ["s1"],
+    })
+    verifier = PlanStep(
+        step_id="s3",
+        tool_id="vlm.rerank",
+        operation="rerank",
+        role="verifier",
+        depends_on=["s1"],
+        query="舞台演讲",
+        top_k=10,
+        rationale="required verification",
+    )
+    plan = CandidatePlan(
+        plan_id="deep",
+        label="Deep",
+        description="test",
+        estimated_cost="high",
+        early_stop_threshold=1,
+        steps=[visual, support, verifier],
+    )
+
+    def stable_search(_query, _image, step, _videos):
+        modality = step.tool_id.split(".", 1)[0]
+        return [_result(modality, 10, 0.9), _result(modality, 30, 0.2)]
+
+    reranker_calls = []
+    monkeypatch.setattr(lab, "_search_step", stable_search)
+
+    def rerank(_query, nodes, _step):
+        reranker_calls.append(True)
+        results = lab._serialize_results(nodes, len(nodes))
+        for result in results:
+            result["rerank_score"] = result["score"]
+        return results, {"status": "ok"}
+
+    monkeypatch.setattr(lab, "_rerank_step", rerank)
+
+    outcome = lab.execute("舞台演讲", None, plan, None)
+
+    assert reranker_calls == [True]
+    assert outcome["executed_steps"] == 3
+    assert outcome["trace"][1]["early_stop_blocked_by"] == ["s3"]
+
+
+def test_ranking_stability_can_stop_when_only_optional_support_remains(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    visual = _step("s1", "visual.search")
+    support = _step("s2", "asr.search").model_copy(update={
+        "role": "support",
+        "depends_on": ["s1"],
+    })
+    optional = _step("s3", "ocr.search").model_copy(update={
+        "role": "support",
+        "depends_on": ["s1"],
+    })
+    plan = CandidatePlan(
+        plan_id="balanced",
+        label="Balanced",
+        description="test",
+        estimated_cost="medium",
+        early_stop_threshold=1,
+        steps=[visual, support, optional],
+    )
+
+    def stable_search(_query, _image, step, _videos):
+        modality = step.tool_id.split(".", 1)[0]
+        return [_result(modality, 10, 0.9), _result(modality, 30, 0.2)]
+
+    monkeypatch.setattr(lab, "_search_step", stable_search)
+
+    outcome = lab.execute("舞台演讲", None, plan, None)
+
+    assert outcome["stop_reason"] == "ranking_stable"
+    assert outcome["executed_steps"] == 2
+
+
 def test_reranker_cannot_run_before_retrieval():
     lab = SnapMindPlannerLab(FakeOrchestrator(orchestration_enabled=True))
     plan = CandidatePlan(

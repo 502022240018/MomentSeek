@@ -1113,6 +1113,12 @@ class SnapMindPlannerLab:
             jaccard = _jaccard(before, after) if before else 0.0
             stability = _rank_stability(before, after) if before else 0.0
             step_statuses[step.step_id] = decision
+            pending_required_step_ids = [
+                remaining.step_id
+                for remaining in planned_steps[index + 1 :]
+                if remaining.enabled
+                and remaining.role in {"primary", "constraint", "verifier"}
+            ]
             trace.append(
                 {
                     "step_index": index,
@@ -1134,6 +1140,7 @@ class SnapMindPlannerLab:
                     "added_to_top": [key for key in after if key not in before],
                     "removed_from_top": [key for key in before if key not in after],
                     "tool_trace": tool_trace,
+                    "early_stop_blocked_by": pending_required_step_ids,
                 }
             )
             if (
@@ -1142,6 +1149,7 @@ class SnapMindPlannerLab:
                 and before
                 and jaccard >= plan.early_stop_threshold
                 and stability >= plan.early_stop_threshold
+                and not pending_required_step_ids
             ):
                 stop_reason = "ranking_stable"
                 break
