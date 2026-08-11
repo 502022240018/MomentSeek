@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from app.identity.face_gallery import cluster_face_tracks
+from app.core.settings import get_settings
 from app.indexing.manifest import load_index_manifest
 from app.media.media import extract_frame
 from app.vector_store.milvus.milvus_client import get_milvus_client
@@ -23,6 +24,37 @@ GROUP_FIELDS = [
     "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2", "representative_quality",
     "duration_ms", "occurrence_count", "importance_score",
 ]
+
+
+def _query_all(collection, *, expr: str, output_fields: list[str]) -> list[dict]:
+    """Read every matching Milvus row without the 16,384-row query cap."""
+    timeout = get_settings().milvus_query_timeout_seconds
+    if not hasattr(collection, "query_iterator"):
+        return collection.query(
+            expr=expr,
+            output_fields=output_fields,
+            limit=16_384,
+            timeout=timeout,
+        )
+    rows: list[dict] = []
+    iterator = collection.query_iterator(
+        batch_size=2000,
+        expr=expr,
+        output_fields=output_fields,
+        timeout=timeout,
+    )
+    try:
+        while True:
+            try:
+                page = iterator.next()
+            except StopIteration:
+                break
+            if not page:
+                break
+            rows.extend(page)
+    finally:
+        iterator.close()
+    return rows
 
 
 def published_face_version(index_dir: Path, video_id: str) -> str:
@@ -80,10 +112,10 @@ def ensure_video_face_groups(video_id: str, asset_version: str, threshold: float
     existing = client.collection("face_groups").query(expr=expr, output_fields=["count(*)"])
     if existing and int(existing[0].get("count(*)", 0)):
         return False
-    tracks = client.collection_for("face").query(
+    tracks = _query_all(
+        client.collection_for("face"),
         expr=expr,
         output_fields=["track_idx", "start_ms", "end_ms", "best_ms", "embedding"],
-        limit=16384,
     )
     tracks.sort(key=lambda row: int(row["track_idx"]))
     if not tracks:
@@ -100,8 +132,10 @@ def ensure_video_face_groups(video_id: str, asset_version: str, threshold: float
 def video_face_groups(index_dir: Path, catalog, video_id: str, threshold: float) -> dict:
     asset_version = published_face_version(index_dir, video_id)
     backfilled = ensure_video_face_groups(video_id, asset_version, threshold)
-    rows = get_milvus_client().collection("face_groups").query(
-        expr=_group_expr(video_id, asset_version), output_fields=GROUP_FIELDS, limit=16384
+    rows = _query_all(
+        get_milvus_client().collection("face_groups"),
+        expr=_group_expr(video_id, asset_version),
+        output_fields=GROUP_FIELDS,
     )
     rows.sort(key=lambda row: (-float(row.get("importance_score", 0)), int(row["group_idx"])))
     bindings = catalog.face_identity_bindings(video_id, asset_version)
