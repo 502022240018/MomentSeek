@@ -377,6 +377,10 @@ def test_registered_entity_is_exposed_and_injected_into_plans():
     assert proposal["matched_entity"]["name"] == "黄晓明"
     for plan in proposal["plans"]:
         assert any(step["tool_id"] == "face.search" for step in plan["steps"])
+        visual_steps = [step for step in plan["steps"] if step["tool_id"] == "visual.search"]
+        for step in visual_steps:
+            assert "黄晓明" not in step["query"]
+            assert step["parameters"]["identity_removed_from_query"] == "黄晓明"
 
 
 def test_ranking_stability_cannot_skip_pending_verifier(monkeypatch):
