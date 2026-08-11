@@ -6,8 +6,10 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.orchestration.retrieval_orchestration import (
@@ -18,6 +20,7 @@ from app.orchestration.retrieval_orchestration import (
     SearchOrchestrator,
     _extract_json_object,
 )
+from app.retrieval.search import face_confidence
 
 
 PlanMode = Literal["guide", "assist", "auto"]
@@ -939,6 +942,181 @@ class SnapMindPlannerLab:
         )
         return [dict(item) for item in results]
 
+    def _face_support_step(
+        self,
+        query: str,
+        image_path: str | None,
+        nodes: list[MomentNode],
+        step: PlanStep,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Verify identity only inside the current candidate windows.
+
+        A support channel must not spend its budget on unrelated global face
+        tracks.  The current Top-N moments are grouped by video, each face index
+        is scored once, and the best overlapping track is attached to the exact
+        candidate moment.  Weak matches remain observable in ``tool_trace`` but
+        never enter fusion or source counts.
+        """
+        confirmed_threshold = min(
+            1.0, max(-1.0, float(step.parameters.get("identity_threshold", 0.35)))
+        )
+        ambiguous_threshold = min(
+            confirmed_threshold,
+            max(-1.0, float(step.parameters.get("ambiguous_threshold", 0.20))),
+        )
+        padding_seconds = min(
+            30.0, max(0.0, float(step.parameters.get("window_padding_seconds", 0.0)))
+        )
+        selected = sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)[: step.top_k]
+        trace: dict[str, Any] = {
+            "strategy": "candidate_window_face_verification",
+            "candidate_window_count": len(selected),
+            "video_count": 0,
+            "face_track_count": 0,
+            "confirmed_count": 0,
+            "ambiguous_count": 0,
+            "rejected_count": 0,
+            "no_face_track_count": 0,
+            "thresholds": {
+                "confirmed": confirmed_threshold,
+                "ambiguous": ambiguous_threshold,
+            },
+            "window_padding_seconds": padding_seconds,
+            "ambiguous_matches": [],
+            "errors": [],
+        }
+        resolver = getattr(self.search_engine, "_resolve_face_query", None)
+        if not callable(resolver):
+            trace.update({"status": "skipped", "reason": "face_query_resolver_unavailable"})
+            return [], trace
+        face_query = resolver(step.query or query, image_path)
+        if face_query is None:
+            trace.update({"status": "skipped", "reason": "face_query_unresolved"})
+            return [], trace
+        query_vector = np.asarray(face_query, dtype=np.float32).reshape(-1)
+        query_norm = float(np.linalg.norm(query_vector))
+        if query_norm <= 1e-12:
+            trace.update({"status": "skipped", "reason": "empty_face_query"})
+            return [], trace
+        query_vector /= query_norm
+
+        by_video: dict[str, list[MomentNode]] = {}
+        for node in selected:
+            by_video.setdefault(node.video_id, []).append(node)
+        trace["video_count"] = len(by_video)
+
+        confirmed: list[dict[str, Any]] = []
+        ambiguous: list[dict[str, Any]] = []
+        padding_ms = int(round(padding_seconds * 1000))
+        index_root = Path(self.settings.index_dir)
+        for video_id, video_nodes in by_video.items():
+            index_file = index_root / video_id / "face.npz"
+            if not index_file.exists():
+                trace["errors"].append({"video_id": video_id, "reason": "face_index_missing"})
+                trace["no_face_track_count"] += len(video_nodes)
+                continue
+            try:
+                with np.load(index_file, allow_pickle=False) as data:
+                    embeddings = np.asarray(data["embeddings"], dtype=np.float32)
+                    times = np.asarray(data["track_times_ms"], dtype=np.int64)
+            except (KeyError, OSError, ValueError) as exc:
+                trace["errors"].append(
+                    {"video_id": video_id, "reason": f"invalid_face_index:{type(exc).__name__}"}
+                )
+                trace["no_face_track_count"] += len(video_nodes)
+                continue
+            if embeddings.ndim != 2 or times.shape != (len(embeddings), 3):
+                trace["errors"].append({"video_id": video_id, "reason": "invalid_face_index_shape"})
+                trace["no_face_track_count"] += len(video_nodes)
+                continue
+            if not len(embeddings) or embeddings.shape[1] != len(query_vector):
+                trace["no_face_track_count"] += len(video_nodes)
+                continue
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            unit_embeddings = embeddings / np.maximum(norms, 1e-12)
+            similarities = unit_embeddings @ query_vector
+            trace["face_track_count"] += len(embeddings)
+
+            for node in video_nodes:
+                start_ms = max(0, int(round(node.start_time * 1000)) - padding_ms)
+                end_ms = int(round(node.end_time * 1000)) + padding_ms
+                matching = np.flatnonzero(
+                    (times[:, 0] <= end_ms) & (times[:, 1] >= start_ms)
+                )
+                if not len(matching):
+                    trace["no_face_track_count"] += 1
+                    continue
+                best_index = int(matching[int(np.argmax(similarities[matching]))])
+                cosine = float(similarities[best_index])
+                confidence = face_confidence(cosine)
+                track_start_ms, track_end_ms, best_ms = [
+                    int(value) for value in times[best_index]
+                ]
+                diagnostic = {
+                    "moment_id": node.key,
+                    "video_id": video_id,
+                    "start_time": node.start_time,
+                    "end_time": node.end_time,
+                    "track_start_time": round(track_start_ms / 1000, 3),
+                    "track_end_time": round(track_end_ms / 1000, 3),
+                    "best_time": round(best_ms / 1000, 3),
+                    "cosine": round(cosine, 6),
+                    "confidence": round(confidence, 6),
+                }
+                if cosine < confirmed_threshold:
+                    if cosine >= ambiguous_threshold:
+                        trace["ambiguous_count"] += 1
+                        ambiguous.append(diagnostic)
+                    else:
+                        trace["rejected_count"] += 1
+                    continue
+
+                trace["confirmed_count"] += 1
+                detail = (
+                    f"[candidate_window] face cosine={cosine:.3f} · "
+                    f"confidence={confidence * 100:.1f}% · confirmed"
+                )
+                support_result = dict(node.representative)
+                support_result.update(
+                    {
+                        "video_id": node.video_id,
+                        "video_name": node.video_name,
+                        "start_time": node.start_time,
+                        "end_time": node.end_time,
+                        "score": confidence,
+                        "modalities": ["face"],
+                        "above_threshold": True,
+                        "decision": "absolute_hit",
+                        "evidence": [
+                            {
+                                "modality": "face",
+                                "score": confidence,
+                                "raw_score": cosine,
+                                "decision": "absolute_hit",
+                                "best_time": best_ms / 1000,
+                                "unit_type": "track",
+                                "unit_id": best_index,
+                                "best_ms": best_ms,
+                                "features": {
+                                    "face_cosine": cosine,
+                                    "source": "candidate_window_npz",
+                                    "track_start_ms": track_start_ms,
+                                    "track_end_ms": track_end_ms,
+                                },
+                                "detail": detail,
+                            }
+                        ],
+                        "planner_evidence": {"moment_id": node.key},
+                    }
+                )
+                confirmed.append(support_result)
+
+        trace["ambiguous_matches"] = sorted(
+            ambiguous, key=lambda item: float(item["cosine"]), reverse=True
+        )[:20]
+        trace["status"] = "ok"
+        return sorted(confirmed, key=lambda item: float(item["score"]), reverse=True), trace
+
     def _restrict_to_current(
         self, nodes: list[MomentNode], results: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
@@ -1128,7 +1306,12 @@ class SnapMindPlannerLab:
                         )
                         nodes = sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)
                     else:
-                        raw_results = self._search_step(query, image_path, step, video_ids)
+                        if step.tool_id == "face.search" and effective_role == "support" and nodes:
+                            raw_results, tool_trace = self._face_support_step(
+                                query, image_path, nodes, step
+                            )
+                        else:
+                            raw_results = self._search_step(query, image_path, step, video_ids)
                         if step.operation == "rerank" and step.parameters.get("restrict_to_current") and nodes:
                             raw_results = self._restrict_to_current(nodes, raw_results)
                         raw_count = len(raw_results)
