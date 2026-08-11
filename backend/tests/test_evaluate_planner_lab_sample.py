@@ -77,3 +77,21 @@ def test_score_uses_positive_overlap_and_one_to_one_segment_matching():
     assert row["matched_segments_at_k"]["3"] == 2
     assert row["wrong_but_stable"] is False
     assert row["tool_ids"] == ["visual.search"]
+
+
+def test_partial_report_counts_only_selected_groups(tmp_path):
+    first = _group("q1", "A", "first")
+    second = _group("q2", "B", "second")
+    sample = {"groups": [first, second], "selection": {"seed": 7}}
+
+    report, rows = evaluation.build_report(
+        sample,
+        tmp_path,
+        {},
+        groups=[first],
+    )
+
+    assert len(rows) == 1
+    assert report["overall"]["query_count"] == 1
+    assert report["sample_query_count"] == 2
+    assert report["pending_query_count"] == 1
