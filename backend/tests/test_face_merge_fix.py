@@ -4,6 +4,7 @@ import pytest
 from app.retrieval.search import (
     Candidate,
     _face_scores_compatible,
+    _groups,
     _should_merge,
 )
 
@@ -269,3 +270,39 @@ def test_regression_user_bug_scenario():
         "修复前：时间相邻的高分和低分 face 被合并，导致片段显示 99% 但 evidence 含 0.4% 项。"
         "修复后：cosine 差距超过 0.15 应拒绝合并。"
     )
+
+
+def test_groups_prefers_overlapping_ocr_group_over_higher_score_nearby_group():
+    """A mixed-modality candidate joins the closest compatible group."""
+    higher_score_later = Candidate(
+        video_id="v1",
+        start_time=9.1,
+        end_time=10.0,
+        score=0.95,
+        modality="ocr",
+    )
+    lower_score_overlapping = Candidate(
+        video_id="v1",
+        start_time=5.0,
+        end_time=7.4,
+        score=0.80,
+        modality="ocr",
+    )
+    face = Candidate(
+        video_id="v1",
+        start_time=7.0,
+        end_time=7.4,
+        score=0.90,
+        modality="face",
+        raw_score=0.70,
+    )
+
+    groups = _groups(
+        [higher_score_later, lower_score_overlapping, face],
+        gap=2.0,
+        max_duration=15.0,
+    )
+
+    face_group = next(group for group in groups if face in group)
+    assert lower_score_overlapping in face_group
+    assert higher_score_later not in face_group

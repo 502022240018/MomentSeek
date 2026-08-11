@@ -546,6 +546,17 @@ def _should_merge_ocr_only(
     return True
 
 
+def _temporal_gap(group: list[Candidate], candidate: Candidate) -> float:
+    """Return the non-negative time gap between a group and a candidate."""
+    group_start = min(item.start_time for item in group)
+    group_end = max(item.end_time for item in group)
+    return max(
+        candidate.start_time - group_end,
+        group_start - candidate.end_time,
+        0.0,
+    )
+
+
 def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_duration: float) -> bool:
     """判断候选是否应合并到组内。
 
@@ -578,11 +589,7 @@ def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_
 
     # 双向间隙判断：候选在组前（group_start - candidate.end_time）或
     # 组后（candidate.start_time - group_end），取两者中的正值（无间隙时为0）
-    gap_between = max(
-        candidate.start_time - group_end,  # 候选在组后的间隙
-        group_start - candidate.end_time,  # 候选在组前的间隙
-        0.0,                                # 重叠时间隙为0
-    )
+    gap_between = _temporal_gap(group, candidate)
     near = gap_between <= gap
 
     # Face-only 合并须额外满足 cosine 带宽约束。face track 是"同一人连续出现"
@@ -707,7 +714,7 @@ def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -
 
     算法：
     1. OCR 使用分数优先聚合（_groups_ocr_score_first），从高分种子向两边扩展
-    2. 非 OCR 候选遍历所有现存组，找到第一个可合并的组（而非只看 groups[-1]）
+    2. 非 OCR 候选遍历所有现存组，选择时间间隔最小的可合并组
     3. 最终按时间排序保证展示稳定
 
     关键修复（2026-08-11）：
@@ -730,11 +737,13 @@ def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -
             ocr_groups = _groups_ocr_score_first(ocr_candidates)
             groups.extend(ocr_groups)
 
-    # 非 OCR 候选遍历所有组择优（修复只看 groups[-1] 的问题）
+    # 非 OCR 候选遍历所有组，优先并入时间上最近的组。
+    # 时间间隔相同时，min() 保留现有组顺序作为稳定 tie-breaker。
     for candidate in sorted(non_ocr_candidates, key=lambda item: (item.video_id, item.start_time, item.end_time)):
-        target_group = next(
+        target_group = min(
             (g for g in groups if _should_merge(g, candidate, gap, max_duration)),
-            None,
+            key=lambda g: _temporal_gap(g, candidate),
+            default=None,
         )
         if target_group is not None:
             target_group.append(candidate)

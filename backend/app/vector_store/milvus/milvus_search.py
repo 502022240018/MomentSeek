@@ -132,7 +132,7 @@ def _reset_index_verification() -> None:
 
 
 def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
-    """Fail-fast if the live index type has drifted from the configured one.
+    """Fail-fast if the live ANN index configuration has drifted.
 
     A HNSW→DISKANN config change does NOT rebuild an existing collection
     (_init_collections only load()s it), so a stale collection would silently
@@ -150,7 +150,8 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
     next search retries and drift detection is not permanently disabled. Only a
     structural limitation — a lightweight client/collection that cannot introspect
     at all (AttributeError/TypeError), or a missing/non-str index type — is cached
-    to avoid re-attempting (and log-spamming) on every search.
+    to avoid re-attempting (and log-spamming) on every search. A real index must
+    match both its configured index type and metric type.
     """
     if modality in _verified_index_modalities:
         return
@@ -158,6 +159,7 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
         if modality in _verified_index_modalities:
             return
         expected = get_modality_index_type(modality)
+        expected_metric = _MODALITY_METRIC[modality]
         # col.index() (the RPC) is intentionally inside the lock so that
         # concurrent searches on first startup do not fan out duplicate
         # introspection RPCs. The lock is held for one network round-trip
@@ -172,7 +174,9 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
                 )
                 _verified_index_modalities.add(modality)
                 return
-            actual = index_info.params.get("index_type", "UNKNOWN")
+            index_params = index_info.params or {}
+            actual = index_params.get("index_type", "UNKNOWN")
+            actual_metric = index_params.get("metric_type", "UNKNOWN")
         except MilvusServiceError:
             raise
         except (AttributeError, TypeError) as exc:
@@ -207,7 +211,18 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
                 f"{expected} but collection has {actual}. Rebuild the "
                 f"{modality} collection with the new index config before serving."
             )
-        logger.debug("%s index type verified: %s", modality, actual)
+        if actual_metric != expected_metric:
+            raise MilvusServiceError(
+                f"Metric type mismatch for modality={modality!r}: config expects "
+                f"{expected_metric} but collection has {actual_metric}. Rebuild the "
+                f"{modality} vector index with the new metric before serving."
+            )
+        logger.debug(
+            "%s ANN index verified: index_type=%s metric_type=%s",
+            modality,
+            actual,
+            actual_metric,
+        )
         _verified_index_modalities.add(modality)
 
 

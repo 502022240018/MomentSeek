@@ -43,8 +43,12 @@ def _hit(distance: float, utterance_idx: int, track_id: int = 0) -> MagicMock:
 def _make_client(hits: list[MagicMock]) -> tuple[MagicMock, MagicMock]:
     collection = MagicMock()
     collection.search.return_value = [hits]
-    # _verify_ann_index_type_once introspects col.index() — present DISKANN.
-    collection.index.return_value.params = {"index_type": "DISKANN"}
+    # _verify_ann_index_type_once introspects col.index() — present the expected
+    # Speaker index type and metric.
+    collection.index.return_value.params = {
+        "index_type": "DISKANN",
+        "metric_type": "COSINE",
+    }
     client = MagicMock()
     client.collection_for.return_value = collection
     return client, collection

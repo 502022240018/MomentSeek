@@ -128,7 +128,7 @@ raise MilvusServiceError(...)
 
 **⚠️ `search_list >= limit` 硬约束(已内建)**:`_ann_search` DISKANN 分支已用 `search_list = max(limit, _diskann_search_list_for(modality))`。face 上层 `channel_limits["face"]` 默认 `limit*3`(`search.py` L1311)可较大,固定 128 在 `ann_limit>128` 时违约;`max(limit, setting)` 兜住。face 迁移**自动获得**该动态取值。
 
-**3.5 索引类型 fail-fast 校验**:`_verify_ann_index_type_once` 按模态取 `get_modality_index_type("face")`,迁移后自动校验 DISKANN。**部署顺序含义**:配置改为 DISKANN 后,若 collection 仍是旧 IVF_FLAT,首次 face 检索会 fail-fast 抛 `MilvusServiceError`。因此**改配置 + 重灌数据必须先于服务启用**。
+**3.5 索引配置 fail-fast 校验**:`_verify_ann_index_type_once` 按模态校验 index type 与 metric type，Face 必须为 `DISKANN/COSINE`。若 collection 仍是旧 `IVF_FLAT/L2` 或迁移成 `DISKANN/L2`，首次 Face 检索会 fail-fast 抛 `MilvusServiceError`。因此必须先执行 §5 的一次性迁移，再启用新服务。
 
 ---
 
@@ -189,8 +189,8 @@ Face 查询是人脸 ArcFace 向量,无文本、无词面语义,BM25 无意义;s
 ### 4. `ann_limit` 从 `limit*2` 收窄为 `limit*1`
 重排取消后宽召回无意义。P0-b 的 `face_recall_multiplier` 默认 1,与 P0-a 的 `limit*2` 存在行为差异,故 **P0-b 与 P1 一并落地**规避过渡窗口(本次即一并落地)。
 
-### 5. 迁移:开发阶段直接重灌,不做存量原地迁移
-本项目开发早期,**不提供独立迁移脚本、不做存量原地迁移**(区别于 Speaker 的 `migrate_speaker_diskann_index.py`)。改配置后直接重灌 face 索引数据(drop collection → `_init_collections` 以新 DISKANN 配置重建,或重跑 face 索引)。原因:`_init_collections` 对已存在的 collection 只 `load()` 不重建索引,仅改配置只对全新 collection 生效;schema 字段不变 → 重建时向量无需重新嵌入。
+### 5. 迁移:一次性原地替换向量索引
+正式环境使用 `scripts/migrate_face_diskann_index.py`，只将 `face_embeddings.embedding` 的旧索引原地替换为 `DISKANN/COSINE`。schema 与向量数据均未改变，因此不读取 NPZ、不删除 collection、不重新生成人脸向量；脚本会校验迁移前后行数一致。所有正式环境迁移完成后可删除该一次性脚本。
 
 ---
 
@@ -203,11 +203,12 @@ Face 查询是人脸 ArcFace 向量,无文本、无词面语义,BM25 无意义;s
 | `backend/app/vector_store/milvus/milvus_client.py` | `face_embeddings` IVF_FLAT/L2 → DISKANN/COSINE |
 | `backend/app/core/settings.py` | 新增 3 项 face settings + 2 个 validator |
 | `backend/app/retrieval/search.py` | 调用侧硬编码 `0.35`→`None`;删孤儿 `_face_candidates()`;删死方法 `_candidates_for_video()`;`_face()` provider `"cpu"`→`face_provider`、device_id `0`→`npu_device_id` |
+| `backend/scripts/migrate_face_diskann_index.py` | 一次性将既有 Face 向量索引原地迁移为 `DISKANN/COSINE`，保留 collection、行数据与 manifest |
 | `.env.0829` | 新增 face 配置示例(= 默认值) |
 | `backend/tests/test_milvus_search_metric.py` | 参数元组 `("face","L2","IVF_FLAT")` → `("face","COSINE","DISKANN")`;删 `test_l2_cosine_round_trip`;`test_face_candidates_l2_to_cosine_conversion` → `test_face_candidates_trusts_cosine_distance`(mock `.distance` 直接返回 cosine,无 embedding 依赖);模块 docstring 更新 |
 | `backend/tests/test_speaker_index_verify.py` | `test_face_ivf_flat_not_judged_against_speaker_type` → 拆为 `test_face_diskann_collection_passes`(DISKANN 通过)+ `test_face_stale_ivf_flat_collection_fails_fast`(旧 IVF_FLAT fail-fast);模块 docstring 更新 |
 
-### 容器内实测(0829 镜像,已通过)
+### 原 PR 容器内实测(0829 镜像,本次轻量补丁前已通过)
 在 `momentseek-0829-platform` 容器内(Python 3.11.6 + 真实 `pymilvus`/`pydantic`/`numpy`)执行,edited 源文件经 `docker cp` 注入后运行:
 
 ```bash
@@ -230,7 +231,7 @@ python -m pytest tests/test_search.py tests/test_settings.py tests/test_speaker_
 - face `Candidate.raw_score` == 信任的 Milvus COSINE `_distance`(无 L2→cosine 转换)。
 - `_MODALITY_METRIC["face"]==COSINE`、`get_modality_index_type("face")==DISKANN`,与 `_COLLECTION_CONFIGS` 一致(动态一致性测试自动跟随)。
 - face 走 DISKANN 分支;`_diskann_search_list_for("face")` 返回配置值不 raise。
-- 索引漂移 fail-fast:face 期望 DISKANN、实际 DISKANN → 通过;实际旧 IVF_FLAT → 抛 `MilvusServiceError`。
+- 索引漂移 fail-fast:Face 只接受 `DISKANN/COSINE`;旧 `IVF_FLAT/L2` 或 `DISKANN/L2` 均抛 `MilvusServiceError`。
 
 ### 等价性验证方法(落地环境执行,本阶段以功能正确为主)
 - **重打分消除等价性——索引类型须保持不变**:同为 IVF_FLAT 下,对比"重打分开/关"两条路径,断言 `np.allclose(old_cosines, new_cosines, atol=1e-4)` 且 top-k `track_idx` 一致(IVF_FLAT 精确重排,最干净的等价性证明场景)。
@@ -276,7 +277,7 @@ python -m pytest tests/test_search.py tests/test_settings.py tests/test_speaker_
 
 ### 验证
 - **容器内逻辑验证**(`momentseek-0829-platform`,真实依赖,6 场景全绿):用户 bug 场景(0.72 vs −0.01)拒绝合并、同人相近(0.72 vs 0.68)合并、大跌拒绝/小跌接受、混合模态不校验 cosine、`raw_score=None` 兜底。
-- **单测**:新增 `backend/tests/test_face_merge_fix.py`(10 例,含用户场景回归 `test_regression_user_bug_scenario`)。
+- **单测**:新增 `backend/tests/test_face_merge_fix.py`(11 例,含用户场景回归 `test_regression_user_bug_scenario` 与最近 OCR 组选择回归)。
 - 已 `docker cp` 注入容器并 `docker restart momentseek-0829-platform`,`/api/health` 正常。
 
 ### 遗留与调优建议
@@ -316,12 +317,13 @@ _should_merge(groups[-1]=组2(10-12s), face(6-7s)):
 3. 融合后 `start_time=min(6,10)=6`、`end_time=max(7,12)=12`,时间边界错误
 
 **修复** (L702-742):
-1. **非OCR候选遍历所有组择优**:
+1. **非OCR候选遍历所有组并选择时间间隔最小的组**:
    ```python
    for candidate in sorted(non_ocr_candidates, ...):
-       target_group = next(
+       target_group = min(
            (g for g in groups if _should_merge(g, candidate, gap, max_duration)),
-           None,
+           key=lambda g: _temporal_gap(g, candidate),
+           default=None,
        )
        if target_group is not None:
            target_group.append(candidate)
