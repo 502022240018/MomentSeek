@@ -254,6 +254,20 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
 .stats small { margin-top: auto; color: #aaa9a3; font-size: 9px; }
 .chip.speaker { color: #6e4a18; background: #f6dfb9; }
 .speaker-page { display: flex; max-width: 1320px; margin: auto; flex-direction: column; gap: 20px; }
+.face-gallery-page { display: flex; max-width: 1320px; margin: 36px auto 20px; flex-direction: column; gap: 18px; }
+.face-gallery-toolbar { display: flex; gap: 24px; align-items: center; justify-content: space-between; }
+.face-gallery-toolbar p { margin: 6px 0 0; color: var(--muted); max-width: 620px; }
+.face-gallery-toolbar label { min-width: 300px; }
+.face-gallery-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.face-gallery-card { overflow: hidden; padding: 0; }
+.face-portrait { display: block; position: relative; height: 230px; background: #111; }
+.face-portrait img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.face-portrait span { position: absolute; right: 10px; bottom: 10px; color: white; background: rgba(0,0,0,.68); padding: 5px 9px; border-radius: 999px; font-size: 12px; }
+.face-gallery-info { padding: 18px; }
+.face-gallery-info h3 { margin: 4px 0 8px; }
+.face-gallery-info p, .face-gallery-note { color: var(--muted); }
+.face-gallery-actions { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; margin-top: 14px; }
+.face-gallery-actions select { min-width: 0; }
 .speaker-toolbar { display: grid; padding: 22px 26px; grid-template-columns: 1fr minmax(280px, 420px) auto; gap: 24px; align-items: end; }
 .speaker-toolbar h2 { margin: 5px 0 0; }
 .speaker-toolbar label { display: flex; flex-direction: column; gap: 6px; color: #77766f; font-size: 10px; }
@@ -403,6 +417,9 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
   .upload-panel { grid-template-columns: 1fr 1fr; }
   .upload-panel > div:first-child { grid-column: 1 / -1; }
   .speaker-grid { grid-template-columns: 1fr; }
+  .face-gallery-grid { grid-template-columns: 1fr; }
+  .face-gallery-toolbar { align-items: stretch; flex-direction: column; }
+  .face-gallery-actions { grid-template-columns: 1fr; }
   .grading-hero { grid-template-columns: 1fr; }
   .grading-overview { max-width: 440px; }
   .grading-workspace { grid-template-columns: 355px 1fr; gap: 20px; }
