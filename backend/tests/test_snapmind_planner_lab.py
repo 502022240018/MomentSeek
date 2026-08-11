@@ -11,6 +11,7 @@ from app.orchestration.snapmind_lab import (
     CandidatePlan,
     HeuristicPlanGenerator,
     IdentityMention,
+    MomentNode,
     PlanStep,
     SnapMindPlannerLab,
 )
@@ -241,11 +242,55 @@ def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnost
     assert confirmed["modalities"] == ["face", "visual"]
     assert ambiguous["planner_evidence"]["support_source_count"] == 0
     assert ambiguous["modalities"] == ["visual"]
+    assert ambiguous["planner_evidence"]["diagnostics"]["s2:face"]["status"] == "ambiguous"
     tool_trace = outcome["trace"][1]["tool_trace"]
     assert tool_trace["strategy"] == "candidate_window_face_verification"
     assert tool_trace["confirmed_count"] == 1
     assert tool_trace["ambiguous_count"] == 1
     assert tool_trace["ambiguous_matches"][0]["cosine"] == pytest.approx(0.25)
+
+
+def test_reranker_face_evidence_pool_keeps_confirmed_and_ambiguous_without_scoring():
+    def node(start: float, score: float, status: str | None) -> MomentNode:
+        item = MomentNode(
+            video_id="video-1",
+            video_name="demo.mp4",
+            start_time=start,
+            end_time=start + 3,
+            representative=_result("visual", start, score),
+            primary_contributions={"visual.search": score},
+            aggregate_score=score,
+        )
+        if status:
+            item.diagnostics["s2:face"] = {"status": status, "cosine": 0.25}
+        return item
+
+    rerank = PlanStep(
+        step_id="s3",
+        tool_id="vlm.rerank",
+        operation="rerank",
+        role="verifier",
+        query="王俊凯吃包子特写",
+        top_k=10,
+        parameters={
+            "candidate_pool": "face_evidence",
+            "identity_step_id": "s2",
+            "include_face_statuses": ["confirmed", "ambiguous"],
+        },
+    )
+    confirmed = node(10, 0.7, "confirmed")
+    ambiguous = node(30, 0.6, "ambiguous")
+    unrelated = node(50, 0.9, None)
+
+    selected, trace = SnapMindPlannerLab._select_rerank_nodes(
+        [unrelated, confirmed, ambiguous], rerank
+    )
+
+    assert [item.start_time for item in selected] == [10, 30]
+    assert trace["selected_candidate_count"] == 2
+    assert trace["status_counts"] == {"confirmed": 1, "ambiguous": 1}
+    assert ambiguous.support_contributions == {}
+    assert ambiguous.aggregate_score == pytest.approx(0.6)
 
 
 def test_face_primary_keeps_global_recall_behavior():
