@@ -351,9 +351,11 @@ def build_report(
     sample: dict[str, Any],
     responses_dir: Path,
     platform_to_source: dict[str, str],
+    groups: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
-    for group in sample.get("groups") or []:
+    report_groups = list(groups if groups is not None else sample.get("groups") or [])
+    for group in report_groups:
         path = responses_dir / safe_result_name(str(group["semantic_query_id"]))
         if not path.is_file():
             rows.append({
@@ -377,6 +379,11 @@ def build_report(
         "schema_version": "planner-lab-sample-report-v1",
         "generated_at": utcnow(),
         "selection": sample.get("selection"),
+        "sample_query_count": len(sample.get("groups") or []),
+        "pending_query_count": max(
+            0,
+            len(sample.get("groups") or []) - len(report_groups),
+        ),
         "overall": aggregate(rows),
         "by_category": {
             category: aggregate([row for row in rows if row.get("category") == category])
@@ -460,7 +467,7 @@ def main() -> int:
                 }
             write_json(output_path, payload)
 
-    report, rows = build_report(sample, responses_dir, platform_to_source)
+    report, rows = build_report(sample, responses_dir, platform_to_source, groups=groups)
     report["configuration"] = {
         "base_url": args.base_url,
         "folder_id": folder_id,
