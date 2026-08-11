@@ -9,6 +9,7 @@ from app.orchestration.retrieval_orchestration import OrchestrationError
 from app.orchestration.snapmind_lab import (
     CandidatePlan,
     HeuristicPlanGenerator,
+    IdentityMention,
     PlanStep,
     SnapMindPlannerLab,
 )
@@ -375,8 +376,46 @@ def test_registered_entity_is_exposed_and_injected_into_plans():
     proposal = lab.propose("黄晓明在前台学习收银机操作", "auto", None, False)
 
     assert proposal["matched_entity"]["name"] == "黄晓明"
+    assert proposal["clarifications"] == []
     for plan in proposal["plans"]:
         assert any(step["tool_id"] == "face.search" for step in plan["steps"])
+
+
+def test_unregistered_identity_mention_requires_user_clarification():
+    lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["visual", "face", "asr", "ocr"]))
+    plan_set = HeuristicPlanGenerator().generate(
+        "周杰伦弹钢琴近景",
+        ["visual", "face", "asr", "ocr"],
+        False,
+    )
+    plan_set.identity_mentions = [IdentityMention(
+        name="周杰伦",
+        visual_fallback_query="一名男子弹钢琴的近景",
+        rationale="查询包含明确人物姓名",
+    )]
+
+    clarifications = lab._identity_clarifications(
+        "周杰伦弹钢琴近景",
+        plan_set,
+        None,
+        False,
+    )
+
+    assert len(clarifications) == 1
+    assert clarifications[0]["name"] == "周杰伦"
+    assert clarifications[0]["visual_fallback_query"] == "一名男子弹钢琴的近景"
+    assert clarifications[0]["options"] == [
+        "upload_reference", "generic_visual", "keep_original",
+    ]
+
+
+def test_identity_clarification_ignores_hallucinated_or_image_resolved_mentions():
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    plan_set = HeuristicPlanGenerator().generate("一只猫在窗边", ["visual"], False)
+    plan_set.identity_mentions = [IdentityMention(name="周杰伦")]
+
+    assert lab._identity_clarifications("一只猫在窗边", plan_set, None, False) == []
+    assert lab._identity_clarifications("周杰伦弹钢琴", plan_set, None, True) == []
 
 
 def test_ranking_stability_cannot_skip_pending_verifier(monkeypatch):

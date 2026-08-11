@@ -97,12 +97,21 @@ class CandidatePlan(BaseModel):
         return self
 
 
+class IdentityMention(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(min_length=1, max_length=100)
+    visual_fallback_query: str = Field(default="", max_length=500)
+    rationale: str = Field(default="", max_length=500)
+
+
 class PlanSet(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     query_intent: str
     constraints: list[str] = Field(default_factory=list)
     negative_constraints: list[str] = Field(default_factory=list)
+    identity_mentions: list[IdentityMention] = Field(default_factory=list, max_length=5)
     plans: list[CandidatePlan] = Field(min_length=3, max_length=3)
 
     @model_validator(mode="after")
@@ -517,6 +526,40 @@ class SnapMindPlannerLab:
             if entity.get(key) is not None
         } or None
 
+    def _identity_clarifications(
+        self,
+        query: str,
+        plan_set: PlanSet,
+        matched_entity: dict[str, Any] | None,
+        has_query_image: bool,
+    ) -> list[dict[str, Any]]:
+        if matched_entity or has_query_image:
+            return []
+        clarifications: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for mention in plan_set.identity_mentions:
+            name = mention.name.strip()
+            if not name or name in seen or name not in query:
+                continue
+            seen.add(name)
+            if self.catalog.find_entity_in_text(name):
+                continue
+            fallback_query = mention.visual_fallback_query.strip()
+            if not fallback_query:
+                fallback_query = " ".join(query.replace(name, " ").split()).strip(
+                    " ,，、;；:："
+                )
+            clarifications.append({
+                "clarification_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"identity:{name}")),
+                "kind": "unregistered_identity",
+                "name": name,
+                "message": f"人物库中还没有“{name}”，当前无法用人脸证据确认身份。",
+                "visual_fallback_query": fallback_query or "人物",
+                "rationale": mention.rationale,
+                "options": ["upload_reference", "generic_visual", "keep_original"],
+            })
+        return clarifications
+
     @staticmethod
     def _normalize_llm_payload(payload: dict[str, Any]) -> dict[str, Any]:
         """Repair model-owned identifiers before strict semantic validation.
@@ -658,10 +701,17 @@ class SnapMindPlannerLab:
             query,
             matched_entity,
         )
+        clarifications = self._identity_clarifications(
+            query,
+            plan_set,
+            matched_entity,
+            has_query_image,
+        )
         return {
             "mode": mode,
             "available_modalities": available,
             "matched_entity": public_entity,
+            "clarifications": clarifications,
             "planner_trace": trace,
             **plan_set.model_dump(),
         }
