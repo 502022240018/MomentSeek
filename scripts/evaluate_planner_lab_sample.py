@@ -124,6 +124,23 @@ def build_sample_catalog(
     }
 
 
+def select_run_groups(
+    groups: list[dict[str, Any]],
+    semantic_query_ids: list[str],
+    limit: int | None,
+) -> list[dict[str, Any]]:
+    selected = groups
+    if semantic_query_ids:
+        by_id = {str(group["semantic_query_id"]): group for group in groups}
+        missing = [query_id for query_id in semantic_query_ids if query_id not in by_id]
+        if missing:
+            raise ValueError(f"Unknown semantic query IDs: {', '.join(missing)}")
+        selected = [by_id[query_id] for query_id in semantic_query_ids]
+    if limit is not None:
+        selected = selected[: max(0, limit)]
+    return selected
+
+
 def _post_form(
     session: requests.Session,
     url: str,
@@ -404,6 +421,12 @@ def main() -> int:
     parser.add_argument("--plan-id", choices=("fast", "balanced", "deep"), default="balanced")
     parser.add_argument("--mode", choices=("guide", "assist", "auto"), default="auto")
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--query-id",
+        action="append",
+        default=[],
+        help="Run one semantic_query_id; repeat for multiple exact cases",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=360)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
@@ -441,9 +464,14 @@ def main() -> int:
 
     responses_dir = args.run_dir / "query_responses"
     responses_dir.mkdir(parents=True, exist_ok=True)
-    groups = list(sample.get("groups") or [])
-    if args.limit is not None:
-        groups = groups[: max(0, args.limit)]
+    try:
+        groups = select_run_groups(
+            list(sample.get("groups") or []),
+            args.query_id,
+            args.limit,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     with requests.Session() as session:
         for index, group in enumerate(groups, start=1):
             output_path = responses_dir / safe_result_name(str(group["semantic_query_id"]))
