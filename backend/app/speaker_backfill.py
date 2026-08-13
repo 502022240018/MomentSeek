@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 
 from app.db import Catalog
@@ -19,7 +18,6 @@ def main() -> None:
     settings = get_settings()
     catalog = Catalog(settings.db_path)
     summary = []
-    failed = 0
     for video in catalog.list_videos():
         if args.video_ids and video["id"] not in args.video_ids:
             continue
@@ -53,13 +51,10 @@ def main() -> None:
             item = {"status": "completed", "video_id": video["id"], "name": video["name"], **result}
         except Exception as exc:
             item = {"status": "failed", "video_id": video["id"], "name": video["name"], "error": str(exc)}
-            failed += 1
         item["wall_seconds"] = round(time.perf_counter() - started, 3)
         summary.append(item)
         print(json.dumps(item, ensure_ascii=False), flush=True)
     print(json.dumps({"status": "done", "results": summary}, ensure_ascii=False), flush=True)
-    if failed:
-        sys.exit(2)
 
 
 if __name__ == "__main__":
