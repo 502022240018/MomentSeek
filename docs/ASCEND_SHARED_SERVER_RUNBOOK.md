@@ -121,6 +121,24 @@ chmod +x scripts/update_and_deploy_ascend_shared_server.sh
 
 必须显式传 `NPU_ID=5 APP_PORT=8000`，否则脚本会用自身默认端口 18500，与当前公网入口不一致。
 
+正式启用 Milvus 时还必须显式传入宿主机可访问的地址。该部署脚本使用
+`--network host`，不要填写只在 Compose 私有网络中有效的服务名：
+
+```bash
+MILVUS_ENABLED=true \
+MILVUS_HOST=127.0.0.1 \
+MILVUS_PORT=<宿主机映射的 Milvus gRPC 端口> \
+MILVUS_READ_ENABLED=true \
+MILVUS_WRITE_ENABLED=true \
+MILVUS_FALLBACK_ENABLED=true \
+NPU_ID=5 APP_PORT=8000 \
+  bash scripts/update_and_deploy_ascend_shared_server.sh
+```
+
+启用 Milvus 后，部署脚本会在构建和停旧服务之前执行 TCP 预检；地址不可达时
+直接终止部署。初次切换期间保留 fallback，完成覆盖率和故障恢复验证后再单独
+进行 fail-closed 测试。
+
 ## 6. 两层脚本分别做什么
 
 ### 6.1 `update_and_deploy_ascend_shared_server.sh`
@@ -138,16 +156,16 @@ chmod +x scripts/update_and_deploy_ascend_shared_server.sh
 ### 6.2 `deploy_ascend_shared_server.sh`
 
 1. 获取部署锁，防止并发部署。
-2. 检查磁盘、NPU、端口、Git 和 InsightFace wheel 校验和。
-3. 在 `.server-build/` 生成 openEuler/MindIE 依赖约束和 Dockerfile。
+2. 检查磁盘、NPU、端口、Git、Milvus 地址和 InsightFace wheel 校验和。
+3. 将仓库内受版本控制的 `Dockerfile.ascend` 暂存到 `.server-build/`。
 4. 构建前端、安装后端依赖，并保留基础镜像的 Torch/torch-npu 栈。
 5. 生成以 Git commit 短 SHA 命名的镜像。
-6. 查询旧服务任务，存在 queued/running 任务时拒绝部署。
-7. 将旧容器改名为 `momentseek-29154-platform-rollback` 并停止，以释放常驻模型占用的 NPU。
-8. 最多重试三次 NPU、关键 Python 包和 Silero ONNX smoke test，再用原 runtime/models 挂载启动新容器。
-9. 轮询 health；失败自动删除新容器并恢复旧容器。
-10. 成功后删除临时回滚容器，并标记镜像 `current`。
-11. 输出模型清单；缺模型会报告，但不会让 API 部署整体失败。
+6. 在停止旧服务前校验生产清单中的所有 required 模型；缺失时立即终止。
+7. 查询旧服务任务，存在 queued/running 任务时拒绝部署。
+8. 将旧容器改名为 `momentseek-29154-platform-rollback` 并停止，以释放常驻模型占用的 NPU。
+9. 最多重试三次 NPU、关键 Python 包和 Silero ONNX smoke test，再用原 runtime/models 挂载启动新容器。
+10. 轮询 health 并执行 OCR 与模型清单复检；任何一项失败都会删除新容器并恢复旧容器。
+11. 全部检查通过后删除临时回滚容器，并标记镜像 `current`。
 
 Docker 会复用未变化的构建层。只改应用代码仍需生成镜像和替换容器，但通常不会重装全部依赖。
 

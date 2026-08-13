@@ -384,7 +384,7 @@ def test_semantic_query_is_encoded_once_per_model_per_request(tmp_path):
     assert calls == [("hello", "semantic-a")]
 
 
-def test_retrieval_profiler_accumulates_nested_timings_and_counters():
+def test_retrieval_profiler_accumulates_timings_and_counters():
     profiler = RetrievalProfiler()
 
     with profiler.span("query_encode", "visual"):
@@ -433,6 +433,96 @@ def test_prewarm_loads_and_reports_resident_query_models(tmp_path):
     assert status["text_models"] == [settings.asr_semantic_model]
     assert len(visual_calls) == 1
     assert len(text_calls) == 1
+
+
+def test_prewarm_scans_deduplicated_manifest_model_keys(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        app_data_dir=tmp_path / "runtime",
+        app_model_dir=tmp_path / "models",
+        search_prewarm_enabled=True,
+        asr_semantic_enabled=True,
+    )
+    settings.ensure_dirs()
+    catalog = Catalog(settings.db_path)
+    visual_dir = _create_video(
+        settings,
+        catalog,
+        video_id="visual-model",
+    )
+    catalog.update_video("visual-model", indexed_modalities=["visual"])
+    _write_manifest(visual_dir, "visual-model", {
+        "visual": {
+            "file": "visual.npz",
+            "model_key": "chinese-clip-vit-b16",
+        }
+    })
+    np.savez_compressed(visual_dir / "visual.npz", value=np.asarray([1]))
+
+    asr_dir = _create_video(settings, catalog, video_id="semantic-model")
+    catalog.update_video("semantic-model", indexed_modalities=["asr"])
+    _write_manifest(asr_dir, "semantic-model", {
+        "asr": {
+            "file": "asr.npz",
+            "semantic_model_key": "semantic-from-manifest",
+        }
+    })
+    np.savez_compressed(asr_dir / "asr.npz", value=np.asarray([1]))
+
+    engine = SearchEngine(settings, catalog)
+    visual_calls = []
+    text_calls = []
+
+    class StubVisual:
+        def encode_queries(self, texts, image_path, alpha=0.5):
+            return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    def fake_clip(model, profiler=None):
+        visual_calls.append(model)
+        return engine._clip_encoders.setdefault(model, StubVisual())
+
+    def fake_text(text, model, profiler=None):
+        text_calls.append(model)
+        engine._text_encoders[(model, "cpu")] = object()
+        return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    engine._clip = fake_clip  # type: ignore[method-assign]
+    engine._encode_asr_query = fake_text  # type: ignore[method-assign]
+
+    status = engine.prewarm()
+
+    assert status["status"] == "ready"
+    assert set(visual_calls) == {
+        settings.visual_model,
+        "chinese-clip-vit-b16",
+    }
+    assert set(text_calls) == {
+        settings.asr_semantic_model,
+        "semantic-from-manifest",
+    }
+    assert status["requested_visual_models"] == sorted(set(visual_calls))
+    assert status["requested_text_models"] == sorted(set(text_calls))
+
+
+def test_query_model_status_reads_encoder_maps_under_lock(tmp_path):
+    settings = _settings(tmp_path)
+    engine = SearchEngine(
+        settings,
+        Catalog(settings.db_path),
+    )
+
+    class LockCheckingDict(dict):
+        def __iter__(self):
+            assert engine._encoder_lock._is_owned()  # type: ignore[attr-defined]
+            return super().__iter__()
+
+    engine._clip_encoders = LockCheckingDict({"visual-a": object()})
+    engine._text_encoders = LockCheckingDict({("text-a", "cpu"): object()})
+
+    status = engine.query_model_status()
+
+    assert status["visual_models"] == ["visual-a"]
+    assert status["text_models"] == ["text-a"]
 
 
 def test_asr_v3_lexical_search_uses_chunk_times_and_texts(tmp_path):
@@ -765,7 +855,7 @@ def _make_visual_index(settings, catalog, video_id="v-shadow"):
 def test_shadow_compare_fires_without_milvus_read_routing(tmp_path):
     """shadow_compare_log is called even when reads are served from NPZ
     (MILVUS_READ_ENABLED=false / MILVUS_ROLLOUT_PERCENT=0)."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
 
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
@@ -783,8 +873,12 @@ def test_shadow_compare_fires_without_milvus_read_routing(tmp_path):
         patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=False),
         patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
         patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
-        patch("app.indexing.milvus_client.ensure_milvus_reachable"),
-        patch("app.indexing.milvus_client.get_milvus_client", return_value=MagicMock()),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_query_rows_for_videos",
+            return_value={video_id: []},
+        ),
         patch("app.indexing.milvus_search.milvus_visual_candidates", return_value=[]),
         patch("app.indexing.milvus_search.shadow_compare_log") as mock_shadow_log,
     ):
@@ -802,7 +896,7 @@ def test_shadow_compare_fires_without_milvus_read_routing(tmp_path):
 
 def test_shadow_compare_milvus_error_silenced_in_shadow_only_mode(tmp_path):
     """A MilvusServiceError in shadow-only mode is swallowed; NPZ results are returned."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
     from app.indexing.milvus_search import MilvusServiceError
 
     settings = _settings(tmp_path)
@@ -821,8 +915,12 @@ def test_shadow_compare_milvus_error_silenced_in_shadow_only_mode(tmp_path):
         patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=False),
         patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=True),
         patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
-        patch("app.indexing.milvus_client.ensure_milvus_reachable"),
-        patch("app.indexing.milvus_client.get_milvus_client", return_value=MagicMock()),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_query_rows_for_videos",
+            return_value={video_id: []},
+        ),
         patch("app.indexing.milvus_search.milvus_visual_candidates",
               side_effect=MilvusServiceError("connection refused")),
     ):
@@ -831,6 +929,125 @@ def test_shadow_compare_milvus_error_silenced_in_shadow_only_mode(tmp_path):
 
     # NPZ results are still served correctly
     assert len(results) > 0
+
+
+def test_milvus_batches_are_scored_before_next_batch_is_loaded(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    settings.milvus_search_video_batch_size = 2
+    catalog = Catalog(settings.db_path)
+    video_ids = [
+        _make_visual_index(settings, catalog, video_id=f"batch-{index}")
+        for index in range(3)
+    ]
+    engine = SearchEngine(settings, catalog)
+    events = []
+
+    def fake_query(_client, modality, batch_ids, _fields, _profiler):
+        events.append(("query", modality, tuple(batch_ids)))
+        return {
+            video_id: [{"video_id": video_id}]
+            for video_id in batch_ids
+        }
+
+    def fake_candidates(video, **_kwargs):
+        events.append(("score", video["id"]))
+        return [Candidate(video["id"], 0.0, 1.0, 0.8, "visual")]
+
+    with (
+        patch(
+            "app.indexing.milvus_flags.should_use_milvus_for_video",
+            return_value=True,
+        ),
+        patch(
+            "app.indexing.milvus_flags.milvus_shadow_compare_enabled",
+            return_value=False,
+        ),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_query_rows_for_videos",
+            side_effect=fake_query,
+        ),
+        patch.object(
+            engine,
+            "_milvus_candidates_for_video",
+            side_effect=fake_candidates,
+        ),
+    ):
+        engine.search("football", None, ["visual"])
+
+    assert events == [
+        ("query", "visual", tuple(video_ids[:2])),
+        ("score", video_ids[0]),
+        ("score", video_ids[1]),
+        ("query", "visual", tuple(video_ids[2:])),
+        ("score", video_ids[2]),
+    ]
+
+
+def test_query_encoding_finishes_before_local_candidate_scoring(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    video_id = _make_visual_index(
+        settings,
+        catalog,
+        video_id="timing-order",
+    )
+    engine = SearchEngine(settings, catalog)
+    profiler = RetrievalProfiler()
+    events = []
+
+    class StubClip:
+        def encode_queries(self, texts, image_path, alpha):
+            events.append("encode")
+            return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    engine._clip = (  # type: ignore[method-assign]
+        lambda _model=None, _profiler=None: StubClip()
+    )
+
+    def fake_candidates(video, **_kwargs):
+        events.append("score")
+        return [Candidate(video["id"], 0.0, 1.0, 0.8, "visual")]
+
+    with (
+        patch(
+            "app.indexing.milvus_flags.should_use_milvus_for_video",
+            return_value=True,
+        ),
+        patch(
+            "app.indexing.milvus_flags.milvus_shadow_compare_enabled",
+            return_value=False,
+        ),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_query_rows_for_videos",
+            return_value={video_id: [{"video_id": video_id}]},
+        ),
+        patch.object(
+            engine,
+            "_milvus_candidates_for_video",
+            side_effect=fake_candidates,
+        ),
+    ):
+        engine.search(
+            "football",
+            None,
+            ["visual"],
+            [video_id],
+            profiler=profiler,
+        )
+
+    assert events == ["encode", "score"]
+    timing = profiler.snapshot()["timing"]
+    assert "visual" in timing["query_encode"]
+    assert "visual_scoring" in timing["local_processing"]
 
 
 def test_milvus_is_primary_and_npz_is_not_read_on_success(tmp_path):
@@ -857,6 +1074,13 @@ def test_milvus_is_primary_and_npz_is_not_read_on_success(tmp_path):
         patch(
             "app.indexing.milvus_flags.milvus_shadow_compare_enabled",
             return_value=False,
+        ),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_query_rows_for_videos",
+            return_value={video_id: []},
         ),
         patch.object(
             engine,
@@ -901,6 +1125,13 @@ def test_milvus_service_failure_falls_back_to_npz(tmp_path):
             "app.indexing.milvus_flags.milvus_fallback_enabled",
             return_value=True,
         ),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_query_rows_for_videos",
+            return_value={video_id: []},
+        ),
         patch.object(
             engine,
             "_milvus_candidates_for_video",
@@ -923,8 +1154,12 @@ def test_milvus_service_failure_is_not_retried_for_every_video(tmp_path):
 
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
-    _make_visual_index(settings, catalog, video_id="v-fallback-1")
-    _make_visual_index(settings, catalog, video_id="v-fallback-2")
+    first_id = _make_visual_index(
+        settings, catalog, video_id="v-fallback-1"
+    )
+    second_id = _make_visual_index(
+        settings, catalog, video_id="v-fallback-2"
+    )
     engine = SearchEngine(settings, catalog)
 
     with (
@@ -939,6 +1174,13 @@ def test_milvus_service_failure_is_not_retried_for_every_video(tmp_path):
         patch(
             "app.indexing.milvus_flags.milvus_fallback_enabled",
             return_value=True,
+        ),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_query_rows_for_videos",
+            return_value={first_id: [], second_id: []},
         ),
         patch.object(
             engine,
@@ -976,6 +1218,13 @@ def test_milvus_empty_channel_falls_back_to_npz(tmp_path):
         patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=True),
         patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
         patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_query_rows_for_videos",
+            return_value={video_id: []},
+        ),
         patch.object(engine, "_milvus_candidates_for_video", return_value=[]),
         patch.object(
             engine, "_candidates_for_video", return_value=[npz_hit]
@@ -1007,6 +1256,13 @@ def test_milvus_partial_coverage_only_recovers_missing_channel(tmp_path):
         patch("app.indexing.milvus_flags.should_use_milvus_for_video", return_value=True),
         patch("app.indexing.milvus_flags.milvus_shadow_compare_enabled", return_value=False),
         patch("app.indexing.milvus_flags.milvus_fallback_enabled", return_value=True),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_query_rows_for_videos",
+            return_value={video_id: []},
+        ),
         patch.object(
             engine, "_milvus_candidates_for_video", return_value=[milvus_hit]
         ),

@@ -73,6 +73,32 @@ fi
 [[ "$APP_PORT" =~ ^[0-9]+$ ]] && ((APP_PORT >= 1 && APP_PORT <= 65535)) \
   || fail "Invalid APP_PORT: $APP_PORT"
 printf 'app_port=%s source=%s\n' "$APP_PORT" "$APP_PORT_SOURCE"
+[[ -n "$MILVUS_HOST" ]] || fail "MILVUS_HOST must not be empty"
+[[ "$MILVUS_PORT" =~ ^[0-9]+$ ]] && ((MILVUS_PORT >= 1 && MILVUS_PORT <= 65535)) \
+  || fail "Invalid MILVUS_PORT: $MILVUS_PORT"
+for boolean_name in \
+  MILVUS_ENABLED MILVUS_READ_ENABLED MILVUS_WRITE_ENABLED MILVUS_FALLBACK_ENABLED; do
+  boolean_value="${!boolean_name}"
+  boolean_value="${boolean_value,,}"
+  case "$boolean_value" in
+    true|false|1|0|yes|no|on|off) ;;
+    *) fail "${boolean_name} must be a boolean, got: ${!boolean_name}" ;;
+  esac
+done
+if [[ "${MILVUS_ENABLED,,}" =~ ^(true|1|yes|on)$ ]]; then
+  python3 - "$MILVUS_HOST" "$MILVUS_PORT" "$MILVUS_QUERY_TIMEOUT_SECONDS" <<'PY'
+import socket
+import sys
+
+host, port_text, timeout_text = sys.argv[1:]
+timeout = float(timeout_text)
+if timeout <= 0:
+    raise SystemExit("MILVUS_QUERY_TIMEOUT_SECONDS must be greater than zero")
+with socket.create_connection((host, int(port_text)), timeout=timeout):
+    pass
+print(f"milvus_preflight=PASS endpoint={host}:{port_text}")
+PY
+fi
 
 exec 9>"$WORK_ROOT/.platform-deploy.lock"
 flock -n 9 || fail "Another MomentSeek deployment is running"
@@ -127,6 +153,14 @@ docker build --network host \
   -f "$BUILD_DIR/Dockerfile" \
   -t "$IMAGE_NAME" \
   "$SOURCE_DIR" 2>&1 | tee "$LOG_DIR/platform-image-build.log"
+
+log "Verify required production models before quiescing the current platform"
+docker run --rm \
+  -v "$MODEL_DIR:/app/models:ro" \
+  "$IMAGE_NAME" \
+  python3 /app/scripts/verify_models.py \
+    --manifest /app/deploy/models/ascend-prod.models.json \
+    --lock /tmp/ascend-prod.models.lock.json
 
 DEVICE_ARGS=(
   --device "/dev/davinci${NPU_ID}"
@@ -287,15 +321,16 @@ backend.close()
 print("OCR_ACL_BACKEND_SELF_TEST=PASS")
 PY
 
+log "8/8 Verify required model inventory in the replacement container"
+docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
+  --manifest /app/deploy/models/ascend-prod.models.json \
+  --lock /app/runtime/ascend-prod.models.lock.json
+
 if docker container inspect "$ROLLBACK_NAME" >/dev/null 2>&1; then
   docker rm "$ROLLBACK_NAME" >/dev/null
 fi
 
 docker image tag "$IMAGE_NAME" "${IMAGE_REPO}:current"
-
-log "8/8 Model inventory (missing models do not stop API deployment)"
-docker exec "$CONTAINER_NAME" python3 /app/scripts/verify_models.py \
-  --manifest /app/deploy/models/ascend-prod.models.json || true
 
 docker ps --filter "name=^/${CONTAINER_NAME}$" --format 'name={{.Names}} image={{.Image}} status={{.Status}}'
 npu-smi info -t proc-mem -i "$NPU_ID" -c 0 2>&1 || true

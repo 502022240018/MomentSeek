@@ -173,6 +173,39 @@ def test_ascend_profiles_cap_cpu_inference_thread_pools():
     assert 'CPU_THREAD_LIMIT="${CPU_THREAD_LIMIT:-8}"' in deploy_script
 
 
+def test_shared_ascend_deploy_honors_port_milvus_and_required_models():
+    dockerfile = _read("Dockerfile.ascend")
+    deploy_script = _read("scripts/deploy_ascend_shared_server.sh")
+
+    assert 'CMD ["sh", "-c"' in dockerfile
+    assert '--port \\"${APP_PORT:-8000}\\"' in dockerfile
+    assert 'CMD ["uvicorn"' not in dockerfile
+
+    for variable in (
+        "MILVUS_ENABLED",
+        "MILVUS_HOST",
+        "MILVUS_PORT",
+        "MILVUS_READ_ENABLED",
+        "MILVUS_WRITE_ENABLED",
+        "MILVUS_FALLBACK_ENABLED",
+    ):
+        assert f'-e {variable}="${variable}"' in deploy_script
+    assert "socket.create_connection" in deploy_script
+    assert "milvus_preflight=PASS" in deploy_script
+
+    preflight = deploy_script.index(
+        "Verify required production models before quiescing the current platform"
+    )
+    quiesce = deploy_script.index('docker rename "$CONTAINER_NAME" "$ROLLBACK_NAME"')
+    runtime_verify = deploy_script.index(
+        "Verify required model inventory in the replacement container"
+    )
+    remove_rollback = deploy_script.index('docker rm "$ROLLBACK_NAME"')
+    assert preflight < quiesce
+    assert runtime_verify < remove_rollback
+    assert "verify_models.py \\\n  --manifest /app/deploy/models/ascend-prod.models.json || true" not in deploy_script
+
+
 def test_production_ascend_uses_isolated_resident_workers():
     prod = _parse_env("deploy/env/prod.ascend.example")
     staging = _parse_env("deploy/env/staging.ascend.example")
