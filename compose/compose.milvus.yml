@@ -1,9 +1,4 @@
 services:
-  app:
-    depends_on:
-      milvus:
-        condition: service_healthy
-
   etcd:
     image: "${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.16}"
     container_name: "${COMPOSE_PROJECT_NAME:-momentseek}-etcd"
@@ -36,7 +31,10 @@ services:
     environment:
       MINIO_ROOT_USER: "${MINIO_ROOT_USER:?请设置 MINIO_ROOT_USER}"
       MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?请设置 MINIO_ROOT_PASSWORD}"
-    command: ["minio", "server", "/minio_data"]
+    command: ["minio", "server", "/minio_data", "--console-address", ":9001"]
+    ports:
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "9000:9000"
     volumes:
       - "${HOST_RUNTIME_DIR:?请设置 HOST_RUNTIME_DIR}/minio:/minio_data"
     healthcheck:
@@ -62,6 +60,9 @@ services:
       MINIO_ADDRESS: minio:9000
       MINIO_ACCESS_KEY_ID: "${MINIO_ROOT_USER:?请设置 MINIO_ROOT_USER}"
       MINIO_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD:?请设置 MINIO_ROOT_PASSWORD}"
+    ports:
+      - "${MILVUS_GRPC_PORT:-19530}:19530"
+      - "${MILVUS_HEALTH_PORT:-9091}:9091"
     volumes:
       - "${HOST_RUNTIME_DIR:?请设置 HOST_RUNTIME_DIR}/milvus:/var/lib/milvus"
     healthcheck:
@@ -72,3 +73,8 @@ services:
       start_period: 90s
     networks:
       - momentseek
+
+networks:
+  momentseek:
+    name: "${MOMENTSEEK_NETWORK_NAME:-momentseek-net}"
+    driver: bridge
