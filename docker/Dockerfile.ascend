@@ -46,6 +46,7 @@ RUN (cd /tmp/vendor-wheels && sha256sum -c SHA256SUMS) \
     && python3 -c "from importlib.metadata import version; import cv2; assert version('fastapi') == '0.115.11'; assert version('uvicorn') == '0.34.3'; assert version('pillow') == '11.2.1'; assert version('torch') == '2.9.0'; assert version('torch-npu') == '2.9.0.post1'; assert version('torchaudio') == '2.9.0'; assert cv2.__version__ == '4.11.0'" \
     && rm -rf /tmp/vendor-wheels /tmp/requirements
 COPY backend/app/ ./app/
+COPY backend/scripts/ ./scripts/
 COPY deploy/orchestration/ ./deploy/orchestration/
 COPY deploy/models/ /app/deploy/models/
 COPY scripts/verify_models.py /app/scripts/verify_models.py

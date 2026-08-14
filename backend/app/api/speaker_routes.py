@@ -67,6 +67,11 @@ def search_voice(request: VoiceSearchRequest) -> dict:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError, IndexError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        # Catch-all: Milvus exceptions (MilvusServiceError, MilvusException),
+        # RuntimeError from index-type drift check, etc. — surfaces as 503
+        # rather than a raw 500 with no body.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"count": len(results), "results": results}
 
 
@@ -110,8 +115,13 @@ async def search_voice_upload(
         return {"query_samples": len(vectors), "count": len(results), "results": results}
     except SpeakerMilvusCoverageError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except (OSError, ValueError, RuntimeError) as exc:
+    except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        # Milvus service failures (MilvusServiceError, MilvusException),
+        # index-type drift check, RuntimeError from encoder, etc. —
+        # surfaces as 503 not 400, mirroring the /api/voice-search route.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
         source_path.unlink(missing_ok=True)
         wav_path.unlink(missing_ok=True)

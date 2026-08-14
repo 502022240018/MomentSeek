@@ -80,12 +80,20 @@ class Settings(BaseSettings):
 
     face_model: str = "buffalo_l"
     face_sample_fps: float = 2.0
+    face_gallery_cosine_threshold: float = 0.52
     face_provider: str = "cpu"
     # ONNX Runtime otherwise creates one intra-op thread per physical CPU core
     # for every InsightFace session. On the shared Ascend host that means
     # hundreds of threads for the detector + recognizer alone.
     face_ort_intra_op_threads: int = 8
     face_ort_inter_op_threads: int = 1
+
+    # Face retrieval configuration (DiskANN + COSINE, no re-scoring).
+    # identity_threshold only drives the above_threshold/decision display flag;
+    # it does not gate cross-modal fusion (fusion uses score=confidence).
+    face_identity_threshold: float = 0.35   # ArcFace (buffalo_l) same-person cutoff
+    face_recall_multiplier: int = 1         # ann_limit = limit * this (re-score removed → 1)
+    face_diskann_search_list: int = 128     # DiskANN search_list (dynamically raised to >= ann_limit)
 
     asr_engine: str = "auto"
     # Used by ASR_ENGINE=whisper or ASR_ENGINE=faster-whisper. In auto mode this
@@ -111,6 +119,14 @@ class Settings(BaseSettings):
     speaker_device: str = "auto"
     speaker_model_repo: str = "3D-Speaker"
     speaker_model_cache_dir: str = "3dspeaker-cache"
+
+    # Speaker retrieval configuration (DiskANN + COSINE, no re-scoring).
+    # identity_threshold only drives above_threshold/decision display fields;
+    # the voice-search path passes threshold=-1.0 to take all candidates, so
+    # this default affects cross-modal/evidence display, not voice-search recall.
+    speaker_identity_threshold: float = 0.50  # CAM++ same-speaker cutoff
+    speaker_diskann_search_list: int = 128    # DiskANN search_list (dynamically raised to >= ann_limit)
+    speaker_recall_multiplier: int = 1        # ann_limit = limit * this (re-score removed → 1)
 
     ocr_engine: str = "rapidocr"
     ocr_device: str = "auto"
@@ -165,6 +181,12 @@ class Settings(BaseSettings):
     ocr_lexical_weight: float = 0.7  # Lexical (BM25) weight; semantic weight = 1.0 - this (recommended: 0.6-0.8)
     ocr_diskann_search_list: int = 100  # DiskANN search_list param for ANN search (not index building; recommended: 100-200)
 
+    # ASR hybrid search configuration (DiskANN + BM25)
+    # ASR is semantic-first (longer transcripts, richer semantics) vs OCR's lexical-first.
+    asr_hybrid_recall_size: int = 100  # Dense and Sparse recall size (recommended: 50-200)
+    asr_semantic_weight: float = 0.65  # Semantic (dense) weight; lexical weight = 1.0 - this (recommended: 0.55-0.75)
+    asr_diskann_search_list: int = 100  # DiskANN search_list param for ANN search (not index building; recommended: 100-200)
+
     @field_validator("indexer_mode", mode="before")
     @classmethod
     def normalize_indexer_mode(cls, value: object) -> object:
@@ -204,6 +226,48 @@ class Settings(BaseSettings):
     def validate_ocr_lexical_weight(cls, value: float) -> float:
         if not 0.0 <= value <= 1.0:
             raise ValueError("ocr_lexical_weight must be between 0.0 and 1.0")
+        return value
+
+    @field_validator("asr_hybrid_recall_size", "asr_diskann_search_list")
+    @classmethod
+    def validate_asr_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("ASR hybrid search parameters must be greater than 0")
+        return value
+
+    @field_validator("asr_semantic_weight")
+    @classmethod
+    def validate_asr_semantic_weight(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("asr_semantic_weight must be between 0.0 and 1.0")
+        return value
+
+    @field_validator("speaker_diskann_search_list", "speaker_recall_multiplier")
+    @classmethod
+    def validate_speaker_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Speaker retrieval parameters must be greater than 0")
+        return value
+
+    @field_validator("speaker_identity_threshold")
+    @classmethod
+    def validate_speaker_identity_threshold(cls, value: float) -> float:
+        if not -1.0 <= value <= 1.0:
+            raise ValueError("speaker_identity_threshold must be between -1.0 and 1.0")
+        return value
+
+    @field_validator("face_diskann_search_list", "face_recall_multiplier")
+    @classmethod
+    def validate_face_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Face retrieval parameters must be greater than 0")
+        return value
+
+    @field_validator("face_identity_threshold")
+    @classmethod
+    def validate_face_identity_threshold(cls, value: float) -> float:
+        if not -1.0 <= value <= 1.0:
+            raise ValueError("face_identity_threshold must be between -1.0 and 1.0")
         return value
 
     @field_validator("milvus_search_video_batch_size")

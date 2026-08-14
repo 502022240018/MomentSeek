@@ -10,6 +10,9 @@ from fastapi.responses import FileResponse
 
 from app.api.schemas import EntityUpdateRequest, VoiceOnlyEntityRequest, VoiceSampleRequest
 from app.identity.speaker_service import video_speakers
+from app.identity.face_gallery_service import delete_entity_face_samples
+from app.vector_store.milvus.milvus_client import get_milvus_client
+from app.vector_store.milvus.milvus_schema import entity_face_sample_pk
 from app.platform import context
 
 
@@ -32,19 +35,31 @@ async def create_entity(name: str = Form(...), reference: UploadFile = File(...)
     except Exception as exc:
         reference_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    embedding_path = reference_path.with_suffix(".npz")
-    np.savez_compressed(embedding_path, embedding=vector.astype(np.float32))
+    sample_id = uuid.uuid4().hex
     try:
-        return context.catalog.create_entity({
+        entity = context.catalog.create_entity({
             "id": entity_id,
             "name": name,
             "reference_path": str(reference_path),
-            "embedding_path": str(embedding_path),
+            "embedding_path": None,
         })
+        collection = get_milvus_client().collection("entity_face_samples")
+        collection.upsert([{
+            "pk": entity_face_sample_pk(entity_id, sample_id),
+            "entity_id": entity_id, "sample_id": sample_id,
+            "source_video_id": "", "source_asset_version": "",
+            "source_group_idx": -1, "quality": 1.0,
+            "embedding": vector.astype(np.float32).tolist(),
+        }])
+        collection.flush()
+        return entity
     except sqlite3.IntegrityError as exc:
         reference_path.unlink(missing_ok=True)
-        embedding_path.unlink(missing_ok=True)
         raise HTTPException(status_code=409, detail="该人物名称已存在") from exc
+    except Exception:
+        context.catalog.delete_entity(entity_id)
+        reference_path.unlink(missing_ok=True)
+        raise
 
 
 @router.get("/api/entities")
@@ -82,6 +97,10 @@ def delete_entity(entity_id: str) -> dict:
         raise HTTPException(status_code=404, detail="人物不存在")
     paths = [entity.get("reference_path"), entity.get("embedding_path")]
     paths.extend(sample.get("embedding_path") for sample in context.catalog.list_voice_samples(entity_id))
+    try:
+        delete_entity_face_samples(entity_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Milvus 人脸样本删除失败: {exc}") from exc
     if not context.catalog.delete_entity(entity_id):
         raise HTTPException(status_code=404, detail="人物不存在")
     for value in paths:
@@ -109,20 +128,31 @@ def list_entity_voice_samples(entity_id: str) -> list[dict]:
     if not context.catalog.get_entity(entity_id):
         raise HTTPException(status_code=404, detail="人物不存在")
     samples = context.catalog.list_voice_samples(entity_id)
+    # Multiple samples routinely share one source video; build each video's
+    # speaker panel at most once (avoid the previous per-sample N+1 rebuild).
+    # Cache failures as None too, so a failing video is not retried per sample.
+    panels: dict[str, dict | None] = {}
     for sample in samples:
         if sample.get("source_video_id") is None or sample.get("source_utterance_index") is None:
             continue
-        try:
-            view = video_speakers(context.settings.index_dir, context.catalog, sample["source_video_id"])
-            utterance = next(
-                (item for item in view["utterances"] if item["index"] == int(sample["source_utterance_index"])),
-                None,
-            )
-            if utterance:
-                sample["clip_url"] = utterance["clip_url"]
-                sample["text"] = utterance["text"]
-        except (FileNotFoundError, IndexError, ValueError):
-            pass
+        video_id = sample["source_video_id"]
+        if video_id not in panels:
+            try:
+                panels[video_id] = video_speakers(
+                    context.settings.index_dir, context.catalog, video_id
+                )
+            except (FileNotFoundError, IndexError, ValueError):
+                panels[video_id] = None
+        view = panels[video_id]
+        if view is None:
+            continue
+        utterance = next(
+            (item for item in view["utterances"] if item["index"] == int(sample["source_utterance_index"])),
+            None,
+        )
+        if utterance:
+            sample["clip_url"] = utterance["clip_url"]
+            sample["text"] = utterance["text"]
     return samples
 
 

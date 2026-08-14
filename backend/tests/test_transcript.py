@@ -9,7 +9,6 @@ import pytest
 
 from app.indexing.modalities.asr import asr
 from app.indexing.modalities.asr.asr import build_asr_index, load_sidecar
-from app.retrieval.search import lexical_score
 
 
 def test_load_json_and_srt(tmp_path):
@@ -25,14 +24,6 @@ def test_load_json_and_srt(tmp_path):
     chunks = load_sidecar(srt_path)
     assert chunks[0]["start_time"] == 4.5
     assert chunks[0]["end_time"] == 7.0
-
-
-def test_lexical_score_supports_chinese_and_substrings():
-    assert lexical_score("电影投资", "今天我们聊一聊电影投资的趋势") == 1
-    assert lexical_score("电影投", "电影投资") > 0.5
-    assert lexical_score("完全不同", "电影投资") < 0.5
-    assert lexical_score("台湾", "臺灣") == 1
-    assert lexical_score("这里有台词", "這裏有臺詞") == 1
 
 
 def test_offset_raw_items_assigns_decode_unit_id():

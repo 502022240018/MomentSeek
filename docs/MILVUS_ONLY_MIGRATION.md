@@ -23,6 +23,47 @@
 
 `MILVUS_ENABLED=true` 与 `MILVUS_WRITE_ENABLED=true` 是必需条件。不要在切换中停止 Milvus，也不要同时运行 Web UI 发起的索引任务或 indexer daemon。
 
+> **ASR hybrid schema upgrade**：若 `asr_embeddings` 是旧 HNSW schema，必须先
+> 停止索引写入、备份 Milvus，并运行
+> `scripts/recreate_asr_hybrid_collection.py --execute --confirm-drop-asr-embeddings`。
+> 此操作会删除旧 ASR 行，随后必须执行本手册中的 `--modalities asr --execute`
+> 重建；具体命令见 `docs/ASR_IMPLEMENTATION_RECORD.md`。
+
+> **Speaker DiskANN index upgrade**：若已有 `speaker_embeddings` 使用旧 HNSW
+> 索引，必须在运行 `reindex_milvus_only` 或启用新应用版本前，先停止 Speaker
+> 写入并执行下列命令。该操作只 release/rebuild `embedding` 的向量索引，**不会
+> 删除 collection、行数据或已发布的 manifest 指针**。
+>
+> ```bash
+> docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+>   exec app python scripts/migrate_speaker_diskann_index.py
+>
+> docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+>   exec app python scripts/migrate_speaker_diskann_index.py \
+>   --execute --confirm-rebuild-speaker-index
+> ```
+>
+> 输出 `status=migrated` 或 `status=already_compatible` 后，才可继续本手册的灰度
+> 或全量步骤。若迁移前后 `row_count` 不一致，脚本会失败退出；保留现场并从 Milvus
+> 备份恢复，勿继续启动新版本。Speaker 向量本身未变，不需要为了此次索引切换重跑
+> Speaker 模型。
+
+> **Face DiskANN index upgrade（一次性）**：若已有 `face_embeddings` 使用旧
+> `IVF_FLAT/L2` 索引，在启用新应用版本前停止 Face 写入，先检查并执行：
+>
+> ```bash
+> docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+>   exec app python scripts/migrate_face_diskann_index.py
+>
+> docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+>   exec app python scripts/migrate_face_diskann_index.py \
+>   --execute --confirm-rebuild-face-index
+> ```
+>
+> 脚本只重建 `embedding` 索引，不读取 NPZ、不删除 collection 或行数据。只有输出
+> `status=migrated` 或 `status=already_compatible`，且迁移前后 `row_count` 一致，
+> 才可启用新版本。所有正式环境完成迁移后可删除该一次性脚本。
+
 ## 3. 预检查与灰度
 
 以下命令在应用容器中运行；把 Compose 文件组合替换为本环境实际使用的组合。若本环境自带 Milvus，命令追加 `-f compose/compose.milvus.yml`。

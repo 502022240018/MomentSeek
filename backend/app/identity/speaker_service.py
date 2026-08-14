@@ -66,6 +66,14 @@ def _published_asset_version(video_id: str, modality: str) -> str:
         raise SpeakerMilvusCoverageError(
             f"Milvus {modality} version is not published for video {video_id}"
         )
+    # A video with no speech publishes an explicit empty version (0 rows) to
+    # prevent stale-index caching.  Treat "published but 0 rows" the same as
+    # "not published" so callers can safely skip such videos.
+    row_count = channel.get("milvus_row_count")
+    if row_count is not None and int(row_count) == 0:
+        raise SpeakerMilvusCoverageError(
+            f"Milvus {modality} index for video {video_id} has 0 utterances (no speech detected)"
+        )
     return str(version)
 
 
@@ -182,6 +190,9 @@ def _speaker_data_from_milvus(
         raise SpeakerMilvusCoverageError(
             f"Milvus speaker embeddings are invalid for video {video_id}"
         )
+    # Embeddings are written as unit vectors (speaker.py _normalize), so this
+    # re-normalisation is defensive: it guards against any floating-point
+    # round-trip drift that could accumulate before reaching this point.
     embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
     times = np.asarray([
         [int(row.get("start_ms") or 0), int(row.get("end_ms") or 0)]
@@ -193,7 +204,11 @@ def _speaker_data_from_milvus(
     ], dtype=np.int32)
     track_ids = refs[:, 1]
     track_count = int(track_ids.max()) + 1 if len(track_ids) else 0
-    track_embeddings = np.zeros((track_count, embeddings.shape[1]), dtype=np.float32)
+    # The per-track centroid is needed only to pick each track's representative
+    # utterance; video_speakers never consumes the centroid vectors themselves
+    # (it re-ranks over the overlay-corrected membership in _rank_speaker_utterances).
+    # So compute the centroid as a local and keep only the representative indices —
+    # materialising a track_embeddings matrix here was dead weight.
     representatives = np.full((track_count,), -1, dtype=np.int32)
     for track_id in range(track_count):
         members = np.flatnonzero(track_ids == track_id)
@@ -201,7 +216,6 @@ def _speaker_data_from_milvus(
             continue
         center = embeddings[members].mean(axis=0)
         center /= max(float(np.linalg.norm(center)), 1e-12)
-        track_embeddings[track_id] = center
         representatives[track_id] = int(
             members[int(np.argmax(embeddings[members] @ center))]
         )
@@ -209,7 +223,6 @@ def _speaker_data_from_milvus(
         "utterance_embeddings": embeddings.astype(np.float16),
         "utterance_times_ms": times,
         "utterance_refs": refs,
-        "track_embeddings": track_embeddings.astype(np.float16),
         "track_representative_indices": representatives,
     }
 
@@ -264,7 +277,7 @@ def _speaker_utterances(data: dict, texts: list[str], overlays: dict, video_id: 
 
 
 def _speaker_track_ids(data: dict, utterances: list[dict]) -> set[int]:
-    track_ids = set(range(len(data["track_embeddings"])))
+    track_ids = set(range(len(data["track_representative_indices"])))
     track_ids.update(
         int(item["track_id"])
         for item in utterances
@@ -429,13 +442,28 @@ def _voice_search_vectors_milvus(
         video_id = video["id"]
         if selected is not None and video_id not in selected:
             continue
+        # A video with no detected speech never publishes a speaker asset_version
+        # (0 utterances → nothing written to Milvus). Such a video cannot
+        # contribute any voice-search hit, so skip it instead of aborting the
+        # whole cross-video search. The query-source video always has speaker
+        # data (otherwise the frontend would not expose "搜索同声"), so guarding
+        # every catalogue video here is safe.
+        # Note: the query-source video's asset_version was already resolved by
+        # _load_speaker_data in voice_search(). The repeat call here is a
+        # minor manifest re-read; caching it would require threading the version
+        # down through voice_search_vectors → _voice_search_vectors_milvus, which
+        # adds complexity for a negligible gain (one extra manifest read per request).
+        try:
+            speaker_version = _published_asset_version(video_id, "speaker")
+        except SpeakerMilvusCoverageError:
+            continue
         best_by_utterance = {}
         for query in queries:
             for candidate in milvus_speaker_candidates(
                 client,
                 video_id,
                 query,
-                _published_asset_version(video_id, "speaker"),
+                speaker_version,
                 limit,
                 threshold=-1.0,
             ):
@@ -476,4 +504,6 @@ def _voice_search_vectors_milvus(
         )
         chunk_index = hit["asr_chunk_index"]
         hit["text"] = texts[chunk_index] if 0 <= chunk_index < len(texts) else ""
-    return hits[:limit], covered_video_ids
+    # Text enrichment above already covers hits[:limit]; return the full sorted
+    # list so the single authoritative truncation happens in voice_search_vectors.
+    return hits, covered_video_ids

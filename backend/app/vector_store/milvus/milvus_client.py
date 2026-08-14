@@ -17,6 +17,8 @@ from app.core.settings import get_settings
 from .milvus_schema import (
     create_asr_schema,
     create_face_schema,
+    create_face_group_schema,
+    create_entity_face_sample_schema,
     create_ocr_schema,
     create_speaker_schema,
     create_visual_schema,
@@ -52,13 +54,20 @@ def _get_visual_index_config() -> dict:
 
 
 # Static index configs for non-visual modalities
-# Note: For collections with multiple indexes (like ocr_embeddings), this only represents
-# the primary dense vector index. The actual index creation uses _COLLECTION_CONFIGS["indexes"].
+# Note: For collections with multiple indexes (like asr_embeddings / ocr_embeddings), this
+# dict only represents the primary dense vector index for informational purposes.
+# The actual index creation uses _COLLECTION_CONFIGS["indexes"] (multi-index path).
 _STATIC_INDEX_CONFIGS: dict[str, dict] = {
     "asr_embeddings": {
-        "index_type": "HNSW",
+        # DiskANN dense index — actual creation uses _COLLECTION_CONFIGS["asr_embeddings"]["indexes"]
+        "index_type": "DISKANN",
         "metric_type": "IP",
-        "params": {"M": 16, "efConstruction": 200},
+        "params": {
+            "max_degree": 56,
+            "search_list_size": 128,
+            "pq_code_budget_gb": 0.125,
+            "build_dram_budget_gb": 32.0,
+        },
     },
     "ocr_embeddings": {
         "index_type": "DISKANN",
@@ -71,14 +80,38 @@ _STATIC_INDEX_CONFIGS: dict[str, dict] = {
         },
     },
     "face_embeddings": {
-        "index_type": "IVF_FLAT",
-        "metric_type": "L2",
-        "params": {"nlist": 1024},
+        # Migrated IVF_FLAT → DISKANN for 千万级 scale (disk-resident vectors +
+        # PQ in memory). Face is the highest-dimension modality (512), so the
+        # memory saving is the largest of all modalities. COSINE retained: face
+        # embeddings are unit-normalised ArcFace vectors (faces.py), and
+        # visual/speaker proved DiskANN supports COSINE in this stack.
+        "index_type": "DISKANN",
+        "metric_type": "COSINE",
+        "params": {
+            "max_degree": 56,
+            "search_list_size": 128,
+            "pq_code_budget_gb": 0.125,
+            "build_dram_budget_gb": 32.0,
+        },
+    },
+    "face_groups": {
+        "index_type": "IVF_FLAT", "metric_type": "L2", "params": {"nlist": 256},
+    },
+    "entity_face_samples": {
+        "index_type": "IVF_FLAT", "metric_type": "L2", "params": {"nlist": 256},
     },
     "speaker_embeddings": {
-        "index_type": "HNSW",
+        # Migrated HNSW → DISKANN for 千万级 scale (disk-resident vectors +
+        # PQ in memory). COSINE retained: speaker embeddings are normalised
+        # unit vectors, and visual proved DiskANN supports COSINE in this stack.
+        "index_type": "DISKANN",
         "metric_type": "COSINE",
-        "params": {"M": 16, "efConstruction": 200},
+        "params": {
+            "max_degree": 56,
+            "search_list_size": 128,
+            "pq_code_budget_gb": 0.125,
+            "build_dram_budget_gb": 32.0,
+        },
     },
 }
 
@@ -109,7 +142,25 @@ _COLLECTION_CONFIGS: dict[str, dict] = {
     },
     "asr_embeddings": {
         "schema": create_asr_schema,
-        "index": _STATIC_INDEX_CONFIGS["asr_embeddings"],
+        "indexes": {
+            # Dense index: DiskANN for semantic search
+            "embedding": {
+                "index_type": "DISKANN",
+                "metric_type": "IP",
+                "params": {
+                    "max_degree": 56,
+                    "search_list_size": 128,
+                    "pq_code_budget_gb": 0.125,
+                    "build_dram_budget_gb": 32.0,
+                },
+            },
+            # Sparse index: BM25 function output requires BM25 metric type
+            "sparse_embedding": {
+                "index_type": "SPARSE_INVERTED_INDEX",
+                "metric_type": "BM25",
+                "params": {"drop_ratio_build": 0.2},
+            },
+        },
     },
     "ocr_embeddings": {
         "schema": create_ocr_schema,
@@ -136,6 +187,17 @@ _COLLECTION_CONFIGS: dict[str, dict] = {
     "face_embeddings": {
         "schema": create_face_schema,
         "index": _STATIC_INDEX_CONFIGS["face_embeddings"],
+        "video_scoped": True,
+    },
+    "face_groups": {
+        "schema": create_face_group_schema,
+        "index": _STATIC_INDEX_CONFIGS["face_groups"],
+        "video_scoped": True,
+    },
+    "entity_face_samples": {
+        "schema": create_entity_face_sample_schema,
+        "index": _STATIC_INDEX_CONFIGS["entity_face_samples"],
+        "video_scoped": False,
     },
     "speaker_embeddings": {
         "schema": create_speaker_schema,
@@ -158,6 +220,14 @@ _OCR_V2_REQUIRED_FIELDS = frozenset({
     "has_embedding",
 })
 _OCR_V2_REQUIRED_INDEX_FIELDS = frozenset({"embedding", "sparse_embedding"})
+
+_ASR_V2_REQUIRED_FIELDS = frozenset({
+    "text",
+    "embedding",
+    "sparse_embedding",
+    "has_embedding",
+})
+_ASR_V2_REQUIRED_INDEX_FIELDS = frozenset({"embedding", "sparse_embedding"})
 
 
 def _validate_existing_ocr_collection(col: Collection) -> None:
@@ -197,6 +267,46 @@ def _validate_existing_ocr_collection(col: Collection) -> None:
         "Milvus collection 'ocr_embeddings' uses the legacy OCR schema "
         f"({', '.join(details)}). Drop and rebuild the OCR Milvus index "
         "before deploying hybrid OCR search."
+    )
+
+
+def _validate_existing_asr_collection(col: Collection) -> None:
+    """Fail fast when an existing ASR collection predates hybrid search.
+
+    Adding a BM25 function or sparse-vector field is not an in-place Milvus
+    schema migration.  Starting successfully against the legacy collection
+    would defer the failure to a user's first ASR query, so require operators
+    to rebuild it before this release serves traffic.
+    """
+    schema = col.schema
+    fields = {field.name for field in schema.fields}
+    function_names = {
+        function.name
+        for function in (getattr(schema, "functions", None) or [])
+    }
+    index_fields = {
+        index.field_name
+        for index in col.indexes
+        if getattr(index, "field_name", None)
+    }
+
+    missing_fields = sorted(_ASR_V2_REQUIRED_FIELDS - fields)
+    missing_functions = sorted({"bm25_asr"} - function_names)
+    missing_indexes = sorted(_ASR_V2_REQUIRED_INDEX_FIELDS - index_fields)
+    if not (missing_fields or missing_functions or missing_indexes):
+        return
+
+    details: list[str] = []
+    if missing_fields:
+        details.append(f"fields={missing_fields}")
+    if missing_functions:
+        details.append(f"functions={missing_functions}")
+    if missing_indexes:
+        details.append(f"indexes={missing_indexes}")
+    raise RuntimeError(
+        "Milvus collection 'asr_embeddings' uses the legacy ASR schema "
+        f"({', '.join(details)}). Drop and rebuild the ASR Milvus index "
+        "before deploying hybrid ASR search."
     )
 
 
@@ -280,6 +390,8 @@ class MilvusClient:
                 col = Collection(name)
                 if name == "ocr_embeddings":
                     _validate_existing_ocr_collection(col)
+                elif name == "asr_embeddings":
+                    _validate_existing_asr_collection(col)
                 load_state = utility.load_state(name)
                 if load_state.name != "Loaded":
                     logger.info("Loading existing collection: %s", name)
@@ -323,7 +435,9 @@ class MilvusClient:
         """
         counts: dict[str, int] = {}
         expr = f'video_id == "{video_id}"'
-        for name in _COLLECTION_CONFIGS:
+        for name, config in _COLLECTION_CONFIGS.items():
+            if not config.get("video_scoped", True):
+                continue
             col = Collection(name)
             try:
                 result = col.delete(expr)
@@ -342,7 +456,9 @@ class MilvusClient:
         """
         counts: dict[str, int] = {}
         expr = f'video_id == "{video_id}" and asset_version == "{asset_version}"'
-        for name in _COLLECTION_CONFIGS:
+        for name, config in _COLLECTION_CONFIGS.items():
+            if not config.get("video_scoped", True):
+                continue
             col = Collection(name)
             try:
                 result = col.delete(expr)
@@ -391,6 +507,10 @@ class MilvusClient:
                 "delete_video_modality video=%s modality=%s deleted=%d",
                 video_id, modality, count,
             )
+            if modality == "face" and utility.has_collection("face_groups"):
+                groups = Collection("face_groups")
+                groups.delete(expr)
+                groups.flush()
             return count
         except Exception as exc:
             logger.warning(
@@ -413,6 +533,10 @@ class MilvusClient:
             )
             result = col.delete(expr)
             col.flush()
+            if modality == "face" and utility.has_collection("face_groups"):
+                groups = Collection("face_groups")
+                groups.delete(expr)
+                groups.flush()
             return int(getattr(result, "delete_count", 0))
         except Exception as exc:
             logger.warning(
