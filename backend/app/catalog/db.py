@@ -22,6 +22,22 @@ CREATE TABLE IF NOT EXISTS videos (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS video_modality_publications (
+  video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  modality TEXT NOT NULL,
+  asset_version TEXT NOT NULL,
+  row_count INTEGER NOT NULL DEFAULT 0,
+  model_key TEXT,
+  semantic_model_key TEXT,
+  embedding_space TEXT,
+  status TEXT NOT NULL DEFAULT 'ready',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  published_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(video_id, modality)
+);
+CREATE INDEX IF NOT EXISTS video_modality_publications_status_idx
+  ON video_modality_publications(status, modality, video_id);
 CREATE TABLE IF NOT EXISTS folders (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -189,6 +205,7 @@ class Catalog:
     def connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=30000")
         try:
             yield connection
@@ -210,6 +227,7 @@ class Catalog:
             rows = connection.execute("SELECT * FROM videos ORDER BY created_at DESC, id ASC").fetchall()
             videos = [self._decode_video(row) for row in rows]
             self._attach_video_folders(connection, videos)
+            self._attach_video_publications(connection, videos)
         return videos
 
     def get_video(self, video_id: str) -> dict | None:
@@ -219,7 +237,204 @@ class Catalog:
                 return None
             video = self._decode_video(row)
             self._attach_video_folders(connection, [video])
+            self._attach_video_publications(connection, [video])
         return video
+
+    def publish_modality(
+        self,
+        video_id: str,
+        modality: str,
+        *,
+        asset_version: str,
+        row_count: int,
+        metadata: dict | None = None,
+        status: str = "ready",
+    ) -> dict:
+        """Publish one verified Milvus version through the atomic batch API."""
+        publications = self.publish_modalities(
+            video_id,
+            [
+                {
+                    "modality": modality,
+                    "asset_version": asset_version,
+                    "row_count": row_count,
+                    "metadata": metadata,
+                    "status": status,
+                }
+            ],
+        )
+        return publications[str(modality).strip().casefold()]
+
+    def publish_modalities(
+        self,
+        video_id: str,
+        publications: list[dict],
+        *,
+        disable_modalities: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, dict]:
+        """Atomically switch one or more verified Milvus publication pointers.
+
+        ``disable_modalities`` changes existing rows to ``disabled`` without
+        fabricating an asset version when a channel has never been published.
+        The compatibility ``videos.indexed_modalities`` column is recomputed
+        from ready publication rows in the same transaction.
+        """
+        allowed_modalities = {"visual", "face", "asr", "speaker", "ocr"}
+        prepared: list[dict] = []
+        seen: set[str] = set()
+        for publication in publications:
+            item = dict(publication)
+            modality = str(item.get("modality") or "").strip().casefold()
+            if modality not in allowed_modalities:
+                raise ValueError(f"未知索引模态: {modality}")
+            if modality in seen:
+                raise ValueError(f"同一批次不能重复发布模态: {modality}")
+            seen.add(modality)
+            asset_version = str(item.get("asset_version") or "").strip()
+            if not asset_version:
+                raise ValueError("asset_version 不能为空")
+            row_count = int(item.get("row_count"))
+            if row_count < 0:
+                raise ValueError("row_count 不能为负数")
+            status = str(item.get("status") or "ready").strip().casefold()
+            if status not in {"ready", "disabled"}:
+                raise ValueError(f"不支持的发布状态: {status}")
+            payload = dict(item.get("metadata") or {})
+            prepared.append(
+                {
+                    "modality": modality,
+                    "asset_version": asset_version,
+                    "row_count": row_count,
+                    "model_key": payload.get("model_key"),
+                    "semantic_model_key": payload.get("semantic_model_key"),
+                    "embedding_space": payload.get("embedding_space"),
+                    "status": status,
+                    "metadata_json": json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":")
+                    ),
+                }
+            )
+
+        disabled = {
+            str(modality).strip().casefold()
+            for modality in (disable_modalities or ())
+        }
+        unknown_disabled = disabled - allowed_modalities
+        if unknown_disabled:
+            raise ValueError(
+                f"未知索引模态: {', '.join(sorted(unknown_disabled))}"
+            )
+        overlap = seen & disabled
+        if overlap:
+            raise ValueError(
+                f"同一批次不能同时发布并禁用模态: {', '.join(sorted(overlap))}"
+            )
+        if not prepared and not disabled:
+            raise ValueError("至少发布或禁用一个模态")
+
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            video_row = connection.execute(
+                "SELECT 1 FROM videos WHERE id=?", (video_id,)
+            ).fetchone()
+            if not video_row:
+                raise KeyError(f"视频不存在: {video_id}")
+            for item in prepared:
+                connection.execute(
+                    """INSERT INTO video_modality_publications(
+                           video_id,modality,asset_version,row_count,model_key,
+                           semantic_model_key,embedding_space,status,metadata_json
+                       ) VALUES(?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(video_id,modality) DO UPDATE SET
+                         asset_version=excluded.asset_version,
+                         row_count=excluded.row_count,
+                         model_key=excluded.model_key,
+                         semantic_model_key=excluded.semantic_model_key,
+                         embedding_space=excluded.embedding_space,
+                         status=excluded.status,
+                         metadata_json=excluded.metadata_json,
+                         published_at=CURRENT_TIMESTAMP,
+                         updated_at=CURRENT_TIMESTAMP""",
+                    (
+                        video_id,
+                        item["modality"],
+                        item["asset_version"],
+                        item["row_count"],
+                        str(item["model_key"])
+                        if item["model_key"] is not None
+                        else None,
+                        str(item["semantic_model_key"])
+                        if item["semantic_model_key"] is not None
+                        else None,
+                        str(item["embedding_space"])
+                        if item["embedding_space"] is not None
+                        else None,
+                        item["status"],
+                        item["metadata_json"],
+                    ),
+                )
+            if disabled:
+                marks = ",".join("?" for _ in disabled)
+                connection.execute(
+                    f"""UPDATE video_modality_publications
+                        SET status='disabled',updated_at=CURRENT_TIMESTAMP
+                        WHERE video_id=? AND modality IN ({marks})""",
+                    (video_id, *sorted(disabled)),
+                )
+            ready_rows = connection.execute(
+                """SELECT modality FROM video_modality_publications
+                   WHERE video_id=? AND status='ready' ORDER BY modality""",
+                (video_id,),
+            ).fetchall()
+            indexed = [str(row["modality"]) for row in ready_rows]
+            connection.execute(
+                """UPDATE videos SET indexed_modalities=?,updated_at=CURRENT_TIMESTAMP
+                   WHERE id=?""",
+                (json.dumps(indexed), video_id),
+            )
+            affected = sorted(seen | disabled)
+            marks = ",".join("?" for _ in affected)
+            rows = connection.execute(
+                f"""SELECT * FROM video_modality_publications
+                    WHERE video_id=? AND modality IN ({marks})""",
+                (video_id, *affected),
+            ).fetchall()
+        return {
+            item["modality"]: item
+            for row in rows
+            if (item := self._decode_publication(row))
+        }
+
+    def get_modality_publication(self, video_id: str, modality: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM video_modality_publications
+                   WHERE video_id=? AND modality=?""",
+                (video_id, modality),
+            ).fetchone()
+        return self._decode_publication(row) if row else None
+
+    def list_modality_publications(
+        self,
+        video_ids: list[str] | None = None,
+    ) -> list[dict]:
+        with self.connect() as connection:
+            if video_ids is None:
+                rows = connection.execute(
+                    """SELECT * FROM video_modality_publications
+                       ORDER BY video_id,modality"""
+                ).fetchall()
+            elif not video_ids:
+                rows = []
+            else:
+                unique_ids = list(dict.fromkeys(video_ids))
+                marks = ",".join("?" for _ in unique_ids)
+                rows = connection.execute(
+                    f"""SELECT * FROM video_modality_publications
+                        WHERE video_id IN ({marks}) ORDER BY video_id,modality""",
+                    unique_ids,
+                ).fetchall()
+        return [self._decode_publication(row) for row in rows]
 
     def list_folders(self) -> list[dict]:
         with self.connect() as connection:
@@ -311,12 +526,14 @@ class Catalog:
         return list(dict.fromkeys(selected))
 
     def update_video(self, video_id: str, **values) -> None:
-        allowed = {"name", "status", "indexed_modalities", "duration", "fps", "width", "height"}
+        if "indexed_modalities" in values:
+            raise ValueError(
+                "indexed_modalities is publication-controlled; use publish_modality()"
+            )
+        allowed = {"name", "status", "duration", "fps", "width", "height"}
         values = {key: value for key, value in values.items() if key in allowed}
         if not values:
             return
-        if "indexed_modalities" in values:
-            values["indexed_modalities"] = json.dumps(values["indexed_modalities"])
         clause = ",".join(f"{key}=?" for key in values)
         with self.connect() as connection:
             connection.execute(
@@ -325,11 +542,15 @@ class Catalog:
             )
 
     def delete_video(self, video_id: str) -> bool:
-        # connect() does not enable PRAGMA foreign_keys, so the jobs cascade would
-        # not fire; delete the video's jobs explicitly in the same transaction.
+        # Keep explicit cleanup for databases created by older builds where
+        # foreign-key enforcement may not have been enabled on every connection.
         with self.connect() as connection:
             connection.execute("DELETE FROM jobs WHERE video_id=?", (video_id,))
             connection.execute("DELETE FROM video_folders WHERE video_id=?", (video_id,))
+            connection.execute(
+                "DELETE FROM video_modality_publications WHERE video_id=?",
+                (video_id,),
+            )
             cursor = connection.execute("DELETE FROM videos WHERE id=?", (video_id,))
             return cursor.rowcount > 0
 
@@ -704,6 +925,49 @@ class Catalog:
         for video in videos:
             video["folders"] = grouped[video["id"]]
             video["folder_ids"] = [folder["id"] for folder in video["folders"]]
+
+    @classmethod
+    def _attach_video_publications(
+        cls,
+        connection: sqlite3.Connection,
+        videos: list[dict],
+    ) -> None:
+        if not videos:
+            return
+        ids = [video["id"] for video in videos]
+        marks = ",".join("?" for _ in ids)
+        rows = connection.execute(
+            f"""SELECT * FROM video_modality_publications
+                WHERE video_id IN ({marks}) ORDER BY video_id,modality""",
+            ids,
+        ).fetchall()
+        grouped: dict[str, dict[str, dict]] = {video_id: {} for video_id in ids}
+        for row in rows:
+            publication = cls._decode_publication(row)
+            grouped[publication["video_id"]][publication["modality"]] = publication
+        for video in videos:
+            publications = grouped[video["id"]]
+            video["index_publications"] = publications
+            # Publications are the online source of truth.  The stored JSON
+            # column remains transactionally maintained for old binaries and
+            # direct SQL diagnostics, but a stale compatibility flag must not
+            # change what retrieval can see.
+            video["indexed_modalities"] = sorted(
+                modality
+                for modality, publication in publications.items()
+                if publication.get("status") == "ready"
+            )
+
+    @staticmethod
+    def _decode_publication(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        metadata = json.loads(item.pop("metadata_json") or "{}")
+        item["metadata"] = metadata
+        # Expose metadata keys at the publication boundary so callers can use
+        # one compact mapping without coupling themselves to SQLite storage.
+        for key, value in metadata.items():
+            item.setdefault(key, value)
+        return item
 
     @staticmethod
     def _decode_video(row: sqlite3.Row) -> dict:

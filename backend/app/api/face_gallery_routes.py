@@ -28,7 +28,6 @@ def get_video_face_gallery(video_id: str) -> dict:
         raise HTTPException(status_code=404, detail="视频不存在")
     try:
         return video_face_groups(
-            context.settings.index_dir,
             context.catalog,
             video_id,
             context.settings.face_gallery_cosine_threshold,
@@ -45,7 +44,7 @@ async def get_face_group_thumbnail(video_id: str, group_idx: int, asset_version:
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
     try:
-        if published_face_version(context.settings.index_dir, video_id) != asset_version:
+        if published_face_version(context.catalog, video_id) != asset_version:
             raise HTTPException(status_code=409, detail="人脸索引已更新，请刷新页面")
         group = get_face_group(video_id, asset_version, group_idx)
         if not group:
@@ -70,7 +69,7 @@ async def add_face_group_to_library(video_id: str, group_idx: int, request: Face
     created_entity_id: str | None = None
     created_reference_path = None
     try:
-        if published_face_version(context.settings.index_dir, video_id) != request.asset_version:
+        if published_face_version(context.catalog, video_id) != request.asset_version:
             raise HTTPException(status_code=409, detail="人脸索引已更新，请刷新页面")
         entity_id = request.entity_id
         if request.new_entity_name:

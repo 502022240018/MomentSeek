@@ -22,7 +22,8 @@ def main() -> None:
     for video in catalog.list_videos():
         if args.video_ids and video["id"] not in args.video_ids:
             continue
-        if "speaker" in video["indexed_modalities"] and not args.force:
+        speaker_publication = (video.get("index_publications") or {}).get("speaker")
+        if speaker_publication and speaker_publication.get("status") == "ready" and not args.force:
             continue
         started = time.perf_counter()
         print(json.dumps({"status": "started", "video_id": video["id"], "name": video["name"]}, ensure_ascii=False), flush=True)
@@ -33,8 +34,6 @@ def main() -> None:
                 {"asr_speaker_enabled": True},
                 settings,
             )
-            modalities = sorted({*video["indexed_modalities"], "speaker"})
-            catalog.update_video(video["id"], indexed_modalities=modalities)
             item = {"status": "completed", "video_id": video["id"], "name": video["name"], **result}
         except Exception as exc:
             item = {"status": "failed", "video_id": video["id"], "name": video["name"], "error": str(exc)}

@@ -11,6 +11,21 @@ from app.indexing.modalities.asr import asr
 from app.indexing.modalities.asr.asr import build_asr_index, load_sidecar
 
 
+@pytest.fixture(autouse=True)
+def _capture_milvus_writes(monkeypatch):
+    writes: list[dict] = []
+
+    def fake_write(ctx, modality, arrays, **_kwargs):
+        writes.append({"ctx": ctx, "modality": modality, "arrays": arrays})
+        return len(arrays["chunk_times_ms"])
+
+    monkeypatch.setattr(
+        "app.vector_store.milvus.milvus_indexer.write_modality_from_memory",
+        fake_write,
+    )
+    return writes
+
+
 def test_load_json_and_srt(tmp_path):
     json_path = tmp_path / "demo.json"
     json_path.write_text(
@@ -46,35 +61,32 @@ def test_offset_raw_items_assigns_decode_unit_id():
     assert shifted[0].unit_id == 7
 
 
-def test_asr_index_handles_video_without_audio(tmp_path, monkeypatch):
+def test_asr_index_handles_video_without_audio(tmp_path, monkeypatch, _capture_milvus_writes):
     def no_audio(*_args, **_kwargs):
         raise subprocess.CalledProcessError(1, ["ffmpeg"])
 
     monkeypatch.setattr(asr, "extract_audio", no_audio)
-    output_path = tmp_path / "asr.npz"
-    semantic_path = tmp_path / "asr_semantic.npz"
-    semantic_path.write_bytes(b"stale")
-
     result = build_asr_index(
         video_path=str(tmp_path / "silent.mp4"),
-        output_path=str(output_path),
         working_dir=str(tmp_path / "work"),
         engine="whisper",
         model_name="tiny",
         device="cpu",
         model_dir=str(tmp_path / "models"),
-        semantic_output_path=str(semantic_path),
+        milvus_ctx=object(),
     )
 
     assert result["engine"] == "no_audio"
     assert result["chunks"] == 0
     assert result["decode_status"] == "empty"
-    with np.load(output_path, allow_pickle=False) as data:
-        assert data["chunk_times_ms"].shape == (0, 2)
-        assert data["texts"].tolist() == []
-        assert data["embeddings"].shape == (0, 0)
-        assert data["embedding_chunk_indices"].tolist() == []
-    assert not semantic_path.exists()
+    assert result["milvus_rows"] == 0
+    assert len(_capture_milvus_writes) == 1
+    write = _capture_milvus_writes[0]
+    assert write["modality"] == "asr"
+    assert write["arrays"]["chunk_times_ms"].shape == (0, 2)
+    assert write["arrays"]["texts"] == []
+    assert write["arrays"]["embeddings"].shape == (0, 0)
+    assert write["arrays"]["embedding_chunk_indices"].tolist() == []
 
 
 def test_whisper_forces_transcribe_task_and_records_detected_language(tmp_path, monkeypatch):
@@ -530,12 +542,12 @@ def test_auto_engine_with_auto_language_routes_non_chinese_to_faster_whisper(tmp
 
     result = build_asr_index(
         video_path=str(tmp_path / "video.mp4"),
-        output_path=str(tmp_path / "asr.npz"),
         working_dir=str(tmp_path / "work"),
         engine="auto",
         model_name="small",
         device="cpu",
         model_dir=str(tmp_path / "models"),
+        milvus_ctx=object(),
         language="auto",
         semantic_model="fake-semantic",
     )
@@ -665,12 +677,12 @@ def test_auto_engine_with_auto_language_routes_chinese_probe_to_sensevoice(tmp_p
 
     result = build_asr_index(
         video_path=str(tmp_path / "video.mp4"),
-        output_path=str(tmp_path / "asr.npz"),
         working_dir=str(tmp_path / "work"),
         engine="auto",
         model_name="turbo",
         device="cpu",
         model_dir=str(tmp_path / "models"),
+        milvus_ctx=object(),
         language="auto",
         semantic_model="fake-semantic",
     )
@@ -715,12 +727,12 @@ def test_faster_whisper_engine_uses_faster_whisper_path(tmp_path, monkeypatch):
 
     result = build_asr_index(
         video_path=str(tmp_path / "video.mp4"),
-        output_path=str(tmp_path / "asr.npz"),
         working_dir=str(tmp_path / "work"),
         engine="faster-whisper",
         model_name="turbo",
         device="cpu",
         model_dir=str(tmp_path / "models" / "whisper"),
+        milvus_ctx=object(),
         faster_whisper_model_dir=str(tmp_path / "models" / "faster-whisper"),
         language="en",
         semantic_model="fake-semantic",
@@ -732,7 +744,9 @@ def test_faster_whisper_engine_uses_faster_whisper_path(tmp_path, monkeypatch):
     assert result["detected_language"] == "en"
 
 
-def test_sidecar_asr_index_postprocesses_short_fragments_and_preserves_schema(tmp_path, monkeypatch):
+def test_sidecar_asr_index_postprocesses_short_fragments_and_preserves_schema(
+    tmp_path, monkeypatch, _capture_milvus_writes
+):
     sidecar = tmp_path / "demo.srt"
     sidecar.write_text(
         "1\n00:00:00,000 --> 00:00:00,400\n今天\n\n"
@@ -759,35 +773,30 @@ def test_sidecar_asr_index_postprocesses_short_fragments_and_preserves_schema(tm
 
     result = build_asr_index(
         video_path=str(tmp_path / "video.mp4"),
-        output_path=str(tmp_path / "asr.npz"),
         working_dir=str(tmp_path / "work"),
         engine="sidecar",
         model_name="small",
         device="cpu",
         model_dir=str(tmp_path / "models"),
+        milvus_ctx=object(),
         sidecar_path=str(sidecar),
         semantic_enabled=True,
         semantic_model="fake-semantic",
     )
 
-    with np.load(tmp_path / "asr.npz", allow_pickle=False) as data:
-        assert set(data.files) == {
-            "chunk_times_ms",
-            "texts",
-            "chunk_emotions",
-            "chunk_audio_events",
-            "embeddings",
-            "embedding_chunk_indices",
-        }
-        assert data["chunk_times_ms"].tolist() == [[0, 1200], [3200, 3700]]
-        assert data["texts"].tolist() == ["今天我们聊一本书", "下一段"]
-        assert data["embedding_chunk_indices"].tolist() == [0, 1]
+    arrays = _capture_milvus_writes[-1]["arrays"]
+    assert arrays["chunk_times_ms"].tolist() == [[0, 1200], [3200, 3700]]
+    assert arrays["texts"] == ["今天我们聊一本书", "下一段"]
+    assert arrays["embedding_chunk_indices"].tolist() == [0, 1]
+    assert not (tmp_path / "asr.npz").exists()
     assert result["raw_chunks"] == 3
     assert result["chunks"] == 2
     assert result["chunk_builder_stats"]["merged_items"] == 1
 
 
-def test_sidecar_asr_pipeline_does_not_repair_cjk_boundary_across_gap(tmp_path, monkeypatch):
+def test_sidecar_asr_pipeline_does_not_repair_cjk_boundary_across_gap(
+    tmp_path, monkeypatch, _capture_milvus_writes
+):
     sidecar = tmp_path / "broken.srt"
     sidecar.write_text(
         "1\n00:00:00,000 --> 00:00:01,000\n孤\n\n"
@@ -811,27 +820,20 @@ def test_sidecar_asr_pipeline_does_not_repair_cjk_boundary_across_gap(tmp_path, 
 
     result = build_asr_index(
         video_path=str(tmp_path / "video.mp4"),
-        output_path=str(tmp_path / "asr.npz"),
         working_dir=str(tmp_path / "work"),
         engine="sidecar",
         model_name="small",
         device="cpu",
         model_dir=str(tmp_path / "models"),
+        milvus_ctx=object(),
         sidecar_path=str(sidecar),
         semantic_enabled=True,
         semantic_model="fake-semantic",
     )
 
-    with np.load(tmp_path / "asr.npz", allow_pickle=False) as data:
-        assert set(data.files) == {
-            "chunk_times_ms",
-            "texts",
-            "chunk_emotions",
-            "chunk_audio_events",
-            "embeddings",
-            "embedding_chunk_indices",
-        }
-        assert data["texts"].tolist() == ["孤", "独敏感又倔强。"]
+    arrays = _capture_milvus_writes[-1]["arrays"]
+    assert arrays["texts"] == ["孤", "独敏感又倔强。"]
+    assert not (tmp_path / "asr.npz").exists()
     assert result["raw_items"] == 2
     assert result["retrieval_chunks"] == 2
     assert result["chunk_builder_stats"]["merged_items"] == 0

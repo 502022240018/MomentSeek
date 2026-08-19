@@ -14,7 +14,9 @@ from app.vector_store.milvus.milvus_client import _COLLECTION_FOR_MODALITY
 from app.vector_store.milvus.milvus_search import (
     _MODALITY_METRIC,
     get_modality_index_type,
+    milvus_asr_candidates_hybrid,
     milvus_face_candidates,
+    milvus_ocr_candidates_hybrid,
 )
 from app.vector_store.milvus.milvus_search_visual_v2 import _aggregate_by_segment
 
@@ -100,7 +102,9 @@ def test_visual_ann_uses_supported_retrieval_profiler_api():
     client = MagicMock()
     collection = MagicMock()
     client.collection_for.return_value = collection
-    collection.index.return_value = MagicMock(params={"index_type": "DISKANN"})
+    collection.index.return_value = MagicMock(
+        params={"index_type": "DISKANN", "metric_type": "COSINE"}
+    )
     hit = MagicMock()
     hit.distance = 0.85
     hit.entity.get.side_effect = lambda field, default=None: {
@@ -132,6 +136,77 @@ def test_visual_ann_uses_supported_retrieval_profiler_api():
     assert snapshot["timing"]["milvus_rpc"]["visual"] >= 0
     assert snapshot["counters"]["milvus"]["visual_requests"] == 1
     assert snapshot["counters"]["milvus"]["visual_rows"] == 1
+
+
+def test_visual_ann_passes_configured_milvus_timeout():
+    from app.vector_store.milvus.milvus_search_visual_v2 import (
+        _ann_recall_multi_query,
+    )
+
+    collection = MagicMock()
+    collection.search.return_value = [[]]
+    client = MagicMock()
+    client.collection_for.return_value = collection
+    settings = MagicMock(milvus_query_timeout_seconds=7.5)
+
+    with patch("app.core.settings.get_settings", return_value=settings):
+        assert _ann_recall_multi_query(
+            client,
+            "video-test",
+            "asset-test",
+            np.ones((1, 1152), dtype=np.float32),
+            top_k=10,
+            use_diskann=False,
+            profiler=None,
+        ) == []
+
+    assert collection.search.call_args.kwargs["timeout"] == 7.5
+
+
+def test_visual_index_transient_introspection_failure_is_not_cached():
+    from app.vector_store.milvus.milvus_search_visual_v2 import (
+        _reset_index_verification,
+        _verify_index_type_once,
+    )
+
+    collection = MagicMock()
+    collection.index.side_effect = [
+        RuntimeError("temporary timeout"),
+        MagicMock(params={"index_type": "DISKANN", "metric_type": "COSINE"}),
+    ]
+    client = MagicMock()
+    client.collection_for.return_value = collection
+
+    _reset_index_verification()
+    try:
+        _verify_index_type_once(client, True)
+        _verify_index_type_once(client, True)
+    finally:
+        _reset_index_verification()
+
+    assert collection.index.call_count == 2
+
+
+def test_visual_index_rejects_non_cosine_metric():
+    from app.vector_store.milvus.milvus_search_visual_v2 import (
+        MilvusVisualSearchError,
+        _reset_index_verification,
+        _verify_index_type_once,
+    )
+
+    collection = MagicMock()
+    collection.index.return_value = MagicMock(
+        params={"index_type": "DISKANN", "metric_type": "IP"}
+    )
+    client = MagicMock()
+    client.collection_for.return_value = collection
+
+    _reset_index_verification()
+    try:
+        with pytest.raises(MilvusVisualSearchError, match="expects COSINE"):
+            _verify_index_type_once(client, True)
+    finally:
+        _reset_index_verification()
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +261,140 @@ def test_face_candidates_trusts_cosine_distance():
     assert candidate.decision == "absolute_hit"
 
 
+def _candidate_hit(fields: dict, *, score: float = 0.8, distance: float = 0.8):
+    hit = MagicMock()
+    hit.score = score
+    hit.distance = distance
+    hit.entity.get.side_effect = lambda field, default=None: fields.get(field, default)
+    return hit
+
+
+def test_asr_candidates_require_explicit_valid_time_window(caplog):
+    valid = _candidate_hit({
+        "segment_idx": 0,
+        "start_ms": 0,
+        "end_ms": 1000,
+        "text": "hello",
+        "has_embedding": False,
+    })
+    missing = _candidate_hit({
+        "segment_idx": 1,
+        "start_ms": 1000,
+        "text": "missing end",
+        "has_embedding": False,
+    })
+    invalid = _candidate_hit({
+        "segment_idx": 2,
+        "start_ms": 2000,
+        "end_ms": 2000,
+        "text": "empty window",
+        "has_embedding": False,
+    })
+    collection = MagicMock()
+    collection.search.return_value = [[valid, missing, invalid]]
+    client = MagicMock()
+    client.collection_for.return_value = collection
+
+    candidates = milvus_asr_candidates_hybrid(
+        client,
+        "video-test",
+        "asset-test",
+        "hello",
+        None,
+        10,
+    )
+
+    assert [(item.start_time, item.end_time) for item in candidates] == [(0.0, 1.0)]
+    assert "ASR search dropped 2" in caplog.text
+
+
+def test_ocr_candidates_require_explicit_valid_time_window(caplog):
+    valid = _candidate_hit({
+        "frame_idx": 0,
+        "frame_ms": 700,
+        "start_ms": 0,
+        "end_ms": 900,
+        "text": "cash register",
+        "avg_box_score": 0.9,
+        "has_embedding": False,
+    })
+    missing = _candidate_hit({
+        "frame_idx": 1,
+        "frame_ms": 1000,
+        "start_ms": 900,
+        "text": "missing end",
+        "has_embedding": False,
+    })
+    invalid = _candidate_hit({
+        "frame_idx": 2,
+        "frame_ms": 1500,
+        "start_ms": 1600,
+        "end_ms": 1500,
+        "text": "reversed window",
+        "has_embedding": False,
+    })
+    collection = MagicMock()
+    collection.search.return_value = [[valid, missing, invalid]]
+    client = MagicMock()
+    client.collection_for.return_value = collection
+
+    candidates = milvus_ocr_candidates_hybrid(
+        client,
+        "video-test",
+        "asset-test",
+        "cash register",
+        None,
+        10,
+    )
+
+    # A legitimate zero start is preserved, not treated as a legacy sentinel and
+    # re-inferred from frame_ms.
+    assert [(item.start_time, item.end_time) for item in candidates] == [(0.0, 0.9)]
+    assert "OCR search dropped 2" in caplog.text
+
+
+def test_face_candidates_require_explicit_valid_time_window(caplog):
+    valid = _candidate_hit({
+        "track_idx": 0,
+        "start_ms": 0,
+        "end_ms": 5000,
+        "best_ms": 0,
+    }, distance=0.72)
+    missing = _candidate_hit({
+        "track_idx": 1,
+        "start_ms": 5000,
+        "best_ms": 5200,
+    }, distance=0.71)
+    invalid = _candidate_hit({
+        "track_idx": 2,
+        "start_ms": 6000,
+        "end_ms": 6000,
+        "best_ms": 6000,
+    }, distance=0.70)
+    collection = MagicMock()
+    collection.search.return_value = [[valid, missing, invalid]]
+    client = MagicMock()
+    client.collection_for.return_value = collection
+    query = np.ones(512, dtype=np.float32)
+
+    with patch(
+        "app.vector_store.milvus.milvus_search._verify_ann_index_type_once"
+    ):
+        candidates = milvus_face_candidates(
+            client,
+            "video-test",
+            query,
+            "asset-test",
+            limit=10,
+            threshold=0.35,
+        )
+
+    assert [(item.start_time, item.end_time, item.best_ms) for item in candidates] == [
+        (0.0, 5.0, 0)
+    ]
+    assert "FACE search dropped 2" in caplog.text
+
+
 def test_visual_segment_top_n_controls_frame_aggregation():
     """Top-1 keeps the peak frame while Top-3 averages the three best frames."""
     ann_results = [
@@ -210,3 +419,72 @@ def test_visual_segment_top_n_controls_frame_aggregation():
 
     assert top_1[0].raw_score == pytest.approx(0.9)
     assert top_3[0].raw_score == pytest.approx(0.6)
+
+
+def test_visual_aggregation_drops_zero_length_time_bounds():
+    invalid = [{
+        "query_idx": 0,
+        "frame_idx": 0,
+        "timestamp_ms": 0,
+        "segment_id": 0,
+        "segment_start_ms": 0,
+        "segment_end_ms": 0,
+        "cosine": 0.9,
+    }]
+
+    assert _aggregate_by_segment(invalid, "video-test", 10, "balanced", 1) == []
+
+
+def test_visual_aggregation_drops_entire_segment_with_conflicting_bounds():
+    inconsistent = [
+        {
+            "query_idx": 0,
+            "frame_idx": 0,
+            "timestamp_ms": 500,
+            "segment_id": 3,
+            "segment_start_ms": 0,
+            "segment_end_ms": 1000,
+            "cosine": 0.9,
+        },
+        {
+            "query_idx": 0,
+            "frame_idx": 1,
+            "timestamp_ms": 1500,
+            "segment_id": 3,
+            "segment_start_ms": 1000,
+            "segment_end_ms": 2000,
+            "cosine": 0.8,
+        },
+    ]
+
+    assert _aggregate_by_segment(inconsistent, "video-test", 10, "balanced", 1) == []
+
+
+def test_visual_ann_does_not_default_missing_time_fields_to_zero():
+    from app.vector_store.milvus.milvus_search_visual_v2 import _ann_recall_multi_query
+
+    hit = MagicMock()
+    hit.distance = 0.9
+    hit.entity.get.side_effect = lambda field: {
+        "frame_idx": 0,
+        "timestamp_ms": 100,
+        "segment_id": 0,
+        "segment_start_ms": 0,
+        # segment_end_ms intentionally absent
+    }.get(field)
+    collection = MagicMock()
+    collection.search.return_value = [[hit]]
+    client = MagicMock()
+    client.collection_for.return_value = collection
+
+    results = _ann_recall_multi_query(
+        client,
+        "video-test",
+        "1",
+        np.ones((1, 1152), dtype=np.float32),
+        top_k=10,
+        use_diskann=False,
+        profiler=None,
+    )
+
+    assert results == []

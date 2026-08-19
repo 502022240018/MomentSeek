@@ -7,7 +7,6 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from app.api.schemas import IndexRequest, VideoRenameRequest
-from app.indexing.manifest import load_index_manifest
 from app.platform import context
 
 router = APIRouter()
@@ -33,13 +32,10 @@ def _speaker_is_indexed(video_id: str) -> bool:
     (0 rows) to prevent stale-index caching, but should not appear in the speaker
     workspace dropdown as they have no usable data.
     """
-    manifest = load_index_manifest(context.settings.index_dir / video_id) or {}
-    channel = (manifest.get("channels") or {}).get("speaker") or {}
-    version = channel.get("milvus_asset_version")
-    if not version:
+    publication = context.catalog.get_modality_publication(video_id, "speaker")
+    if not publication or publication.get("status") != "ready":
         return False
-    row_count = channel.get("milvus_row_count")
-    return row_count is not None and int(row_count) > 0
+    return int(publication.get("row_count") or 0) > 0
 
 
 @router.post("/api/videos", status_code=201)

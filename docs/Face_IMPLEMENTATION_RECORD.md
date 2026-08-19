@@ -152,7 +152,7 @@ raise MilvusServiceError(...)
 
 **改动**:删除孤儿函数 `_face_candidates()` + 删除已死方法 `_candidates_for_video()`(含悬空调用)。仅保留 `milvus_face_candidates()`(经 `_milvus_candidates_for_video()`)作为唯一在线 face 检索路径。删除后确认:`normalize` 仍在 `search.py` 其它处使用(L259,不构成未用 import);`face_confidence` 仍定义(L101)并被 `milvus_search.py` import。
 
-**保留**(勿删):`faces.py` L169 `atomic_save_npz` 索引侧 NPZ 写出(离线恢复制品,对齐 OCR/Speaker);不动索引构建链路。
+**后续平台级收口**：Face builder 已改为内存直写 Milvus，不再生成 NPZ；写入行数校验通过后，由 Catalog publication 原子发布在线版本。历史 NPZ 只作为冷备，不存在运行时读取或应用内恢复入口。
 
 ---
 
@@ -203,7 +203,7 @@ Face 查询是人脸 ArcFace 向量,无文本、无词面语义,BM25 无意义;s
 | `backend/app/vector_store/milvus/milvus_client.py` | `face_embeddings` IVF_FLAT/L2 → DISKANN/COSINE |
 | `backend/app/core/settings.py` | 新增 3 项 face settings + 2 个 validator |
 | `backend/app/retrieval/search.py` | 调用侧硬编码 `0.35`→`None`;删孤儿 `_face_candidates()`;删死方法 `_candidates_for_video()`;`_face()` provider `"cpu"`→`face_provider`、device_id `0`→`npu_device_id` |
-| `backend/scripts/migrate_face_diskann_index.py` | 一次性将既有 Face 向量索引原地迁移为 `DISKANN/COSINE`，保留 collection、行数据与 manifest |
+| `backend/scripts/migrate_face_diskann_index.py` | 一次性将既有 Face 向量索引原地迁移为 `DISKANN/COSINE`，保留 collection、行数据与 Catalog publication |
 | `.env.0829` | 新增 face 配置示例(= 默认值) |
 | `backend/tests/test_milvus_search_metric.py` | 参数元组 `("face","L2","IVF_FLAT")` → `("face","COSINE","DISKANN")`;删 `test_l2_cosine_round_trip`;`test_face_candidates_l2_to_cosine_conversion` → `test_face_candidates_trusts_cosine_distance`(mock `.distance` 直接返回 cosine,无 embedding 依赖);模块 docstring 更新 |
 | `backend/tests/test_speaker_index_verify.py` | `test_face_ivf_flat_not_judged_against_speaker_type` → 拆为 `test_face_diskann_collection_passes`(DISKANN 通过)+ `test_face_stale_ivf_flat_collection_fails_fast`(旧 IVF_FLAT fail-fast);模块 docstring 更新 |
@@ -221,7 +221,7 @@ python -m pytest tests/test_milvus_search_metric.py tests/test_speaker_index_ver
 # 回归:search / settings / speaker / batch / orchestration / timeout
 python -m pytest tests/test_search.py tests/test_settings.py tests/test_speaker_candidates.py \
   tests/test_milvus_batch_search.py tests/test_retrieval_orchestration.py tests/test_milvus_query_timeout.py -q
-# → 53 passed, 8 skipped(均为既有 "NPZ v3 fallback removed" 跳过,含 face)
+# 原有 NPZ fallback 用例已删除；在线检索由 Milvus 契约测试覆盖
 ```
 - 三个 validator 在容器内正确加载并拒绝非法值(经 settings 测试覆盖)。
 - `search.py` 删除死代码后 `ast.parse` 语法检查通过。

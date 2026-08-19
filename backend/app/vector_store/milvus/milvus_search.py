@@ -1,15 +1,8 @@
 """Milvus-side candidate generation for all five modalities.
 
-Design principle
-----------------
-Visual / ASR / OCR rely on *distribution-aware* scoring: robust z-scores and
-empirical percentiles are computed over ALL embeddings in the video, not just the
-top-k ANN hits.  A top-k ANN search would give the wrong distribution sample, so
-these three modalities use collection.query() to fetch every row for the video,
-then compute dot-products in Python.
-
-Face and Speaker use absolute-threshold scoring (no distribution normalization
-needed), so ANN search is appropriate and efficient for them.
+Visual uses segment-aware ANN, ASR/OCR use Milvus dense+sparse hybrid search,
+and Face/Speaker use absolute-threshold ANN. Online retrieval reads only the
+Catalog-published ``asset_version`` and never falls back to local index files.
 
 All functions return identical list[Candidate] types so the existing fusion,
 grouping, and ranking code in search.py needs no changes.
@@ -32,14 +25,19 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from app.indexing.common import normalize
 from app.retrieval.retrieval_metrics import RetrievalProfiler
 from app.retrieval.search import (
     Candidate,
     _seconds,
     face_confidence,
-    normalize,
 )
 from app.core.settings import get_settings
+from app.vector_store.milvus.row_contract import (
+    required_int_field as _required_int_field,
+    required_nonnegative_int_field,
+    required_time_window as _required_time_window,
+)
 
 if TYPE_CHECKING:
     from app.vector_store.milvus.milvus_client import MilvusClient
@@ -91,23 +89,6 @@ def get_modality_index_type(modality: str) -> str:
         settings = get_settings()
         return "DISKANN" if settings.visual_use_diskann else "HNSW"
     return _STATIC_INDEX_TYPES[modality]
-
-
-# Deprecated: Use get_modality_index_type() for runtime access
-# This dict exists only for backward compatibility with test assertions
-_MODALITY_INDEX_TYPE: dict[str, str] = _STATIC_INDEX_TYPES.copy()
-
-# Batch size for QueryIterator (and fallback offset-pagination).
-# Milvus recommends iterator for entity traversal; 1 000–4 000 is a practical
-# sweet-spot that keeps per-page latency low while amortising round-trip cost.
-_QUERY_BATCH = 2_000
-
-# visual / ocr / asr are all intentionally absent: each uses ANN/hybrid search
-# and issues its own collection.search() / hybrid_search() call without consuming
-# pre-fetched rows. Including them would trigger a full query_iterator traversal
-# that reads every embedding before the search runs, wasting significant I/O for
-# no benefit. This dict is therefore empty — no modality is bulk-prefetched.
-BULK_QUERY_FIELDS: dict[str, list[str]] = {}
 
 
 class MilvusServiceError(RuntimeError):
@@ -230,122 +211,6 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
 # Low-level helpers
 # ---------------------------------------------------------------------------
 
-def _schema_available_fields(col, requested: list[str]) -> list[str]:
-    """Return the subset of *requested* fields that exist in *col*'s schema.
-
-    Provides backward compatibility when a collection was created with an older
-    schema that lacks recently-added fields (e.g. ``has_embedding``).  Missing
-    fields are logged at WARNING level so operators know a schema migration is
-    needed.
-    """
-    try:
-        schema_fields = {field.name for field in col.schema.fields}
-    except TypeError:
-        # Lightweight unit-test clients and older wrappers may not expose
-        # schema metadata. Let Milvus validate the requested fields directly.
-        return requested
-    available = [f for f in requested if f in schema_fields]
-    missing = set(requested) - schema_fields
-    if missing:
-        logger.warning(
-            "Collection '%s' is missing schema fields %s — "
-            "run migrate_milvus_schema.py to upgrade; "
-            "omitting missing fields (backward-compat mode)",
-            col.name, sorted(missing),
-        )
-    return available
-
-
-def query_rows_for_videos(
-    client: MilvusClient,
-    modality: str,
-    video_ids: list[str],
-    asset_versions: dict[str, str],
-    output_fields: list[str],
-    profiler: RetrievalProfiler | None = None,
-) -> dict[str, list[dict]]:
-    """Traverse one collection once and group rows for a batch of videos."""
-    unique_ids = list(dict.fromkeys(str(value) for value in video_ids if value))
-    grouped = {video_id: [] for video_id in unique_ids}
-    if not unique_ids:
-        return grouped
-
-    col = client.collection_for(modality)
-    requested_fields = list(dict.fromkeys(["video_id", *output_fields]))
-    available_fields = _schema_available_fields(col, requested_fields)
-    if "video_id" not in available_fields:
-        raise MilvusServiceError(
-            f"Milvus collection for modality={modality} has no video_id field"
-        )
-    missing = [video_id for video_id in unique_ids if not asset_versions.get(video_id)]
-    if missing:
-        raise MilvusServiceError(
-            f"Missing published asset_version for modality={modality}: {missing}"
-        )
-    expr = " or ".join(
-        f'(video_id == {json.dumps(video_id)} and asset_version == {json.dumps(asset_versions[video_id])})'
-        for video_id in unique_ids
-    )
-    timeout = get_settings().milvus_query_timeout_seconds
-    row_count = 0
-    try:
-        span = profiler.span("milvus_rpc", modality) if profiler else nullcontext()
-        with span:
-            if hasattr(col, "query_iterator"):
-                iterator = col.query_iterator(
-                    batch_size=_QUERY_BATCH,
-                    expr=expr,
-                    output_fields=available_fields,
-                    timeout=timeout,
-                )
-                try:
-                    while True:
-                        page = iterator.next()
-                        if not page:
-                            break
-                        for row in page:
-                            video_id = str(row.get("video_id") or "")
-                            if video_id in grouped:
-                                grouped[video_id].append(row)
-                                row_count += 1
-                        if profiler:
-                            profiler.increment("milvus", f"{modality}_pages")
-                finally:
-                    iterator.close()
-            else:
-                offset = 0
-                while True:
-                    page = col.query(
-                        expr=expr,
-                        output_fields=available_fields,
-                        limit=_QUERY_BATCH,
-                        offset=offset,
-                        timeout=timeout,
-                    )
-                    for row in page:
-                        video_id = str(row.get("video_id") or "")
-                        if video_id in grouped:
-                            grouped[video_id].append(row)
-                            row_count += 1
-                    if profiler:
-                        profiler.increment("milvus", f"{modality}_pages")
-                    if len(page) < _QUERY_BATCH:
-                        break
-                    offset += _QUERY_BATCH
-    except MilvusServiceError:
-        raise
-    except Exception as exc:
-        raise MilvusServiceError(
-            f"Milvus batch query failed for modality={modality}: {exc}"
-        ) from exc
-
-    if profiler:
-        profiler.increment("milvus", f"{modality}_rows", row_count)
-        profiler.increment("milvus", f"{modality}_requests")
-        profiler.increment("milvus", f"{modality}_video_batches")
-    return grouped
-
-
 def _diskann_search_list_for(modality: str) -> int:
     """Return the configured DiskANN search_list for a modality.
 
@@ -427,6 +292,17 @@ def _ann_search(
         profiler.increment("milvus", f"{modality}_rows", len(hits))
         profiler.increment("milvus", f"{modality}_requests")
     return hits
+
+
+def _log_dropped_time_rows(modality: str, video_id: str, count: int) -> None:
+    if count:
+        logger.warning(
+            "%s search dropped %d Milvus hit(s) with missing or invalid time "
+            "metadata for video=%s; rebuild the published index version",
+            modality.upper(),
+            count,
+            video_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -620,11 +496,15 @@ def milvus_asr_candidates_hybrid(
 
     # Convert to Candidate objects (threshold applied globally later in search.py).
     candidates: list[Candidate] = []
+    invalid_time_rows = 0
     for hit in results[0]:
         hybrid_score = float(hit.score)
         text = str(hit.entity.get("text") or "")
-        start_ms = int(hit.entity.get("start_ms") or 0)
-        end_ms = int(hit.entity.get("end_ms") or 0)
+        try:
+            start_ms, end_ms = _required_time_window(hit.entity)
+        except (TypeError, ValueError, OverflowError):
+            invalid_time_rows += 1
+            continue
         segment_idx = int(hit.entity.get("segment_idx") or 0)
 
         # above_threshold stays True here; the global dynamic threshold in
@@ -652,6 +532,7 @@ def milvus_asr_candidates_hybrid(
             },
         ))
 
+    _log_dropped_time_rows("asr", video_id, invalid_time_rows)
     return candidates
 
 
@@ -797,20 +678,21 @@ def milvus_ocr_candidates_hybrid(
 
     # Convert to Candidate objects (threshold will be applied globally later)
     candidates: list[Candidate] = []
+    invalid_time_rows = 0
     for hit in results[0]:
         hybrid_score = float(hit.score)
         # Note: above_threshold will be set to True initially and updated globally later
         # in search.py after collecting all candidates from all videos
         above_threshold = True
-        frame_ms = int(hit.entity.get("frame_ms") or 0)
-        start_ms = int(hit.entity.get("start_ms") or -1)
-        end_ms = int(hit.entity.get("end_ms") or -1)
+        try:
+            frame_ms = _required_int_field(hit.entity, "frame_ms")
+            start_ms, end_ms = _required_time_window(hit.entity)
+            if frame_ms < start_ms or frame_ms > end_ms:
+                raise ValueError("frame_ms must fall inside the candidate window")
+        except (TypeError, ValueError, OverflowError):
+            invalid_time_rows += 1
+            continue
         text = str(hit.entity.get("text") or "")
-
-        # Handle legacy data without frame windows
-        if start_ms < 0:
-            start_ms = max(0, frame_ms - 500)
-            end_ms = frame_ms + 500
 
         evidence_text = f"[ocr_hybrid] {text[:100]} · hybrid={hybrid_score:.3f}"
         # Note: "低于阈值" suffix will be added later after global threshold calculation
@@ -834,6 +716,7 @@ def milvus_ocr_candidates_hybrid(
             },
         ))
 
+    _log_dropped_time_rows("ocr", video_id, invalid_time_rows)
     return candidates
 
 
@@ -888,12 +771,18 @@ def milvus_face_candidates(
     ]
     scored.sort(key=lambda x: x[0], reverse=True)
     candidates: list[Candidate] = []
+    invalid_time_rows = 0
     for cosine, hit in scored[:limit]:
         above    = cosine >= threshold
         conf     = face_confidence(cosine)
-        start_ms = int(hit.get("start_ms") or 0)
-        end_ms   = int(hit.get("end_ms")   or 0)
-        best_ms  = int(hit.get("best_ms")  or start_ms)
+        try:
+            start_ms, end_ms = _required_time_window(hit)
+            best_ms = _required_int_field(hit, "best_ms")
+            if best_ms < start_ms or best_ms > end_ms:
+                raise ValueError("best_ms must fall inside the candidate window")
+        except (TypeError, ValueError, OverflowError):
+            invalid_time_rows += 1
+            continue
         detail   = f"[milvus] face cosine={cosine:.3f} · confidence={conf * 100:.1f}%"
         candidates.append(Candidate(
             video_id=video_id,
@@ -911,6 +800,7 @@ def milvus_face_candidates(
             best_ms=best_ms,
             features={"face_cosine": cosine, "source": "milvus"},
         ))
+    _log_dropped_time_rows("face", video_id, invalid_time_rows)
     if profiler:
         profiler.add_seconds(
             "local_processing",
@@ -967,12 +857,20 @@ def milvus_speaker_candidates(
     # drops any surplus when multiplier > 1; with multiplier=1 ann_limit==limit
     # so it is a no-op.
     candidates: list[Candidate] = []
+    invalid_rows = 0
     for hit in hits[:limit]:
-        cosine = float(hit["_distance"])
+        try:
+            cosine = float(hit["_distance"])
+            if not np.isfinite(cosine):
+                raise ValueError("speaker cosine must be finite")
+            start_ms, end_ms = _required_time_window(hit)
+            utterance_idx = required_nonnegative_int_field(hit, "utterance_idx")
+            track_id = required_nonnegative_int_field(hit, "track_id")
+            asr_chunk_idx = required_nonnegative_int_field(hit, "asr_chunk_idx")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            invalid_rows += 1
+            continue
         above    = cosine >= threshold
-        start_ms = int(hit.get("start_ms") or 0)
-        end_ms   = int(hit.get("end_ms")   or 0)
-        track_id = int(hit.get("track_id") or -1)
         detail   = f"[milvus] speaker cosine={cosine:.3f} track_id={track_id}"
         candidates.append(Candidate(
             video_id=video_id,
@@ -986,14 +884,15 @@ def milvus_speaker_candidates(
             above_threshold=above,
             best_time=_seconds(start_ms),
             unit_type="utterance",
-            unit_id=int(hit.get("utterance_idx") or 0),
+            unit_id=utterance_idx,
             best_ms=start_ms,
             features={
                 "speaker_cosine": cosine,
                 "track_id":       track_id,
-                "asr_chunk_idx":  int(hit.get("asr_chunk_idx") or -1),
+                "asr_chunk_idx":  asr_chunk_idx,
                 "source":         "milvus",
             },
         ))
+    _log_dropped_time_rows("speaker", video_id, invalid_rows)
     candidates.sort(key=lambda c: c.score, reverse=True)
     return candidates
