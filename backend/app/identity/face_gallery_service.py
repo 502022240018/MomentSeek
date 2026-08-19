@@ -9,7 +9,6 @@ import numpy as np
 
 from app.identity.face_gallery import cluster_face_tracks
 from app.core.settings import get_settings
-from app.indexing.manifest import load_index_manifest
 from app.media.media import extract_frame
 from app.vector_store.milvus.milvus_client import get_milvus_client
 from app.vector_store.milvus.milvus_schema import (
@@ -57,13 +56,11 @@ def _query_all(collection, *, expr: str, output_fields: list[str]) -> list[dict]
     return rows
 
 
-def published_face_version(index_dir: Path, video_id: str) -> str:
-    manifest = load_index_manifest(index_dir / video_id) or {}
-    channel = (manifest.get("channels") or {}).get("face") or {}
-    version = channel.get("milvus_asset_version")
-    if version is None:
+def published_face_version(catalog, video_id: str) -> str:
+    publication = catalog.get_modality_publication(video_id, "face")
+    if not publication or publication.get("status") != "ready":
         raise FileNotFoundError("该视频尚未发布 Face Milvus 索引")
-    return str(version)
+    return str(publication["asset_version"])
 
 
 def _expr_value(value: str) -> str:
@@ -129,8 +126,8 @@ def ensure_video_face_groups(video_id: str, asset_version: str, threshold: float
     return True
 
 
-def video_face_groups(index_dir: Path, catalog, video_id: str, threshold: float) -> dict:
-    asset_version = published_face_version(index_dir, video_id)
+def video_face_groups(catalog, video_id: str, threshold: float) -> dict:
+    asset_version = published_face_version(catalog, video_id)
     backfilled = ensure_video_face_groups(video_id, asset_version, threshold)
     rows = _query_all(
         get_milvus_client().collection("face_groups"),

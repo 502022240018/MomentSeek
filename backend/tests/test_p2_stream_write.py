@@ -3,8 +3,8 @@ Test P2: streaming direct-write path for all modalities (no NPZ intermediate).
 
 Validates that:
 - write_modality_from_memory() writes directly to Milvus
-- recovery_save_fn is called only on write failure
-- NPZ is NOT written on the hot path when Milvus is available
+- write failures abort without writing a local recovery artifact
+- no NPZ is written on either the success or failure path
 - All 5 modalities use the direct path
 """
 import numpy as np
@@ -42,45 +42,121 @@ class TestVisualDirectWrite:
         frame_times = np.arange(0, 10000, 1000, dtype=np.int32)
         offsets = np.array([0, 5, 10], dtype=np.int32)
 
-        recovery_called = Mock()
         write_modality_from_memory(
             mock_ctx, "visual",
             {
                 "embeddings": embeddings,
                 "frame_times_ms": frame_times,
                 "segment_frame_offsets": offsets,
-                "segment_times_ms": None,
+                "segment_times_ms": np.array([[0, 5000], [5000, 10000]], dtype=np.int32),
+                "duration_ms": 10000,
             },
-            recovery_save_fn=recovery_called,
         )
 
         # Verify upsert was called
         mock_ctx.client.collection_for.assert_called_with("visual")
         assert mock_ctx.client.collection_for().upsert.call_count > 0
 
-        # Recovery NOT called on success
-        recovery_called.assert_not_called()
+        assert not (tmp_path / "visual.npz").exists()
 
-    def test_direct_write_failure_saves_npz(self, mock_ctx, tmp_path):
-        """Visual: Milvus write fails → recovery_save_fn is invoked."""
+    def test_direct_write_failure_fails_closed_without_npz(self, mock_ctx, tmp_path):
+        """Visual: a failed Milvus write neither publishes nor saves NPZ."""
         mock_ctx.client.collection_for().upsert.side_effect = RuntimeError("Connection lost")
 
-        recovery_called = Mock()
-
-        with pytest.raises(RuntimeError, match="Milvus write failed"):
+        with pytest.raises(RuntimeError, match="fail-closed"):
             write_modality_from_memory(
                 mock_ctx, "visual",
                 {
                     "embeddings": np.random.randn(5, 1152).astype(np.float32),
                     "frame_times_ms": np.arange(5, dtype=np.int32),
                     "segment_frame_offsets": np.array([0, 5], dtype=np.int32),
-                    "segment_times_ms": None,
+                    "segment_times_ms": np.array([[0, 5]], dtype=np.int32),
+                    "duration_ms": 5,
                 },
-                recovery_save_fn=recovery_called,
             )
 
-        # Recovery function MUST be called
-        recovery_called.assert_called_once()
+        assert not (tmp_path / "visual.npz").exists()
+        mock_ctx.client.collection_for().flush.assert_not_called()
+
+    def test_flush_failure_is_fail_closed(self, mock_ctx, tmp_path):
+        mock_ctx.client.collection_for().flush.side_effect = RuntimeError("flush failed")
+
+        with pytest.raises(RuntimeError, match="fail-closed"):
+            write_modality_from_memory(
+                mock_ctx,
+                "visual",
+                {
+                    "embeddings": np.random.randn(1, 1152).astype(np.float32),
+                    "frame_times_ms": np.array([0], dtype=np.int32),
+                    "segment_frame_offsets": np.array([0, 1], dtype=np.int32),
+                    "segment_times_ms": np.array([[0, 1]], dtype=np.int32),
+                    "duration_ms": 1,
+                },
+            )
+
+        assert not (tmp_path / "visual.npz").exists()
+
+    @pytest.mark.parametrize(
+        ("offsets", "bounds", "duration_ms", "match"),
+        [
+            (
+                np.array([0, 2], dtype=np.int32),
+                np.array([[0, 1000]], dtype=np.int32),
+                2000,
+                "cover every frame",
+            ),
+            (
+                np.array([0, 2, 3], dtype=np.int32),
+                np.array([[0, 1000]], dtype=np.int32),
+                2000,
+                "must have shape",
+            ),
+            (
+                np.array([0, 2, 3], dtype=np.int32),
+                np.array([[0, 1000], [1000, 2500]], dtype=np.int32),
+                2000,
+                "0 <= start < end <= duration_ms",
+            ),
+        ],
+    )
+    def test_visual_writer_rejects_invalid_segment_contract(
+        self,
+        mock_ctx,
+        offsets,
+        bounds,
+        duration_ms,
+        match,
+    ):
+        from app.vector_store.milvus.milvus_indexer import VisualMilvusIndexer
+
+        with pytest.raises(ValueError, match=match):
+            VisualMilvusIndexer().upsert_from_memory(
+                mock_ctx,
+                embeddings=np.random.randn(3, 1152).astype(np.float32),
+                frame_times_ms=np.array([100, 900, 1500], dtype=np.int32),
+                segment_frame_offsets=offsets,
+                segment_times_ms=bounds,
+                duration_ms=duration_ms,
+            )
+
+    def test_visual_writer_assigns_one_consistent_boundary_per_segment(self, mock_ctx):
+        from app.vector_store.milvus.milvus_indexer import VisualMilvusIndexer
+
+        count = VisualMilvusIndexer().upsert_from_memory(
+            mock_ctx,
+            embeddings=np.random.randn(3, 1152).astype(np.float32),
+            frame_times_ms=np.array([100, 900, 1500], dtype=np.int32),
+            segment_frame_offsets=np.array([0, 2, 3], dtype=np.int32),
+            segment_times_ms=np.array([[0, 1000], [1000, 2000]], dtype=np.int32),
+            duration_ms=2000,
+        )
+
+        assert count == 3
+        rows = mock_ctx.client.collection_for().upsert.call_args[0][0]
+        assert {
+            (row["segment_id"], row["segment_start_ms"], row["segment_end_ms"])
+            for row in rows
+        } == {(0, 0, 1000), (1, 1000, 2000)}
 
 
 class TestAsrDirectWrite:
@@ -91,7 +167,6 @@ class TestAsrDirectWrite:
         embeddings = np.random.randn(2, 1024).astype(np.float32)
         indices = np.array([0, 1], dtype=np.int32)
 
-        recovery = Mock()
         write_modality_from_memory(
             mock_ctx, "asr",
             {
@@ -100,12 +175,10 @@ class TestAsrDirectWrite:
                 "embeddings": embeddings,
                 "embedding_chunk_indices": indices,
             },
-            recovery_save_fn=recovery,
         )
 
         mock_ctx.client.collection_for.assert_called_with("asr")
         assert mock_ctx.client.collection_for().upsert.call_count > 0
-        recovery.assert_not_called()
 
 
 class TestOcrDirectWrite:
@@ -116,7 +189,6 @@ class TestOcrDirectWrite:
         box_texts = ["hello", "world"]
         box_frame_indices = np.array([0, 1], dtype=np.int32)
 
-        recovery = Mock()
         write_modality_from_memory(
             mock_ctx, "ocr",
             {
@@ -128,11 +200,9 @@ class TestOcrDirectWrite:
                 "box_texts": box_texts,
                 "box_scores": None,
             },
-            recovery_save_fn=recovery,
         )
 
         mock_ctx.client.collection_for.assert_called_with("ocr")
-        recovery.assert_not_called()
 
 
 class TestFaceDirectWrite:
@@ -141,15 +211,12 @@ class TestFaceDirectWrite:
         embeddings = np.random.randn(3, 512).astype(np.float32)
         track_times = np.array([[0, 1000, 500], [1000, 2000, 1500], [2000, 3000, 2500]], dtype=np.int32)
 
-        recovery = Mock()
         write_modality_from_memory(
             mock_ctx, "face",
             {"embeddings": embeddings, "track_times_ms": track_times},
-            recovery_save_fn=recovery,
         )
 
         mock_ctx.client.collection_for.assert_called_with("face")
-        recovery.assert_not_called()
 
 
 class TestSpeakerDirectWrite:
@@ -159,7 +226,6 @@ class TestSpeakerDirectWrite:
         times = np.array([[0, 1000], [1000, 2000], [2000, 3000], [3000, 4000]], dtype=np.int32)
         refs = np.array([[0, 0], [1, 0], [2, 1], [3, 1]], dtype=np.int32)
 
-        recovery = Mock()
         write_modality_from_memory(
             mock_ctx, "speaker",
             {
@@ -167,11 +233,9 @@ class TestSpeakerDirectWrite:
                 "utterance_times_ms": times,
                 "utterance_refs": refs,
             },
-            recovery_save_fn=recovery,
         )
 
         mock_ctx.client.collection_for.assert_called_with("speaker")
-        recovery.assert_not_called()
 
 
 class TestBuildFunctionsP2Integration:

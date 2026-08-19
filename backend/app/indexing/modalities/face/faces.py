@@ -7,7 +7,7 @@ import numpy as np
 import cv2
 
 from app.encoders.face import FaceEncoder
-from app.indexing.common import atomic_save_npz, normalize
+from app.indexing.common import normalize
 from app.media.media import read_frames
 
 if TYPE_CHECKING:
@@ -105,11 +105,11 @@ def _face_track_arrays(tracks: list[Track]) -> tuple[list[np.ndarray], list[list
 
 def build_face_index(
     video_path: str,
-    output_path: str,
     model_name: str,
     sample_fps: float,
     provider: str,
     device_id: int,
+    milvus_ctx: "MilvusWriteContext",
     model_root: str | None = None,
     max_gap: float = 1.5,
     cosine_threshold: float = 0.35,
@@ -119,8 +119,9 @@ def build_face_index(
     prefer_ffmpeg: bool = True,
     ort_intra_op_threads: int = 8,
     ort_inter_op_threads: int = 1,
-    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
+    if milvus_ctx is None:
+        raise ValueError("Face 索引必须提供 MilvusWriteContext")
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
     if encoder is None:
@@ -184,24 +185,16 @@ def build_face_index(
         cosine_threshold=gallery_cosine_threshold,
     )
     group_arrays = face_group_arrays(groups)
-    milvus_rows = None
-    if milvus_ctx is not None:
-        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
+    from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
 
-        milvus_rows = write_modality_from_memory(
-            milvus_ctx,
-            "face",
-            {
-                "embeddings": embedding_array,
-                "track_times_ms": track_times_array,
-                **group_arrays,
-            },
-        )
-    # Retained only as an offline recovery artifact; no runtime path reads it.
-    atomic_save_npz(
-        output_path,
-        embeddings=embedding_array,
-        track_times_ms=track_times_array,
+    milvus_rows = write_modality_from_memory(
+        milvus_ctx,
+        "face",
+        {
+            "embeddings": embedding_array,
+            "track_times_ms": track_times_array,
+            **group_arrays,
+        },
     )
     return {
         "tracks": len(embeddings),

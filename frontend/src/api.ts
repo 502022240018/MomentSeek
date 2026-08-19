@@ -94,12 +94,7 @@ export type Evidence = {
   modality: string;
   score: number;
   raw_score?: number | null;
-  robust_z?: number | null;
-  percentile?: number | null;
   decision?: string;
-  distribution_reliable?: boolean | null;
-  distribution_median?: number | null;
-  distribution_mad?: number | null;
   detail?: string;
   best_time?: number | null;
   unit_type?: string | null;
@@ -107,9 +102,6 @@ export type Evidence = {
   best_ms?: number | null;
   text?: string | null;
   features?: Record<string, unknown>;
-  visual_top1?: number | null;
-  visual_top3?: number | null;
-  visual_mean?: number | null;
 };
 
 export type SearchResult = {

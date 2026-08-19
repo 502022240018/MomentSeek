@@ -636,9 +636,10 @@ class SearchOrchestrator:
         provider = self._provider(spec.provider)
         prompt = self._prompt(spec.prompt_path)
         top_n = min(plan.rerank.top_n, len(results))
-        selected = [
+        original_selected = [dict(result) for result in results[:top_n]]
+        verification_selected = [
             self._expanded_candidate(result, plan.rerank.window_seconds)
-            for result in results[:top_n]
+            for result in original_selected
         ]
         started = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(
@@ -649,13 +650,19 @@ class SearchOrchestrator:
                     lambda result: self._score_candidate(
                         result, query, plan, spec, provider, prompt
                     ),
-                    selected,
+                    verification_selected,
                 )
+            )
+        successful_count = sum(score.get("rerank_score") is not None for score in scores)
+        if successful_count == 0:
+            errors = [str(score.get("error") or "unknown error") for score in scores]
+            raise OrchestrationError(
+                "reranker failed for every selected candidate: " + "; ".join(errors)
             )
         reranked = []
         trace_candidates = []
-        for original_rank, (result, scored) in enumerate(
-            zip(selected, scores), start=1
+        for original_rank, (result, verification, scored) in enumerate(
+            zip(original_selected, verification_selected, scores), start=1
         ):
             item = dict(result)
             original_score = float(item["score"])
@@ -677,20 +684,24 @@ class SearchOrchestrator:
                     "video_id": item["video_id"],
                     "start_time": item["start_time"],
                     "end_time": item["end_time"],
-                    "original_start_time": item.get("original_start_time"),
-                    "original_end_time": item.get("original_end_time"),
+                    "verification_start_time": verification["start_time"],
+                    "verification_end_time": verification["end_time"],
                     "original_rank": original_rank,
                     "retrieval_score": round(original_score, 6),
                     **scored,
                 }
             )
-        reranked.sort(
+        final = reranked + [
+            {**result, "original_rank": original_rank}
+            for original_rank, result in enumerate(results[top_n:], start=top_n + 1)
+        ]
+        final.sort(
             key=lambda item: (item["score"], -item["original_rank"]),
             reverse=True,
         )
-        final = reranked + results[top_n:]
+        error_count = top_n - successful_count
         trace = {
-            "status": "ok",
+            "status": "partial" if error_count else "ok",
             **provider.descriptor,
             "prompt_version": spec.prompt_version,
             "elapsed_seconds": round(time.perf_counter() - started, 6),
@@ -699,6 +710,8 @@ class SearchOrchestrator:
             "frame_count": plan.rerank.frame_count,
             "window_seconds": plan.rerank.window_seconds,
             "score_weight": plan.rerank.score_weight,
+            "successful_count": successful_count,
+            "error_count": error_count,
             "candidates": trace_candidates,
         }
         return final, trace

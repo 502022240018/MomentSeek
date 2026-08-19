@@ -122,11 +122,11 @@ def _verify_index_type_once(client: MilvusClient, expect_diskann: bool) -> None:
     with _verify_lock:
         if _verified_for_diskann == expect_diskann:
             return  # Another thread already verified while we waited
-        _verify_index_type(client, expect_diskann)
-        _verified_for_diskann = expect_diskann
+        if _verify_index_type(client, expect_diskann):
+            _verified_for_diskann = expect_diskann
 
 
-def _verify_index_type(client: MilvusClient, expect_diskann: bool) -> None:
+def _verify_index_type(client: MilvusClient, expect_diskann: bool) -> bool:
     """Verify visual collection index type matches configuration.
 
     Args:
@@ -142,27 +142,57 @@ def _verify_index_type(client: MilvusClient, expect_diskann: bool) -> None:
 
         if not index_info:
             logger.warning("Visual collection has no index; first indexing will create it")
-            return
+            return True
 
-        actual_type = index_info.params.get("index_type", "UNKNOWN")
+        index_params = index_info.params or {}
+        actual_type = index_params.get("index_type", "UNKNOWN")
+        actual_metric = index_params.get("metric_type", "UNKNOWN")
+        expected_type = "DISKANN" if expect_diskann else "HNSW"
 
-        if expect_diskann and actual_type != "DISKANN":
+        if not isinstance(actual_type, str) or not isinstance(actual_metric, str):
+            logger.warning(
+                "Visual index metadata did not expose string index/metric types; "
+                "skipping drift check"
+            )
+            return True
+
+        if actual_type != expected_type:
             raise MilvusVisualSearchError(
-                f"Index type mismatch: config expects DISKANN but collection has {actual_type}. "
+                f"Index type mismatch: config expects {expected_type} but collection "
+                f"has {actual_type}. "
                 "Run backend/scripts/rebuild_visual_index.py to rebuild."
             )
-        elif not expect_diskann and actual_type == "DISKANN":
+        if actual_metric != "COSINE":
             raise MilvusVisualSearchError(
-                "Index type mismatch: config expects HNSW but collection has DISKANN. "
-                "Run backend/scripts/rebuild_visual_index.py to rebuild."
+                "Metric type mismatch: visual config expects COSINE but collection "
+                f"has {actual_metric}. Rebuild the visual vector index before serving."
             )
 
-        logger.debug(f"Visual index type verified: {actual_type}")
+        logger.debug(
+            "Visual ANN index verified: index_type=%s metric_type=%s",
+            actual_type,
+            actual_metric,
+        )
+        return True
 
     except MilvusVisualSearchError:
         raise
-    except Exception as e:
-        logger.warning(f"Failed to verify index type: {e}")
+    except (AttributeError, TypeError) as exc:
+        # Structural limitation of a lightweight wrapper/test double. Retrying
+        # cannot make index metadata introspectable, so this state is cacheable.
+        logger.warning(
+            "Visual index metadata is not introspectable (%s); skipping drift check",
+            exc,
+        )
+        return True
+    except Exception as exc:
+        # RPC and timeout failures may recover. Continue serving this request, but
+        # deliberately do not cache success so the next request retries the check.
+        logger.warning(
+            "Transient failure verifying visual index metadata: %s; will retry",
+            exc,
+        )
+        return False
 
 
 def _ann_recall_multi_query(
@@ -184,6 +214,8 @@ def _ann_recall_multi_query(
         List of frame hits with fields: query_idx, frame_idx, timestamp_ms,
         segment_id, segment_start_ms, segment_end_ms, cosine
     """
+    from app.core.settings import get_settings
+
     collection = client.collection_for("visual")
 
     try:
@@ -222,26 +254,49 @@ def _ann_recall_multi_query(
                     "segment_end_ms",
                 ],
                 # Do NOT return embedding field to reduce network transfer
+                timeout=get_settings().milvus_query_timeout_seconds,
             )
 
         results = []
+        malformed_hits = 0
         for query_idx, query_hits in enumerate(hits):
             for hit in query_hits:
                 entity = hit.entity
-                results.append({
-                    "query_idx": query_idx,
-                    "frame_idx": int(entity.get("frame_idx", 0)),
-                    "timestamp_ms": int(entity.get("timestamp_ms", 0)),
-                    "segment_id": int(entity.get("segment_id", 0)),
-                    "segment_start_ms": int(entity.get("segment_start_ms", 0)),
-                    "segment_end_ms": int(entity.get("segment_end_ms", 0)),
-                    "cosine": float(hit.distance),  # COSINE metric returns cosine value
-                })
+                try:
+                    # Do not default missing time fields to zero: that turns schema
+                    # mismatches into plausible-looking 0:00-0:00 candidates.
+                    results.append({
+                        "query_idx": query_idx,
+                        "frame_idx": int(_required_entity_field(entity, "frame_idx")),
+                        "timestamp_ms": int(_required_entity_field(entity, "timestamp_ms")),
+                        "segment_id": int(_required_entity_field(entity, "segment_id")),
+                        "segment_start_ms": int(
+                            _required_entity_field(entity, "segment_start_ms")
+                        ),
+                        "segment_end_ms": int(
+                            _required_entity_field(entity, "segment_end_ms")
+                        ),
+                        "cosine": float(hit.distance),
+                    })
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    malformed_hits += 1
+
+        valid_results = _valid_visual_results(results, video_id=video_id)
+        dropped_hits = malformed_hits + len(results) - len(valid_results)
+        if dropped_hits:
+            logger.warning(
+                "Visual ANN dropped %d invalid hit(s) for video=%s; "
+                "re-index visual data with explicit time bounds",
+                dropped_hits,
+                video_id,
+            )
 
         if profiler:
             profiler.increment("milvus", "visual_requests")
-            profiler.increment("milvus", "visual_rows", len(results))
-        return results
+            profiler.increment("milvus", "visual_rows", len(valid_results))
+            if dropped_hits:
+                profiler.increment("milvus", "visual_invalid_rows", dropped_hits)
+        return valid_results
 
     except Exception as e:
         logger.error(f"Visual ANN batch search failed: {e}")
@@ -275,6 +330,8 @@ def _aggregate_by_segment(
         n_queries: Number of query vectors
         segment_top_n: Number of top frames per segment for score aggregation (default: 3)
     """
+    ann_results = _valid_visual_results(ann_results, video_id=video_id)
+
     # Group frames by (segment_id, frame_idx, query_idx)
     frame_scores: dict[tuple[int, int], dict[int, float]] = defaultdict(dict)
     frame_meta: dict[tuple[int, int], dict] = {}
@@ -391,3 +448,77 @@ def _normalize(vec: np.ndarray) -> np.ndarray:
     if norm < 1e-8:
         return vec
     return vec / norm
+
+
+def _required_entity_field(entity: Any, field: str) -> Any:
+    """Read a required Milvus field without supplying a compatibility default."""
+    value = entity.get(field)
+    if value is None:
+        raise KeyError(field)
+    return value
+
+
+def _valid_visual_results(
+    results: list[dict[str, Any]],
+    *,
+    video_id: str,
+) -> list[dict[str, Any]]:
+    """Fail closed on invalid or internally inconsistent visual time metadata."""
+    structurally_valid: list[dict[str, Any]] = []
+    bounds_by_segment: dict[int, set[tuple[int, int]]] = defaultdict(set)
+
+    for result in results:
+        try:
+            query_idx = int(result["query_idx"])
+            frame_idx = int(result["frame_idx"])
+            timestamp_ms = int(result["timestamp_ms"])
+            segment_id = int(result["segment_id"])
+            start_ms = int(result["segment_start_ms"])
+            end_ms = int(result["segment_end_ms"])
+            cosine = float(result["cosine"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+
+        if (
+            query_idx < 0
+            or frame_idx < 0
+            or segment_id < 0
+            or timestamp_ms < 0
+            or start_ms < 0
+            or end_ms <= start_ms
+            or timestamp_ms < start_ms
+            or timestamp_ms > end_ms
+            or not np.isfinite(cosine)
+        ):
+            continue
+
+        normalized = dict(result)
+        normalized.update({
+            "query_idx": query_idx,
+            "frame_idx": frame_idx,
+            "timestamp_ms": timestamp_ms,
+            "segment_id": segment_id,
+            "segment_start_ms": start_ms,
+            "segment_end_ms": end_ms,
+            "cosine": cosine,
+        })
+        structurally_valid.append(normalized)
+        bounds_by_segment[segment_id].add((start_ms, end_ms))
+
+    inconsistent_segments = {
+        segment_id
+        for segment_id, bounds in bounds_by_segment.items()
+        if len(bounds) != 1
+    }
+    if inconsistent_segments:
+        logger.warning(
+            "Visual ANN ignored segments with inconsistent time bounds "
+            "video=%s segment_ids=%s",
+            video_id,
+            sorted(inconsistent_segments),
+        )
+    return [
+        result
+        for result in structurally_valid
+        if result["segment_id"] not in inconsistent_segments
+    ]

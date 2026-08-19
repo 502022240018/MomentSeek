@@ -1,3 +1,5 @@
+import pytest
+
 from app.catalog.db import Catalog
 
 
@@ -15,8 +17,14 @@ def test_catalog_video_job_and_entity_roundtrip(tmp_path):
     })
     assert video["indexed_modalities"] == []
 
-    catalog.update_video("video-1", status="ready", indexed_modalities=["visual", "asr"])
-    assert catalog.get_video("video-1")["indexed_modalities"] == ["visual", "asr"]
+    catalog.update_video("video-1", status="ready")
+    catalog.publish_modality(
+        "video-1", "visual", asset_version="visual-v1", row_count=2
+    )
+    catalog.publish_modality(
+        "video-1", "asr", asset_version="asr-v1", row_count=3
+    )
+    assert catalog.get_video("video-1")["indexed_modalities"] == ["asr", "visual"]
 
     job = catalog.create_job({
         "id": "job-1",
@@ -40,6 +48,32 @@ def test_catalog_video_job_and_entity_roundtrip(tmp_path):
         "embedding_path": "neymar.npz",
     })
     assert catalog.find_entity_in_text("find Neymar on the field")["id"] == "entity-1"
+
+
+def test_update_video_cannot_bypass_publication_control(tmp_path):
+    catalog = Catalog(tmp_path / "catalog.sqlite3")
+    catalog.create_video(
+        {
+            "id": "video-1",
+            "name": "demo.mp4",
+            "file_path": str(tmp_path / "demo.mp4"),
+            "duration": 1,
+            "fps": 25,
+            "width": 640,
+            "height": 480,
+            "status": "uploaded",
+        }
+    )
+
+    with pytest.raises(ValueError, match="publish_modality"):
+        catalog.update_video(
+            "video-1", status="ready", indexed_modalities=["visual"]
+        )
+
+    video = catalog.get_video("video-1")
+    assert video["status"] == "uploaded"
+    assert video["indexed_modalities"] == []
+    assert video["index_publications"] == {}
 
 
 def test_rename_and_delete_video_removes_jobs(tmp_path):

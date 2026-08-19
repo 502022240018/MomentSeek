@@ -28,32 +28,36 @@ def test_sidecar_asr_index_postprocesses_ascii_fragments_and_preserves_schema(tm
         }
 
     monkeypatch.setattr(asr, "build_text_semantic_arrays", fake_semantic_arrays, raising=False)
+    captured: dict = {}
+
+    def fake_write(ctx, modality, arrays, **_kwargs):
+        captured.update(ctx=ctx, modality=modality, arrays=arrays)
+        return len(arrays["chunk_times_ms"])
+
+    monkeypatch.setattr(
+        "app.vector_store.milvus.milvus_indexer.write_modality_from_memory",
+        fake_write,
+    )
 
     result = build_asr_index(
         video_path=str(tmp_path / "video.mp4"),
-        output_path=str(tmp_path / "asr.npz"),
         working_dir=str(tmp_path / "work"),
         engine="sidecar",
         model_name="small",
         device="cpu",
         model_dir=str(tmp_path / "models"),
+        milvus_ctx=object(),
         sidecar_path=str(sidecar),
         semantic_enabled=True,
         semantic_model="fake-semantic",
     )
 
-    with np.load(tmp_path / "asr.npz", allow_pickle=False) as data:
-        assert set(data.files) == {
-            "chunk_times_ms",
-            "texts",
-            "chunk_emotions",
-            "chunk_audio_events",
-            "embeddings",
-            "embedding_chunk_indices",
-        }
-        assert data["chunk_times_ms"].tolist() == [[0, 1200], [3200, 3700]]
-        assert data["texts"].tolist() == ["today we discuss books", "next part"]
-        assert data["embedding_chunk_indices"].tolist() == [0, 1]
+    arrays = captured["arrays"]
+    assert captured["modality"] == "asr"
+    assert arrays["chunk_times_ms"].tolist() == [[0, 1200], [3200, 3700]]
+    assert arrays["texts"] == ["today we discuss books", "next part"]
+    assert arrays["embedding_chunk_indices"].tolist() == [0, 1]
+    assert not (tmp_path / "asr.npz").exists()
     assert result["raw_chunks"] == 3
     assert result["chunks"] == 2
     assert result["chunk_builder_stats"]["merged_items"] == 1

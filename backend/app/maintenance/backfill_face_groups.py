@@ -16,7 +16,7 @@ def main() -> int:
         if "face" not in (video.get("indexed_modalities") or []):
             continue
         try:
-            version = published_face_version(settings.index_dir, video["id"])
+            version = published_face_version(catalog, video["id"])
             if ensure_video_face_groups(
                 video["id"], version, settings.face_gallery_cosine_threshold
             ):

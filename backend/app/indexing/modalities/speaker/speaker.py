@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import subprocess
 import sys
 import time
@@ -116,69 +117,85 @@ def _density_fallback_labels(embeddings: np.ndarray) -> np.ndarray:
     return np.asarray([mapping[int(label)] for label in labels], dtype=np.int32)
 
 
-def _track_caches(embeddings: np.ndarray, track_indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    valid_tracks = track_indices[track_indices >= 0]
-    track_count = int(valid_tracks.max()) + 1 if valid_tracks.size else 0
-    tracks = np.zeros((track_count, embeddings.shape[1] if embeddings.ndim == 2 else EMBEDDING_DIM), dtype=np.float32)
-    representatives = np.full((track_count,), -1, dtype=np.int32)
-    for track in range(track_count):
-        indices = np.flatnonzero(track_indices == track)
-        if not len(indices):
-            continue
-        center = _normalize(embeddings[indices].mean(axis=0, keepdims=True))[0]
-        tracks[track] = center
-        representatives[track] = int(indices[np.argmax(embeddings[indices] @ center)])
-    return tracks, representatives
+def _track_count(track_indices: np.ndarray) -> int:
+    valid_tracks = np.asarray(track_indices, dtype=np.int32)
+    valid_tracks = valid_tracks[valid_tracks >= 0]
+    return int(valid_tracks.max()) + 1 if valid_tracks.size else 0
 
 
-def save_speaker_index(
-    output_path: str | Path,
-    *,
-    utterance_times_ms: np.ndarray,
-    utterance_embeddings: np.ndarray,
-    asr_chunk_indices: np.ndarray,
-    auto_track_indices: np.ndarray,
-) -> dict:
-    times = np.asarray(utterance_times_ms, dtype=np.int32)
-    embeddings = _normalize(utterance_embeddings)
-    chunk_indices = np.asarray(asr_chunk_indices, dtype=np.int32)
-    track_indices = np.asarray(auto_track_indices, dtype=np.int32)
-    count = len(embeddings)
-    if times.shape != (count, 2):
-        raise ValueError("utterance_times_ms must have shape [N, 2]")
-    if chunk_indices.shape != (count,) or track_indices.shape != (count,):
-        raise ValueError("utterance references must have shape [N]")
-    refs = np.column_stack((chunk_indices, track_indices)).astype(np.int32, copy=False)
-    tracks, representatives = _track_caches(embeddings, track_indices)
-    target = Path(output_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    np.savez_compressed(
-        target,
-        utterance_embeddings=embeddings.astype(np.float16),
-        utterance_times_ms=times,
-        utterance_refs=refs,
-        track_embeddings=tracks.astype(np.float16),
-        track_representative_indices=representatives,
+def _asr_source_from_milvus(
+    milvus_ctx: "MilvusWriteContext",
+    asr_asset_version: str,
+) -> tuple[np.ndarray, list[str]]:
+    """Load one complete, version-pinned ASR timeline from Milvus."""
+    if not str(asr_asset_version).strip():
+        raise RuntimeError("Milvus speaker build requires the published ASR asset version")
+    collection = milvus_ctx.client.collection_for("asr")
+    expression = (
+        f"video_id == {json.dumps(milvus_ctx.video_id)} and "
+        f"asset_version == {json.dumps(str(asr_asset_version))}"
     )
+    fields = ["segment_idx", "start_ms", "end_ms", "text"]
+    rows: list[dict] = []
+    from app.core.settings import get_settings
 
-    return {"utterances": count, "tracks": len(tracks), "embedding_dim": embeddings.shape[1] if count else EMBEDDING_DIM}
+    timeout = get_settings().milvus_query_timeout_seconds
+    iterator_factory = getattr(collection, "query_iterator", None)
+    if callable(iterator_factory):
+        iterator = iterator_factory(
+            batch_size=2000,
+            expr=expression,
+            output_fields=fields,
+            timeout=timeout,
+        )
+        try:
+            while True:
+                page = iterator.next()
+                if not page:
+                    break
+                rows.extend(page)
+        finally:
+            iterator.close()
+    else:
+        rows = collection.query(
+            expr=expression,
+            output_fields=fields,
+            limit=16_384,
+            timeout=timeout,
+        )
 
+    by_index: dict[int, tuple[int, int, str]] = {}
+    for row in rows:
+        raw_index = row.get("segment_idx")
+        if raw_index is None or int(raw_index) < 0:
+            raise RuntimeError(
+                f"Milvus ASR row has an invalid segment_idx for video {milvus_ctx.video_id}"
+            )
+        index = int(raw_index)
+        value = (
+            int(row.get("start_ms") or 0),
+            int(row.get("end_ms") or 0),
+            str(row.get("text") or ""),
+        )
+        previous = by_index.get(index)
+        if previous is not None and previous != value:
+            raise RuntimeError(
+                f"Milvus ASR contains conflicting duplicate segment_idx={index} "
+                f"for video {milvus_ctx.video_id}"
+            )
+        by_index[index] = value
 
-def load_speaker_index(path: str | Path) -> dict[str, np.ndarray]:
-    with np.load(path, allow_pickle=False) as data:
-        required = {
-            "utterance_embeddings", "utterance_times_ms", "utterance_refs",
-            "track_embeddings", "track_representative_indices",
-        }
-        missing = required.difference(data.files)
-        if missing:
-            raise ValueError(f"speaker.npz missing fields: {sorted(missing)}")
-        result = {name: data[name] for name in required}
-    count = len(result["utterance_embeddings"])
-    if result["utterance_times_ms"].shape != (count, 2) or result["utterance_refs"].shape != (count, 2):
-        raise ValueError("speaker.npz utterance arrays are not aligned")
-    return result
+    indices = sorted(by_index)
+    if indices != list(range(len(indices))):
+        raise RuntimeError(
+            f"Milvus ASR coverage is sparse for video {milvus_ctx.video_id}: got {indices}"
+        )
+    if not indices:
+        return np.empty((0, 2), dtype=np.int32), []
+    return (
+        np.asarray([[by_index[index][0], by_index[index][1]] for index in indices], dtype=np.int32),
+        [by_index[index][2] for index in indices],
+    )
 
 
 def _load_3dspeaker(repo: Path):
@@ -211,48 +228,15 @@ def _extract_embeddings(pipeline, chunks: list[list[float]], waveform, batch_siz
 
 
 def build_speaker_index(
-    *, video_path: str, asr_path: str, output_path: str, working_dir: str,
+    *, video_path: str, working_dir: str,
     model_repo: str, model_cache_dir: str, device: str = "cuda",
-    milvus_ctx: "MilvusWriteContext | None" = None,
-    asr_asset_version: str | None = None,
+    milvus_ctx: "MilvusWriteContext",
+    asr_asset_version: str,
 ) -> dict:
     started = time.perf_counter()
-    _asr_file = Path(asr_path)
-    if milvus_ctx is not None:
-        # Online indexing reads the ASR source of truth from Milvus.  The NPZ
-        # file is only retained for offline recovery tools that call this
-        # builder without a Milvus write context.
-        if not asr_asset_version:
-            raise RuntimeError("Milvus speaker build requires the published ASR asset version")
-        _rows = milvus_ctx.client.collection_for("asr").query(
-            expr=(f'video_id == "{milvus_ctx.video_id}" and '
-                  f'asset_version == "{asr_asset_version}"'),
-            output_fields=["segment_idx", "start_ms", "end_ms", "text"],
-        )
-        # Deduplicate by segment_idx and rebuild arrays preserving original ordering.
-        _chunks_by_idx: dict[int, tuple[int, int, str]] = {}
-        for _r in _rows:
-            _idx = int(_r.get("segment_idx") or 0)
-            if _idx not in _chunks_by_idx:
-                _chunks_by_idx[_idx] = (int(_r["start_ms"]), int(_r["end_ms"]), str(_r.get("text") or ""))
-        if _chunks_by_idx:
-            _max_idx = max(_chunks_by_idx)
-            _times_list = [[0, 0]] * (_max_idx + 1)
-            _texts_list: list[str] = [""] * (_max_idx + 1)
-            for _idx, (_s, _e, _t) in _chunks_by_idx.items():
-                _times_list[_idx] = [_s, _e]
-                _texts_list[_idx] = _t
-            times = np.asarray(_times_list, dtype=np.int32)
-            texts = _texts_list
-        else:
-            times = np.empty((0, 2), dtype=np.int32)
-            texts = []
-    else:
-        if not _asr_file.exists() or _asr_file.stat().st_size == 0:
-            raise RuntimeError("缺少离线恢复所需的 asr.npz")
-        with np.load(asr_path, allow_pickle=True) as asr:
-            times = asr["chunk_times_ms"].astype(np.int32)
-            texts = [str(value) for value in asr["texts"]]
+    if milvus_ctx is None:
+        raise RuntimeError("Speaker indexing requires a Milvus write context")
+    times, texts = _asr_source_from_milvus(milvus_ctx, asr_asset_version)
     eligible = np.asarray([
         index for index, (bounds, text) in enumerate(zip(times, texts))
         if bounds[1] > bounds[0] and _meaningful(text)
@@ -265,18 +249,17 @@ def build_speaker_index(
             "tracks": 0,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
         }
-        if milvus_ctx is not None:
-            from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
+        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
 
-            result["milvus_rows"] = write_modality_from_memory(
-                milvus_ctx,
-                "speaker",
-                {
-                    "utterance_embeddings": np.empty((0, EMBEDDING_DIM), dtype=np.float32),
-                    "utterance_times_ms": np.empty((0, 2), dtype=np.int32),
-                    "utterance_refs": np.empty((0, 2), dtype=np.int32),
-                },
-            )
+        result["milvus_rows"] = write_modality_from_memory(
+            milvus_ctx,
+            "speaker",
+            {
+                "utterance_embeddings": np.empty((0, EMBEDDING_DIM), dtype=np.float32),
+                "utterance_times_ms": np.empty((0, 2), dtype=np.int32),
+                "utterance_refs": np.empty((0, 2), dtype=np.int32),
+            },
+        )
         return result
 
     module = _load_3dspeaker(Path(model_repo))
@@ -305,11 +288,13 @@ def build_speaker_index(
         raise RuntimeError("说话人 turn 无法与 ASR 时间轴对齐")
     adaptive_chunks = [[float(start) / 1000, float(end) / 1000] for start, end in utterance_times]
     embeddings = _extract_embeddings(pipeline, adaptive_chunks, waveform)
-    result = save_speaker_index(
-        output_path, utterance_times_ms=utterance_times,
-        utterance_embeddings=embeddings, asr_chunk_indices=chunk_indices,
-        auto_track_indices=track_indices,
-    )
+    embeddings = _normalize(embeddings)
+    refs = np.column_stack((chunk_indices, track_indices)).astype(np.int32, copy=False)
+    result = {
+        "utterances": len(embeddings),
+        "tracks": _track_count(track_indices),
+        "embedding_dim": embeddings.shape[1] if len(embeddings) else EMBEDDING_DIM,
+    }
     final = {
         **result,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
@@ -319,25 +304,17 @@ def build_speaker_index(
         "clustering_backend": clustering_backend,
         "segmentation": "adaptive_speaker_turn_asr_boundary",
     }
-    if milvus_ctx is not None:
-        # P2: write directly from in-memory arrays — no NPZ round-trip.
-        # save_speaker_index already wrote the NPZ (needed for track caches);
-        # we reuse it as the recovery artifact, so recovery_save_fn is a no-op.
-        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
-        norm_emb = _normalize(np.asarray(embeddings, dtype=np.float32))
-        refs_arr = np.column_stack((
-            np.asarray(chunk_indices, dtype=np.int32),
-            np.asarray(track_indices, dtype=np.int32),
-        ))
-        final["milvus_rows"] = write_modality_from_memory(
-            milvus_ctx, "speaker",
-            {
-                "utterance_embeddings": norm_emb,
-                "utterance_times_ms":   np.asarray(utterance_times, dtype=np.int32),
-                "utterance_refs":       refs_arr,
-            },
-            recovery_save_fn=None,  # NPZ already written by save_speaker_index above
-        )
+    from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
+
+    final["milvus_rows"] = write_modality_from_memory(
+        milvus_ctx,
+        "speaker",
+        {
+            "utterance_embeddings": embeddings,
+            "utterance_times_ms": np.asarray(utterance_times, dtype=np.int32),
+            "utterance_refs": refs,
+        },
+    )
     return final
 
 

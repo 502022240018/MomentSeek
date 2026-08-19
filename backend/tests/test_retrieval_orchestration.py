@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.orchestration.retrieval_orchestration import (
@@ -9,6 +10,7 @@ from app.orchestration.retrieval_orchestration import (
     OrchestrationRegistry,
     RetrievalPlan,
     SearchOrchestrator,
+    OrchestrationError,
     _extract_json_object,
 )
 from app.platform import context
@@ -233,6 +235,88 @@ def test_temporal_candidate_expands_around_original_interval(tmp_path):
     assert "start=37.500&end=47.500" in expanded["clip_url"]
 
 
+def test_reranker_uses_expanded_verification_but_preserves_result_boundaries(tmp_path):
+    orchestrator, _engine = _orchestrator(tmp_path)
+
+    class VideoCatalog(FakeCatalog):
+        def get_video(self, video_id):
+            return {"id": video_id, "duration": 120}
+
+    orchestrator.catalog = VideoCatalog()
+    _name, profile = orchestrator._profile("split-models")
+    plan = RetrievalPlan.model_validate({
+        "modalities": ["visual"],
+        "candidate_limit": 3,
+        "result_limit": 3,
+        "rerank": {
+            "enabled": True,
+            "top_n": 2,
+            "frame_count": 0,
+            "window_seconds": 10,
+            "score_weight": 1,
+        },
+    })
+    results = [
+        {"video_id": "video-1", "start_time": 10, "end_time": 12, "score": 0.9},
+        {"video_id": "video-1", "start_time": 20, "end_time": 22, "score": 0.8},
+        {"video_id": "video-1", "start_time": 30, "end_time": 32, "score": 0.85},
+    ]
+    outcomes = iter([
+        {"status": "ok", "rerank_score": 0.1},
+        {"status": "ok", "rerank_score": 0.2},
+    ])
+    orchestrator._score_candidate = lambda *_args, **_kwargs: next(outcomes)
+
+    final, trace = orchestrator._run_reranker(profile, "query", plan, results)
+
+    assert [item["original_rank"] for item in final] == [3, 2, 1]
+    by_rank = {item["original_rank"]: item for item in final}
+    assert (by_rank[1]["start_time"], by_rank[1]["end_time"]) == (10, 12)
+    assert (by_rank[2]["start_time"], by_rank[2]["end_time"]) == (20, 22)
+    assert trace["candidates"][0]["verification_start_time"] == 6
+    assert trace["candidates"][0]["verification_end_time"] == 16
+    assert trace["status"] == "ok"
+
+
+def test_reranker_all_candidate_failures_are_not_reported_as_ok(tmp_path):
+    orchestrator, _engine = _orchestrator(tmp_path)
+    _name, profile = orchestrator._profile("split-models")
+    plan = RetrievalPlan.model_validate({
+        "modalities": ["visual"],
+        "rerank": {"enabled": True, "top_n": 2, "frame_count": 0},
+    })
+    results = FakeSearchEngine().search()
+    orchestrator._score_candidate = lambda *_args, **_kwargs: {
+        "status": "error",
+        "error": "reranker unavailable",
+    }
+
+    with pytest.raises(OrchestrationError, match="every selected candidate"):
+        orchestrator._run_reranker(profile, "query", plan, results)
+
+
+def test_reranker_partial_failure_is_explicit(tmp_path):
+    orchestrator, _engine = _orchestrator(tmp_path)
+    _name, profile = orchestrator._profile("split-models")
+    plan = RetrievalPlan.model_validate({
+        "modalities": ["visual"],
+        "rerank": {"enabled": True, "top_n": 2, "frame_count": 0},
+    })
+    outcomes = iter([
+        {"status": "ok", "rerank_score": 0.9},
+        {"status": "error", "error": "bad frame"},
+    ])
+    orchestrator._score_candidate = lambda *_args, **_kwargs: next(outcomes)
+
+    _final, trace = orchestrator._run_reranker(
+        profile, "query", plan, FakeSearchEngine().search()
+    )
+
+    assert trace["status"] == "partial"
+    assert trace["successful_count"] == 1
+    assert trace["error_count"] == 1
+
+
 def test_extract_json_object_accepts_safe_python_literal_fallback():
     value = _extract_json_object("{'modalities': ['visual'], 'rerank': {'enabled': True}}")
 
@@ -426,3 +510,84 @@ def test_search_api_returns_execution_trace(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["execution"]["request_id"] == "trace-1"
+
+
+def test_search_api_preserves_explicit_empty_video_scope(monkeypatch):
+    import app.main as main
+
+    calls: dict[str, object] = {}
+
+    class FakeCatalog:
+        def recover_color_grading_finalizations(self):
+            return 0
+
+        def resolve_video_scope(self, video_ids, folder_ids):
+            calls["resolve_video_scope"] = (video_ids, folder_ids)
+            return video_ids
+
+        def list_videos(self):
+            return [{"id": "video-1"}]
+
+    class FakeOrchestrator:
+        def search(self, *args, **kwargs):
+            calls["search"] = {"args": args, "kwargs": kwargs}
+            return {"results": [], "execution": {"request_id": "trace-empty"}}
+
+    monkeypatch.setattr(context, "catalog", FakeCatalog())
+    monkeypatch.setattr(context, "search_orchestrator", FakeOrchestrator())
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/search",
+            data={
+                "query_text": "精确台词",
+                "modalities": "asr",
+                "video_ids": "[]",
+            },
+        )
+
+    assert response.status_code == 200
+    assert calls["resolve_video_scope"] == ([], None)
+    assert calls["search"]["args"][3] == []
+    assert response.json()["scope"]["video_ids"] == []
+    assert response.json()["scope"]["resolved_video_count"] == 0
+
+
+def test_search_api_keeps_missing_video_scope_as_none(monkeypatch):
+    import app.main as main
+
+    calls: dict[str, object] = {}
+
+    class FakeCatalog:
+        def recover_color_grading_finalizations(self):
+            return 0
+
+        def resolve_video_scope(self, video_ids, folder_ids):
+            calls["resolve_video_scope"] = (video_ids, folder_ids)
+            return None
+
+        def list_videos(self):
+            return [{"id": "video-1"}]
+
+    class FakeOrchestrator:
+        def search(self, *args, **kwargs):
+            calls["search"] = {"args": args, "kwargs": kwargs}
+            return {"results": [], "execution": {"request_id": "trace-none"}}
+
+    monkeypatch.setattr(context, "catalog", FakeCatalog())
+    monkeypatch.setattr(context, "search_orchestrator", FakeOrchestrator())
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/search",
+            data={
+                "query_text": "精确台词",
+                "modalities": "asr",
+            },
+        )
+
+    assert response.status_code == 200
+    assert calls["resolve_video_scope"] == (None, None)
+    assert calls["search"]["args"][3] is None
+    assert response.json()["scope"]["video_ids"] == []
+    assert response.json()["scope"]["resolved_video_count"] == 1

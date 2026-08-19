@@ -24,7 +24,7 @@ def get_video_speakers(video_id: str) -> dict:
     if not context.catalog.get_video(video_id):
         raise HTTPException(status_code=404, detail="视频不存在")
     try:
-        return video_speakers(context.settings.index_dir, context.catalog, video_id)
+        return video_speakers(context.catalog, video_id)
     except SpeakerMilvusCoverageError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
@@ -56,7 +56,6 @@ def search_voice(request: VoiceSearchRequest) -> dict:
 
     try:
         results = voice_search(
-            context.settings.index_dir,
             context.catalog,
             query_video_id=request.query_video_id,
             query_utterance_index=request.query_utterance_index,
@@ -106,7 +105,6 @@ async def search_voice_upload(
         )
         results = await run_in_threadpool(
             voice_search_vectors,
-            settings.index_dir,
             context.catalog,
             query_vectors=vectors,
             video_ids=json.loads(video_ids) if video_ids else None,

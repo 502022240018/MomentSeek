@@ -54,7 +54,6 @@ def test_migration_targets_reports_unknown_requested_video(tmp_path):
 
 def test_run_migration_updates_catalog_and_tracks_nested_speaker(monkeypatch, tmp_path):
     settings, catalog = _catalog_with_video(tmp_path)
-    catalog.update_video("video-1", indexed_modalities=["legacy"])
     targets = migration.migration_targets(catalog, settings)
     calls: list[tuple[str, dict]] = []
 
@@ -62,9 +61,29 @@ def test_run_migration_updates_catalog_and_tracks_nested_speaker(monkeypatch, tm
         assert video["id"] == "video-1"
         assert passed_settings is settings
         calls.append((stage, options))
-        result = {"milvus_asset_version": "7", "milvus_row_count": 2}
+        catalog.publish_modality(
+            video["id"],
+            stage,
+            asset_version=f"test-{stage}",
+            row_count=2,
+            metadata={"model_key": f"test-{stage}"},
+        )
+        result = {
+            "milvus_asset_version": f"test-{stage}",
+            "milvus_row_count": 2,
+        }
         if stage == "asr":
-            result["speaker"] = {"milvus_asset_version": "7", "milvus_row_count": 1}
+            catalog.publish_modality(
+                video["id"],
+                "speaker",
+                asset_version="test-speaker",
+                row_count=1,
+                metadata={"model_key": "test-speaker"},
+            )
+            result["speaker"] = {
+                "milvus_asset_version": "test-speaker",
+                "milvus_row_count": 1,
+            }
         return result
 
     monkeypatch.setattr(migration, "execute_stage", fake_execute)
@@ -85,7 +104,6 @@ def test_run_migration_updates_catalog_and_tracks_nested_speaker(monkeypatch, tm
     assert video["indexed_modalities"] == [
         "asr",
         "face",
-        "legacy",
         "ocr",
         "speaker",
         "visual",
@@ -107,7 +125,12 @@ def test_run_migration_failure_preserves_previous_catalog_availability(
     monkeypatch, tmp_path
 ):
     settings, catalog = _catalog_with_video(tmp_path)
-    catalog.update_video("video-1", indexed_modalities=["visual"])
+    catalog.publish_modality(
+        "video-1",
+        "visual",
+        asset_version="existing-visual",
+        row_count=4,
+    )
     targets = migration.migration_targets(catalog, settings)
     monkeypatch.setattr(
         migration,
@@ -130,13 +153,18 @@ def test_verify_published_versions_checks_every_requested_channel(
 ):
     settings, catalog = _catalog_with_video(tmp_path)
     targets = migration.migration_targets(catalog, settings)
-    manifest = {
-        "channels": {
-            "visual": {"milvus_asset_version": "2", "milvus_row_count": 11},
-            "asr": {"milvus_asset_version": "3", "milvus_row_count": 2},
-            "speaker": {"milvus_asset_version": "3", "milvus_row_count": 3},
-        }
-    }
+    for modality, version, rows in (
+        ("visual", "2", 11),
+        ("asr", "3", 2),
+        ("speaker", "3", 3),
+    ):
+        catalog.publish_modality(
+            "video-1",
+            modality,
+            asset_version=version,
+            row_count=rows,
+            metadata={"model_key": f"test-{modality}"},
+        )
     client = SimpleNamespace(
         count_video_modality_version=lambda video_id, modality, version: {
             "visual": 11,
@@ -144,7 +172,6 @@ def test_verify_published_versions_checks_every_requested_channel(
             "speaker": 3,
         }[modality]
     )
-    monkeypatch.setattr(migration, "load_index_manifest", lambda path: manifest)
     import app.vector_store.milvus.milvus_client as milvus_client
 
     monkeypatch.setattr(milvus_client, "get_milvus_client", lambda: client)

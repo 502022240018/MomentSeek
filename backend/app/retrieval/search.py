@@ -3,14 +3,11 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 import logging
-from pathlib import Path
 import threading
 
 import numpy as np
 
 from app.catalog.db import Catalog
-from app.indexing.common import normalize
-from app.indexing.manifest import require_channel_manifest
 from app.retrieval.retrieval_metrics import RetrievalProfiler
 from app.core.settings import Settings
 
@@ -26,17 +23,9 @@ class Candidate:
     modality: str
     evidence: str | None = None
     raw_score: float | None = None
-    robust_z: float | None = None
-    percentile: float | None = None
     decision: str = "hit"
     above_threshold: bool = True
-    distribution_reliable: bool | None = None
-    distribution_median: float | None = None
-    distribution_mad: float | None = None
     best_time: float | None = None
-    visual_top1: float | None = None
-    visual_top3: float | None = None
-    visual_mean: float | None = None
     unit_type: str | None = None
     unit_id: int | None = None
     best_ms: int | None = None
@@ -67,46 +56,14 @@ class SearchResult:
         return value
 
 
-def robust_distribution(scores: np.ndarray) -> dict:
-    """Return per-query/per-video robust z-scores and empirical percentiles."""
-    values = np.asarray(scores, dtype=np.float32)
-    if not len(values):
-        return {
-            "z_scores": np.empty(0, np.float32), "percentiles": np.empty(0, np.float32),
-            "median": 0.0, "mad": 0.0, "reliable": False,
-        }
-    median = float(np.median(values))
-    mad = float(np.median(np.abs(values - median)))
-    if mad > 1e-6:
-        z_scores = 0.67448975 * (values - median) / mad
-    else:
-        standard_deviation = float(values.std())
-        z_scores = (values - float(values.mean())) / standard_deviation if standard_deviation > 1e-6 else np.zeros_like(values)
-    z_scores = np.clip(z_scores, -8, 8).astype(np.float32)
-    ordered = np.sort(values)
-    # Ties receive the same upper empirical percentile.
-    percentiles = np.asarray(
-        [np.searchsorted(ordered, value, side="right") / len(values) for value in values],
-        dtype=np.float32,
-    )
-    return {
-        "z_scores": z_scores,
-        "percentiles": percentiles,
-        "median": median,
-        "mad": mad,
-        "reliable": bool(len(values) >= 8 and (mad > 1e-6 or float(values.std()) > 1e-6)),
-    }
-
-
 def face_confidence(cosine: float) -> float:
     """Map an ArcFace (buffalo_l) cosine to a calibrated [0,1] confidence.
 
     Face cosine is absolutely meaningful (distance to a reference identity), unlike
     CLIP text-image scores. Raw cosines for true matches cluster around 0.45-0.7,
     so a logistic centred at 0.45 lifts a strong match to ~1.0 — putting it on the
-    same scale as the visual empirical percentile, which is what the fusion step
-    weighs. Without this, a cosine=0.6 face hit (raw 0.6) would lose to a visual
-    percentile=0.98 hit even though both are strong.
+    same bounded scale as visual confidence, which is what the fusion step weighs.
+    Without this, a cosine=0.6 face hit would be systematically underweighted.
     """
     return float(1.0 / (1.0 + np.exp(-12.0 * (cosine - 0.45))))
 
@@ -120,244 +77,18 @@ def _seconds(ms: int | float) -> float:
     return float(ms) / 1000.0
 
 
-def _visual_index_arrays(data) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
-    required = {"frame_embeddings", "frame_times_ms", "segment_frame_offsets"}
-    if not required.issubset(set(data.files)):
-        raise ValueError("visual v3 索引缺少必要数组，请重跑 visual 索引")
-    embeddings = np.asarray(data["frame_embeddings"], dtype=np.float32)
-    frame_times_ms = data["frame_times_ms"].astype(np.int32)
-    offsets = data["segment_frame_offsets"].astype(np.int32)
-    if embeddings.ndim != 2 or len(embeddings) != len(frame_times_ms):
-        raise ValueError("visual v3 索引数组长度不一致，请重跑 visual 索引")
-    if len(offsets) < 2 or offsets[0] != 0 or offsets[-1] != len(frame_times_ms) or np.any(np.diff(offsets) < 0):
-        raise ValueError("visual v3 segment_frame_offsets 无效，请重跑 visual 索引")
-    segment_times_ms = None
-    if "segment_times_ms" in data.files:
-        segment_times_ms = data["segment_times_ms"].astype(np.int32)
-        if segment_times_ms.shape != (len(offsets) - 1, 2):
-            raise ValueError("visual v3 segment_times_ms 无效，请重跑 visual 索引")
-        if np.any(segment_times_ms[:, 1] < segment_times_ms[:, 0]):
-            raise ValueError("visual v3 segment_times_ms 时间范围无效，请重跑 visual 索引")
-    return embeddings, frame_times_ms, offsets, segment_times_ms
-
-
-def _visual_segment_scores(
-    frame_scores: np.ndarray,
-    frame_times_ms: np.ndarray,
-    offsets: np.ndarray,
-) -> tuple[list[int], np.ndarray, list[float], list[float], list[list[float]], list[int]]:
-    score_values = np.asarray(frame_scores, dtype=np.float32)
-    if score_values.ndim == 1:
-        score_values = score_values.reshape(-1, 1)
-    if score_values.ndim != 2 or score_values.shape[0] != len(frame_times_ms):
-        raise ValueError("visual frame score shape does not match the index")
-    segment_ids: list[int] = []
-    raw_scores: list[float] = []
-    top3_scores: list[float] = []
-    mean_scores: list[float] = []
-    subquery_scores: list[list[float]] = []
-    best_times_ms: list[int] = []
-    for segment_id in range(len(offsets) - 1):
-        start, end = int(offsets[segment_id]), int(offsets[segment_id + 1])
-        if start == end:
-            continue
-        bucket_scores = score_values[start:end]
-        per_query_top = np.max(bucket_scores, axis=0)
-        if score_values.shape[1] == 1:
-            aggregate_score = float(per_query_top[0])
-            frame_aggregate = bucket_scores[:, 0]
-        else:
-            aggregate_score = float(0.65 * np.mean(per_query_top) + 0.35 * np.min(per_query_top))
-            frame_aggregate = 0.65 * np.mean(bucket_scores, axis=1) + 0.35 * np.min(
-                bucket_scores, axis=1
-            )
-        order = np.argsort(frame_aggregate)[::-1]
-        top_values = frame_aggregate[order]
-        segment_ids.append(segment_id)
-        raw_scores.append(aggregate_score)
-        top3_scores.append(float(np.mean(top_values[:min(3, len(top_values))])))
-        mean_scores.append(float(np.mean(frame_aggregate)))
-        subquery_scores.append([float(value) for value in per_query_top])
-        best_times_ms.append(int(frame_times_ms[start + int(order[0])]))
-    return (
-        segment_ids,
-        np.asarray(raw_scores, dtype=np.float32),
-        top3_scores,
-        mean_scores,
-        subquery_scores,
-        best_times_ms,
-    )
-
-
-def _visual_decision(
-    profile: str,
-    reliable: bool,
-    local_index: int,
-    fallback_indices: set[int],
-    raw_score: float,
-    ranking_score: float,
-    percentile: float,
-    z_score: float,
-    sample_count: int,
-) -> tuple[str, bool, str]:
-    if not reliable:
-        decision, above = ("fallback", True) if local_index in fallback_indices else ("weak", False)
-        detail = (
-            f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
-            f" · distribution fallback (n={sample_count})"
+def _channel_publication_for(video: dict, channel: str) -> dict:
+    publication = (video.get("index_publications") or {}).get(channel)
+    if not isinstance(publication, dict) or publication.get("status") != "ready":
+        raise ValueError(
+            f"视频 {video.get('name') or video['id']} 的 {channel} 索引尚未发布"
         )
-        return decision, above, detail
-    if z_score >= 2.0 or percentile >= 0.975:
-        decision, above = "strong", True
-    elif percentile >= 0.80:
-        qualifies = not (
-            (profile == "balanced" and not (z_score >= 1.0 or percentile >= 0.90))
-            or profile == "precision"
-        )
-        decision, above = (("fuzzy", True) if qualifies else ("weak", False))
-    else:
-        decision, above = "weak", False
-    detail = (
-        f"visual score={raw_score:.3f} · rank_score={ranking_score:.3f}"
-        f" · percentile={percentile * 100:.1f}% · robust_z={z_score:.2f}"
-    )
-    return decision, above, detail
+    return publication
 
 
-def _visual_segment_bounds(
-    segment_id: int,
-    segment_times_ms: np.ndarray | None,
-    segment_ms: int,
-    duration_ms: int,
-) -> tuple[int, int, str]:
-    if segment_times_ms is not None:
-        start_ms, end_ms = [int(value) for value in segment_times_ms[segment_id]]
-        return start_ms, end_ms, "explicit"
-    start_ms = segment_id * segment_ms
-    end_ms = min((segment_id + 1) * segment_ms, duration_ms or (segment_id + 1) * segment_ms)
-    return start_ms, end_ms, "fixed"
-
-
-def _visual_candidates(
-    data,
-    query: np.ndarray,
-    video_id: str,
-    duration_ms: int,
-    segment_ms: int,
-    profile: str = "balanced",
-    limit: int = 72,
-    segment_strategy: str = "fixed",
-) -> list[Candidate]:
-    frame_embeddings, frame_times_ms, offsets, segment_times_ms = _visual_index_arrays(data)
-    if not len(frame_embeddings):
-        return []
-    query_values = np.asarray(query, dtype=np.float32)
-    if query_values.ndim == 1:
-        query_values = query_values.reshape(1, -1)
-    if query_values.ndim != 2 or query_values.shape[1] != frame_embeddings.shape[1]:
-        raise ValueError("visual query embedding shape does not match the index")
-    query_values = np.stack([normalize(value) for value in query_values])
-    (
-        segment_ids,
-        raw_values,
-        top3_scores,
-        mean_scores,
-        subquery_scores,
-        best_times_ms,
-    ) = _visual_segment_scores(
-        frame_embeddings @ query_values.T, frame_times_ms, offsets
-    )
-    if not len(raw_values):
-        return []
-    distribution = robust_distribution(raw_values)
-    z_scores = distribution["z_scores"]
-    percentiles = distribution["percentiles"]
-    reliable = distribution["reliable"]
-    raw_order = np.argsort(raw_values)[::-1]
-    fallback_counts = {"recall": 3, "balanced": 2, "precision": 1}
-    fallback_indices = set(int(index) for index in raw_order[:min(len(raw_order), fallback_counts[profile])])
-    candidates = []
-    cap = 500 if profile == "recall" else limit
-    for local_index in raw_order[:cap]:
-        local_index = int(local_index)
-        segment_id = int(segment_ids[local_index])
-        raw_score = float(raw_values[local_index])
-        z_score = float(z_scores[local_index])
-        percentile = float(percentiles[local_index])
-        ranking_score = visual_confidence(raw_score)
-        decision, above, detail = _visual_decision(
-            profile,
-            reliable,
-            local_index,
-            fallback_indices,
-            raw_score,
-            ranking_score,
-            percentile,
-            z_score,
-            len(raw_values),
-        )
-
-        top3 = float(top3_scores[local_index])
-        mean = float(mean_scores[local_index])
-        best_ms = int(best_times_ms[local_index])
-        detail += f" · best_frame={best_ms / 1000:.2f}s · top1={raw_score:.3f} · top3={top3:.3f} · mean={mean:.3f}"
-        if query_values.shape[0] > 1:
-            detail += " · subqueries=" + ",".join(
-                f"{value:.3f}" for value in subquery_scores[local_index]
-            )
-        start_ms, end_ms, time_source = _visual_segment_bounds(
-            segment_id, segment_times_ms, segment_ms, duration_ms
-        )
-        candidates.append(Candidate(
-            video_id=video_id,
-            start_time=_seconds(start_ms),
-            end_time=_seconds(end_ms),
-            score=ranking_score,
-            modality="visual",
-            evidence=detail if above else detail + " · 低于阈值",
-            raw_score=raw_score,
-            robust_z=z_score,
-            percentile=percentile,
-            decision=decision,
-            above_threshold=above,
-            distribution_reliable=reliable,
-            distribution_median=distribution["median"],
-            distribution_mad=distribution["mad"],
-            best_time=_seconds(best_ms),
-            visual_top1=raw_score,
-            visual_top3=top3,
-            visual_mean=mean,
-            unit_type="segment",
-            unit_id=segment_id,
-            best_ms=best_ms,
-            features={
-                "visual_top1": raw_score,
-                "visual_top3": top3,
-                "visual_mean": mean,
-                "visual_rank_score": ranking_score,
-                "visual_subquery_scores": subquery_scores[local_index],
-                "visual_subquery_count": int(query_values.shape[0]),
-                "percentile": percentile,
-                "robust_z": z_score,
-                "segment_time_source": time_source,
-                "segment_strategy": segment_strategy,
-            },
-        ))
-    return candidates
-
-
-def _channel_manifest_for(video: dict, index_dir: Path, channel: str) -> tuple[dict, dict, Path]:
-    manifest, channel_manifest = require_channel_manifest(index_dir, str(video.get("name") or video["id"]), channel)
-    file_name = str(channel_manifest.get("file") or "")
-    index_file = index_dir / file_name
-    # The manifest selects model/version metadata.  Its NPZ file is an offline
-    # recovery artifact and must never gate the online Milvus read path.
-    return manifest, channel_manifest, index_file
-
-
-def _published_asset_version(channel_manifest: dict, video_name: str, channel: str) -> str:
+def _published_asset_version(publication: dict, video_name: str, channel: str) -> str:
     """Return the only Milvus version that online retrieval may read."""
-    value = channel_manifest.get("milvus_asset_version")
+    value = publication.get("asset_version")
     if value is None or not str(value).strip():
         raise ValueError(
             f"视频 {video_name} 的 {channel} 索引尚未发布到 Milvus，请重跑该通道"
@@ -386,16 +117,8 @@ def _serialize_evidence(item: Candidate) -> dict:
         "modality": item.modality,
         "score": round(item.score, 4),
         "raw_score": _round_optional(item.raw_score, 4),
-        "robust_z": _round_optional(item.robust_z, 3),
-        "percentile": _round_optional(item.percentile, 4),
         "decision": item.decision,
-        "distribution_reliable": item.distribution_reliable,
-        "distribution_median": _round_optional(item.distribution_median, 4),
-        "distribution_mad": _round_optional(item.distribution_mad, 4),
         "best_time": _round_optional(item.best_time, 3),
-        "visual_top1": _round_optional(item.visual_top1, 4),
-        "visual_top3": _round_optional(item.visual_top3, 4),
-        "visual_mean": _round_optional(item.visual_mean, 4),
         "unit_type": item.unit_type,
         "unit_id": item.unit_id,
         "best_ms": item.best_ms,
@@ -475,77 +198,6 @@ def _apply_global_threshold(candidates: list[Candidate], modality: str) -> None:
             candidate.evidence = (candidate.evidence or "") + " · 低于阈值"
 
 
-def _ocr_scores_compatible(group: list[Candidate], candidate: Candidate) -> bool:
-    """OCR-only 合并时，避免高分命中被明显低分命中拖长。
-
-    规则：
-    - candidate 必须是 OCR 模态；
-    - group 里必须已有 OCR 命中；
-    - candidate 分数不能比 group 里最佳 OCR 命中低太多。
-
-    注意：不再检查 above_threshold，聚合只基于分数差异。
-
-    【已被 _groups_ocr_score_first 替代，保留以备将来独立 OCR 合并场景】
-    """
-    if candidate.modality != "ocr":
-        return False
-
-    group_scores = [
-        float(item.score)
-        for item in group
-        if item.modality == "ocr"
-    ]
-    if not group_scores:
-        return False
-
-    best_score = max(group_scores)
-
-    if candidate.score >= best_score:
-        return True
-
-    threshold = max(
-        best_score * _OCR_MERGE_MIN_SCORE_RATIO,
-        best_score - _OCR_MERGE_MAX_SCORE_DROP,
-    )
-    return float(candidate.score) >= threshold
-
-
-def _should_merge_ocr_only(
-    group: list[Candidate],
-    candidate: Candidate,
-) -> bool:
-    """OCR-only 结果使用更严格的帧级合并策略。
-
-    只允许：
-    - OCR 与 OCR 合并；
-    - 时间窗口重叠或几乎相邻；
-    - 分数不能差太多。
-
-    注意：不再检查 above_threshold，聚合只基于分数和时间。
-    above_threshold 只影响最终展示，不影响聚合逻辑。
-
-    不设置最大合并时长：
-    如果同一段 OCR 文本持续稳定出现很久，它应该保留为一个连续命中片段。
-
-    【已被 _groups_ocr_score_first 替代，保留以备将来独立 OCR 合并场景】
-    """
-    if candidate.modality != "ocr":
-        return False
-    if any(item.modality != "ocr" for item in group):
-        return False
-
-    group_end = max(item.end_time for item in group)
-
-    gap = candidate.start_time - group_end
-    if gap > _OCR_ONLY_MERGE_GAP_SECONDS:
-        return False
-
-    if not _ocr_scores_compatible(group, candidate):
-        return False
-
-    return True
-
-
 def _temporal_gap(group: list[Candidate], candidate: Candidate) -> float:
     """Return the non-negative time gap between a group and a candidate."""
     group_start = min(item.start_time for item in group)
@@ -573,10 +225,6 @@ def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_
         return False
 
     group_modalities = {item.modality for item in group}
-
-    # OCR-only 使用更严格的帧级合并规则（已死代码，保留以备将来）
-    if candidate.modality == "ocr" and group_modalities == {"ocr"}:
-        return _should_merge_ocr_only(group, candidate)
 
     group_start = min(item.start_time for item in group)
     group_end = max(item.end_time for item in group)
@@ -609,15 +257,16 @@ def _should_merge(group: list[Candidate], candidate: Candidate, gap: float, max_
     return near
 
 
-def _groups_ocr_score_first(candidates: list[Candidate]) -> list[list[Candidate]]:
+def _groups_ocr_score_first(candidates: list[Candidate], max_duration: float = 15) -> list[list[Candidate]]:
     """
     OCR 专用聚合：从高分帧开始向两边扩展。
 
     算法：
     1. 按分数降序选种子（未聚合的最高分）
     2. 从种子向时间两边扩展，基于种子分数判断是否合并
-    3. 标记已聚合的帧，避免重复处理
-    4. 重复直到所有帧都处理完
+    3. 扩展时始终保证组时间跨度不超过 max_duration
+    4. 标记已聚合的帧，避免重复处理
+    5. 重复直到所有帧都处理完
     """
     if not candidates:
         return []
@@ -677,6 +326,11 @@ def _groups_ocr_score_first(candidates: list[Candidate]) -> list[list[Candidate]
                 if gap_to_group > _OCR_ONLY_MERGE_GAP_SECONDS:
                     break  # 时间太远，停止向左扩展
 
+                merged_start = min(candidate.start_time, group_start)
+                merged_end = max(candidate.end_time, max(c.end_time for c in group))
+                if merged_end - merged_start > max_duration:
+                    break
+
                 # 满足条件，加入组
                 group.append(candidate)
                 used_ids.add(cand_id)
@@ -699,6 +353,11 @@ def _groups_ocr_score_first(candidates: list[Candidate]) -> list[list[Candidate]
 
                 if gap_to_group > _OCR_ONLY_MERGE_GAP_SECONDS:
                     break  # 时间太远，停止向右扩展
+
+                merged_start = min(candidate.start_time, min(c.start_time for c in group))
+                merged_end = max(candidate.end_time, group_end)
+                if merged_end - merged_start > max_duration:
+                    break
 
                 # 满足条件，加入组
                 group.append(candidate)
@@ -731,10 +390,10 @@ def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -
     if ocr_candidates:
         if not non_ocr_candidates:
             # 纯 OCR，直接使用新算法
-            return _groups_ocr_score_first(ocr_candidates)
+            return _groups_ocr_score_first(ocr_candidates, max_duration)
         else:
             # 混合模态，OCR 先聚合，再和其他模态合并
-            ocr_groups = _groups_ocr_score_first(ocr_candidates)
+            ocr_groups = _groups_ocr_score_first(ocr_candidates, max_duration)
             groups.extend(ocr_groups)
 
     # 非 OCR 候选遍历所有组，优先并入时间上最近的组。
@@ -765,7 +424,9 @@ def _fuse_candidate_groups(
 
     Threshold status remains the primary ordering boundary. Within one tier,
     results containing ``primary_modality`` are ordered before auxiliary-only
-    candidates; the modality's own score resolves ties among those results.
+    candidates. Among primary-backed results, the fused score ranks candidates
+    so corroborating evidence can affect order without promoting an
+    auxiliary-only result above primary evidence.
     """
     names = {video["id"]: video["name"] for video in videos}
     weights = {"face": 0.55, "visual": 0.30, "ocr": 0.20, "asr": 0.15}
@@ -816,14 +477,18 @@ def _fuse_candidate_groups(
             primary_scores[id(result)] = best_by_modality[primary_modality]
 
     if primary_modality is None:
-        results.sort(key=lambda item: (item.above_threshold, item.score), reverse=True)
+        results.sort(
+            key=lambda item: (item.above_threshold, item.score, -item.start_time),
+            reverse=True,
+        )
     else:
         results.sort(
             key=lambda item: (
                 item.above_threshold,
                 primary_modality in item.modalities,
-                primary_scores.get(id(item), item.score),
                 item.score,
+                primary_scores.get(id(item), item.score),
+                -item.start_time,
             ),
             reverse=True,
         )
@@ -882,20 +547,20 @@ class SearchEngine:
 
     def _face(self):
         if self._face_encoder is None:
-            from app.encoders.face import FaceEncoder
+            with self._encoder_lock:
+                if self._face_encoder is None:
+                    from app.encoders.face import FaceEncoder
 
-            # Provider/device wired from settings (was hardcoded cpu/0), matching
-            # the index side (stage_executor.py) so query-side reference-image
-            # encoding can use the same NPU/GPU. face_provider defaults to "cpu",
-            # so behaviour is unchanged unless explicitly configured otherwise.
-            self._face_encoder = FaceEncoder(
-                self.settings.face_model,
-                self.settings.face_provider,
-                self.settings.npu_device_id,
-                str(self.settings.app_model_dir / "insightface"),
-                self.settings.face_ort_intra_op_threads,
-                self.settings.face_ort_inter_op_threads,
-            )
+                    # Match the index-side provider/device while serialising the
+                    # expensive first model load across concurrent requests.
+                    self._face_encoder = FaceEncoder(
+                        self.settings.face_model,
+                        self.settings.face_provider,
+                        self.settings.npu_device_id,
+                        str(self.settings.app_model_dir / "insightface"),
+                        self.settings.face_ort_intra_op_threads,
+                        self.settings.face_ort_inter_op_threads,
+                    )
         return self._face_encoder
 
     def _encode_asr_query(
@@ -960,7 +625,7 @@ class SearchEngine:
 
     def prewarm(self) -> dict:
         profiler = RetrievalProfiler()
-        visual_models, text_models, manifest_errors = self._indexed_query_models()
+        visual_models, text_models, publication_errors = self._indexed_query_models()
         model_errors: list[dict[str, str]] = []
         for model_key in sorted(visual_models):
             try:
@@ -989,7 +654,7 @@ class SearchEngine:
                     "error": str(exc),
                 })
 
-        errors = [*manifest_errors, *model_errors]
+        errors = [*publication_errors, *model_errors]
         status = {
             "status": "error" if errors else "ready",
             "resident": True,
@@ -1018,15 +683,12 @@ class SearchEngine:
         errors: list[dict[str, str]] = []
         for video in self._selected_videos(None):
             indexed = set(video.get("indexed_modalities") or [])
-            index_dir = self.settings.index_dir / video["id"]
             for channel in sorted(indexed & {"visual", "asr", "ocr"}):
                 try:
-                    _manifest, channel_manifest, _index_file = (
-                        _channel_manifest_for(video, index_dir, channel)
-                    )
-                except (OSError, ValueError) as exc:
+                    channel_publication = _channel_publication_for(video, channel)
+                except ValueError as exc:
                     errors.append({
-                        "kind": "manifest",
+                        "kind": "publication",
                         "video_id": str(video["id"]),
                         "model": channel,
                         "error": str(exc),
@@ -1035,13 +697,13 @@ class SearchEngine:
                 if channel == "visual":
                     visual_models.add(
                         str(
-                            channel_manifest.get("model_key")
+                            channel_publication.get("model_key")
                             or self.settings.visual_model
                         )
                     )
                 else:
                     model_name = self._semantic_model_for_channel(
-                        channel_manifest
+                        channel_publication
                     )
                     if model_name is not None:
                         text_models.add(model_name)
@@ -1070,27 +732,6 @@ class SearchEngine:
         ensure_milvus_reachable()
         return get_milvus_client()
 
-    def _query_rows_for_videos(
-        self,
-        client,
-        modality: str,
-        video_ids: list[str],
-        asset_versions: dict[str, str],
-        output_fields: list[str],
-        profiler: RetrievalProfiler | None,
-    ) -> dict[str, list[dict]]:
-        """Resolve one bulk query behind a unit-testable data boundary."""
-        from app.vector_store.milvus.milvus_search import query_rows_for_videos
-
-        return query_rows_for_videos(
-            client,
-            modality,
-            video_ids,
-            asset_versions,
-            output_fields,
-            profiler,
-        )
-
     def close(self) -> None:
         with self._encoder_lock:
             self._clip_encoders.clear()
@@ -1106,9 +747,23 @@ class SearchEngine:
         allowed = set(video_ids)
         return [video for video in videos if video["id"] in allowed]
 
-    def _resolve_face_query(self, text: str | None, image_path: str | None) -> np.ndarray | None:
+    def _resolve_face_query(
+        self,
+        text: str | None,
+        image_path: str | None,
+        *,
+        optional: bool = False,
+    ) -> np.ndarray | None:
         if image_path:
-            return self._face().encode_reference(image_path)
+            try:
+                return self._face().encode_reference(image_path)
+            except ValueError as exc:
+                if optional and str(exc) == "参考图中未检测到人脸":
+                    logger.info(
+                        "Reference image has no face; skipping optional face channel"
+                    )
+                    return None
+                raise
         if not text:
             return None
         entity = self.catalog.find_entity_in_text(text)
@@ -1125,22 +780,21 @@ class SearchEngine:
                     prototype = np.mean(vectors, axis=0)
                     return prototype / max(float(np.linalg.norm(prototype)), 1e-12)
             except Exception:
-                logger.warning("Milvus entity face sample lookup failed; trying legacy reference", exc_info=True)
-        if entity and entity.get("embedding_path") and Path(entity["embedding_path"]).exists():
-            return np.load(entity["embedding_path"])["embedding"]
+                logger.exception("Milvus entity face sample lookup failed")
+                raise
         return None
 
     def _semantic_query(
         self,
         text: str,
-        channel_manifest: dict,
+        channel_publication: dict,
         embeddings: np.ndarray | None,
         semantic_queries: dict[str, np.ndarray | None],
         profiler: RetrievalProfiler | None,
     ) -> np.ndarray | None:
         if embeddings is None:
             return None
-        model_name = self._semantic_model_for_channel(channel_manifest)
+        model_name = self._semantic_model_for_channel(channel_publication)
         if model_name is None:
             return None
         if model_name not in semantic_queries:
@@ -1156,16 +810,16 @@ class SearchEngine:
 
     def _semantic_model_for_channel(
         self,
-        channel_manifest: dict,
+        channel_publication: dict,
     ) -> str | None:
         """Return the model only when this indexed channel has semantic data."""
         semantic_status = str(
-            channel_manifest.get("semantic_status") or ""
+            channel_publication.get("semantic_status") or ""
         ).strip().casefold()
         if semantic_status != "complete":
             return None
         return str(
-            channel_manifest.get("semantic_model_key")
+            channel_publication.get("semantic_model_key")
             or self.settings.asr_semantic_model
         )
 
@@ -1182,7 +836,6 @@ class SearchEngine:
         semantic_queries: dict[str, np.ndarray | None],
         profiler: RetrievalProfiler | None,
         client=None,
-        prefetched_rows: dict[str, list[dict]] | None = None,
     ) -> list[Candidate]:
         from app.vector_store.milvus.milvus_search import (
             milvus_asr_candidates_hybrid,
@@ -1193,19 +846,15 @@ class SearchEngine:
 
         if client is None:
             client = self._get_milvus_client()
-        prefetched_rows = prefetched_rows or {}
         video_id = video["id"]
-        index_dir = self.settings.index_dir / video_id
         indexed = set(video.get("indexed_modalities") or [])
         candidates: list[Candidate] = []
         if "visual" in modalities and "visual" in indexed:
-            manifest, channel_manifest, _index_file = _channel_manifest_for(
-                video, index_dir, "visual"
-            )
+            channel_publication = _channel_publication_for(video, "visual")
             asset_version = _published_asset_version(
-                channel_manifest, str(video.get("name") or video_id), "visual"
+                channel_publication, str(video.get("name") or video_id), "visual"
             )
-            visual_model = str(channel_manifest.get("model_key") or self.settings.visual_model)
+            visual_model = str(channel_publication.get("model_key") or self.settings.visual_model)
             if visual_model not in visual_queries:
                 raise RuntimeError(
                     f"visual query vector was not prepared for model={visual_model}"
@@ -1220,25 +869,21 @@ class SearchEngine:
                 profiler=profiler,
             ))
         if "face" in modalities and face_query is not None and "face" in indexed:
-            _manifest, channel_manifest, _index_file = _channel_manifest_for(
-                video, index_dir, "face"
-            )
+            channel_publication = _channel_publication_for(video, "face")
             candidates.extend(milvus_face_candidates(
                 client,
                 video_id,
                 face_query,
                 _published_asset_version(
-                    channel_manifest, str(video.get("name") or video_id), "face"
+                    channel_publication, str(video.get("name") or video_id), "face"
                 ),
                 channel_limits["face"],
                 None,  # threshold=None → settings.face_identity_threshold
                 profiler,
             ))
         if "asr" in modalities and text and "asr" in indexed:
-            _manifest, channel_manifest, _index_file = _channel_manifest_for(
-                video, index_dir, "asr"
-            )
-            model_name = self._semantic_model_for_channel(channel_manifest)
+            channel_publication = _channel_publication_for(video, "asr")
+            model_name = self._semantic_model_for_channel(channel_publication)
             semantic_query = (
                 semantic_queries.get(model_name)
                 if model_name is not None
@@ -1248,7 +893,7 @@ class SearchEngine:
                 client,
                 video_id,
                 _published_asset_version(
-                    channel_manifest, str(video.get("name") or video_id), "asr"
+                    channel_publication, str(video.get("name") or video_id), "asr"
                 ),
                 text,
                 semantic_query,
@@ -1256,10 +901,8 @@ class SearchEngine:
                 profiler,
             ))
         if "ocr" in modalities and text and "ocr" in indexed:
-            _manifest, channel_manifest, _index_file = _channel_manifest_for(
-                video, index_dir, "ocr"
-            )
-            model_name = self._semantic_model_for_channel(channel_manifest)
+            channel_publication = _channel_publication_for(video, "ocr")
+            model_name = self._semantic_model_for_channel(channel_publication)
             semantic_query = (
                 semantic_queries.get(model_name)
                 if model_name is not None
@@ -1269,13 +912,12 @@ class SearchEngine:
                 client,
                 video_id,
                 _published_asset_version(
-                    channel_manifest, str(video.get("name") or video_id), "ocr"
+                    channel_publication, str(video.get("name") or video_id), "ocr"
                 ),
                 text,
                 semantic_query,
                 channel_limits["ocr"],
                 profiler,
-                rows=prefetched_rows.get("ocr"),
             ))
         return candidates
 
@@ -1312,7 +954,7 @@ class SearchEngine:
         semantic_queries: dict[str, np.ndarray | None],
         profiler: RetrievalProfiler | None,
     ) -> None:
-        """Encode all manifest-selected query models before candidate scoring."""
+        """Encode all publication-selected query models before candidate scoring."""
         query_texts: list[str | None] = (
             list(dict.fromkeys(visual_subqueries or []))
             if text and visual_subqueries
@@ -1320,13 +962,10 @@ class SearchEngine:
         )
         for video in videos:
             requested = requested_by_video[video["id"]]
-            index_dir = self.settings.index_dir / video["id"]
             if "visual" in requested:
-                _manifest, channel_manifest, _index_file = _channel_manifest_for(
-                    video, index_dir, "visual"
-                )
+                channel_publication = _channel_publication_for(video, "visual")
                 model_key = str(
-                    channel_manifest.get("model_key")
+                    channel_publication.get("model_key")
                     or self.settings.visual_model
                 )
                 if model_key not in visual_queries:
@@ -1339,15 +978,13 @@ class SearchEngine:
                     )
             if text:
                 for channel in sorted(requested & {"asr", "ocr"}):
-                    _manifest, channel_manifest, _index_file = (
-                        _channel_manifest_for(video, index_dir, channel)
-                    )
+                    channel_publication = _channel_publication_for(video, channel)
                     if self._semantic_model_for_channel(
-                        channel_manifest
+                        channel_publication
                     ) is not None:
                         self._semantic_query(
                             text,
-                            channel_manifest,
+                            channel_publication,
                             np.empty((1, 1), dtype=np.float32),
                             semantic_queries,
                             profiler,
@@ -1386,12 +1023,14 @@ class SearchEngine:
         )
         with face_span:
             face_query = (
-                self._resolve_face_query(text, image_path)
+                self._resolve_face_query(
+                    text,
+                    image_path,
+                    optional=any(channel != "face" for channel in modalities),
+                )
                 if "face" in modalities
                 else None
             )
-        from app.vector_store.milvus.milvus_search import BULK_QUERY_FIELDS
-
         requested_by_video = {
             video["id"]: self._requested_indexed_modalities(
                 video,
@@ -1418,7 +1057,6 @@ class SearchEngine:
             for video in videos
             if requested_by_video[video["id"]]
         ]
-        milvus_video_id_set = set(milvus_video_ids)
         milvus_client = None
         if milvus_video_ids:
             milvus_client = self._get_milvus_client()
@@ -1426,48 +1064,6 @@ class SearchEngine:
         batch_size = self.settings.milvus_search_video_batch_size
         for batch_offset in range(0, len(videos), batch_size):
             batch_videos = videos[batch_offset:batch_offset + batch_size]
-            batch_video_ids = [
-                video["id"]
-                for video in batch_videos
-                if video["id"] in milvus_video_id_set
-            ]
-            prefetched_rows: dict[tuple[str, str], list[dict]] = {}
-            modality_rows: dict[str, list[dict]] = {}
-            if milvus_client is not None and batch_video_ids:
-                for modality, output_fields in BULK_QUERY_FIELDS.items():
-                    eligible_ids = [
-                        video_id
-                        for video_id in batch_video_ids
-                        if modality in requested_by_video[video_id]
-                    ]
-                    if not eligible_ids:
-                        continue
-                    asset_versions = {}
-                    for video in batch_videos:
-                        video_id = video["id"]
-                        if video_id not in eligible_ids:
-                            continue
-                        _manifest, channel_manifest, _index_file = _channel_manifest_for(
-                            video, self.settings.index_dir / video_id, modality
-                        )
-                        asset_versions[video_id] = _published_asset_version(
-                            channel_manifest,
-                            str(video.get("name") or video_id),
-                            modality,
-                        )
-                    modality_rows = self._query_rows_for_videos(
-                        milvus_client,
-                        modality,
-                        eligible_ids,
-                        asset_versions,
-                        output_fields,
-                        profiler,
-                    )
-                    for video_id in eligible_ids:
-                        prefetched_rows[(video_id, modality)] = modality_rows.get(
-                            video_id, []
-                        )
-
             for video in batch_videos:
                 video_id = video["id"]
                 requested_modalities = requested_by_video[video_id]
@@ -1489,20 +1085,10 @@ class SearchEngine:
                             semantic_queries=semantic_queries,
                             profiler=profiler,
                             client=milvus_client,
-                            prefetched_rows={
-                                modality: prefetched_rows.get((video_id, modality), [])
-                            }
-                            if modality in BULK_QUERY_FIELDS
-                            else None,
                         )
                     candidates.extend(
                         item for item in modality_candidates if item.modality == modality
                     )
-            # Raw embeddings for this batch become unreachable before the next
-            # Milvus query, bounding peak memory by video batch size.
-            prefetched_rows.clear()
-            modality_rows.clear()
-
         # Apply global dynamic threshold to OCR and ASR candidates
         _apply_global_threshold(candidates, "ocr")
         _apply_global_threshold(candidates, "asr")
