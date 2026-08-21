@@ -215,6 +215,24 @@ _COLLECTION_FOR_MODALITY: dict[str, str] = {
     "speaker": "speaker_embeddings",
 }
 
+
+def _runtime_collection_layout(settings) -> tuple[dict[str, str], dict[str, dict]]:
+    """Resolve deployment-local collection names without changing defaults."""
+    modality_names = dict(_COLLECTION_FOR_MODALITY)
+    asr_name = str(settings.milvus_asr_collection)
+    if asr_name in _COLLECTION_CONFIGS and asr_name != "asr_embeddings":
+        raise ValueError(
+            f"MILVUS_ASR_COLLECTION conflicts with reserved collection: {asr_name}"
+        )
+    modality_names["asr"] = asr_name
+    configs = {
+        name: config
+        for name, config in _COLLECTION_CONFIGS.items()
+        if name != "asr_embeddings"
+    }
+    configs[asr_name] = _COLLECTION_CONFIGS["asr_embeddings"]
+    return modality_names, configs
+
 _OCR_V2_REQUIRED_FIELDS = frozenset({
     "text",
     "embedding",
@@ -351,6 +369,9 @@ class MilvusClient:
         if self._ready:
             return
         s = get_settings()
+        self._collection_for_modality, self._collection_configs = (
+            _runtime_collection_layout(s)
+        )
         host = s.milvus_host
         port = str(s.milvus_port)
         logger.info("Connecting to Milvus at %s:%s", host, port)
@@ -362,14 +383,16 @@ class MilvusClient:
         )
         self._ready = True
         self._init_collections()
-        logger.info("MilvusClient ready — %d collections", len(_COLLECTION_CONFIGS))
+        logger.info(
+            "MilvusClient ready — %d collections", len(self._collection_configs)
+        )
 
     # ------------------------------------------------------------------
     # Collection init
     # ------------------------------------------------------------------
 
     def _init_collections(self) -> None:
-        for name, config in _COLLECTION_CONFIGS.items():
+        for name, config in self._collection_configs.items():
             if not utility.has_collection(name):
                 logger.info("Creating collection: %s", name)
                 schema: CollectionSchema = config["schema"]()
@@ -392,7 +415,7 @@ class MilvusClient:
                 col = Collection(name)
                 if name == "ocr_embeddings":
                     _validate_existing_ocr_collection(col)
-                elif name == "asr_embeddings":
+                elif name == self._collection_for_modality["asr"]:
                     _validate_existing_asr_collection(col)
                 load_state = utility.load_state(name)
                 if load_state.name != "Loaded":
@@ -409,7 +432,7 @@ class MilvusClient:
         return Collection(name)
 
     def collection_for(self, modality: str) -> Collection:
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         return Collection(name)
 
     def stats(self, name: str) -> dict:
@@ -437,7 +460,7 @@ class MilvusClient:
         """
         counts: dict[str, int] = {}
         expr = f'video_id == "{video_id}"'
-        for name, config in _COLLECTION_CONFIGS.items():
+        for name, config in self._collection_configs.items():
             if not config.get("video_scoped", True):
                 continue
             col = Collection(name)
@@ -458,7 +481,7 @@ class MilvusClient:
         """
         counts: dict[str, int] = {}
         expr = f'video_id == "{video_id}" and asset_version == "{asset_version}"'
-        for name, config in _COLLECTION_CONFIGS.items():
+        for name, config in self._collection_configs.items():
             if not config.get("video_scoped", True):
                 continue
             col = Collection(name)
@@ -490,7 +513,7 @@ class MilvusClient:
         Returns:
             Number of records deleted, or -1 on failure.
         """
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         try:
             # Check if collection exists first
             if not utility.has_collection(name):
@@ -524,7 +547,7 @@ class MilvusClient:
         self, video_id: str, modality: str, keep_asset_version: str
     ) -> int:
         """Remove superseded rows only after *keep_asset_version* is published."""
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         try:
             if not utility.has_collection(name):
                 return 0
@@ -551,7 +574,7 @@ class MilvusClient:
         self, video_id: str, modality: str, asset_version: str
     ) -> int:
         """Return the persisted rows for one published modality version."""
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         rows = Collection(name).query(
             expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}"'),
             output_fields=["count(*)"],
@@ -560,7 +583,7 @@ class MilvusClient:
 
     def count_video_modality(self, video_id: str, modality: str) -> int:
         """Return the persisted row count for one video and modality."""
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         rows = Collection(name).query(
             expr=f'video_id == "{video_id}"',
             output_fields=["count(*)"],
@@ -602,6 +625,7 @@ class ExistingMilvusCollectionsClient:
         if not names or any(not name for name in names):
             raise ValueError("required_collections must contain non-empty names")
         settings = get_settings()
+        self._collection_for_modality, _ = _runtime_collection_layout(settings)
         self._alias = f"maintenance_{uuid.uuid4().hex}"
         self._required_collections = frozenset(names)
         connections.connect(
@@ -635,7 +659,7 @@ class ExistingMilvusCollectionsClient:
 
     def collection_for(self, modality: str) -> Collection:
         try:
-            name = _COLLECTION_FOR_MODALITY[modality]
+            name = self._collection_for_modality[modality]
         except KeyError as exc:
             raise ValueError(f"unknown Milvus modality: {modality}") from exc
         return self.collection(name)
