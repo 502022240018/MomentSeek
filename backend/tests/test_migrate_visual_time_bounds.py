@@ -217,6 +217,40 @@ def test_default_dry_run_validates_every_row_without_writing(tmp_path):
     assert events == []
 
 
+def test_terminal_frame_at_duration_is_remapped_to_last_nonempty_segment():
+    row = _source_rows()[0]
+    row.update(timestamp_ms=12_000, segment_id=2)
+
+    plan, state = migration._plan_for_row(
+        row,
+        video_id="video-1",
+        asset_version="old-version",
+        duration_ms=12_000,
+        segment_ms=5_000,
+    )
+
+    assert state == "invalid"
+    assert plan.timestamp_ms == 12_000
+    assert plan.segment_id == 2
+    assert (plan.segment_start_ms, plan.segment_end_ms) == (10_000, 12_000)
+
+
+def test_terminal_frame_legacy_zero_width_bucket_is_repaired():
+    row = _source_rows()[0]
+    row.update(timestamp_ms=10_000, segment_id=2)
+
+    plan, _ = migration._plan_for_row(
+        row,
+        video_id="video-1",
+        asset_version="old-version",
+        duration_ms=10_000,
+        segment_ms=5_000,
+    )
+
+    assert plan.segment_id == 1
+    assert (plan.segment_start_ms, plan.segment_end_ms) == (5_000, 10_000)
+
+
 def test_manifest_without_version_or_row_count_uses_catalog_and_milvus(tmp_path):
     catalog, client, index_dir, video, events = _dependencies(tmp_path)
     _write_manifest(index_dir, include_publication_pointer=False)

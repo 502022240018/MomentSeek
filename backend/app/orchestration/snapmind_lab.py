@@ -6,7 +6,6 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -1135,25 +1134,20 @@ class SnapMindPlannerLab:
         confirmed: list[dict[str, Any]] = []
         ambiguous: list[dict[str, Any]] = []
         padding_ms = int(round(padding_seconds * 1000))
-        index_root = Path(self.settings.index_dir)
         for video_id, video_nodes in by_video.items():
-            index_file = index_root / video_id / "face.npz"
-            if not index_file.exists():
-                trace["errors"].append({"video_id": video_id, "reason": "face_index_missing"})
-                trace["no_face_track_count"] += len(video_nodes)
-                continue
             try:
-                with np.load(index_file, allow_pickle=False) as data:
-                    embeddings = np.asarray(data["embeddings"], dtype=np.float32)
-                    times = np.asarray(data["track_times_ms"], dtype=np.int64)
-            except (KeyError, OSError, ValueError) as exc:
-                trace["errors"].append(
-                    {"video_id": video_id, "reason": f"invalid_face_index:{type(exc).__name__}"}
+                embeddings, times = self._face_tracks_for_candidate_windows(
+                    video_id=video_id,
+                    nodes=video_nodes,
+                    padding_ms=padding_ms,
                 )
-                trace["no_face_track_count"] += len(video_nodes)
-                continue
-            if embeddings.ndim != 2 or times.shape != (len(embeddings), 3):
-                trace["errors"].append({"video_id": video_id, "reason": "invalid_face_index_shape"})
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                trace["errors"].append(
+                    {
+                        "video_id": video_id,
+                        "reason": f"face_milvus_unavailable:{type(exc).__name__}",
+                    }
+                )
                 trace["no_face_track_count"] += len(video_nodes)
                 continue
             if not len(embeddings) or embeddings.shape[1] != len(query_vector):
@@ -1234,7 +1228,7 @@ class SnapMindPlannerLab:
                                 "best_ms": best_ms,
                                 "features": {
                                     "face_cosine": cosine,
-                                    "source": "candidate_window_npz",
+                                    "source": "candidate_window_milvus",
                                     "track_start_ms": track_start_ms,
                                     "track_end_ms": track_end_ms,
                                 },
@@ -1251,6 +1245,131 @@ class SnapMindPlannerLab:
         )[:20]
         trace["status"] = "ok"
         return sorted(confirmed, key=lambda item: float(item["score"]), reverse=True), trace
+
+    @staticmethod
+    def _merged_candidate_windows(
+        nodes: list[MomentNode], padding_ms: int
+    ) -> list[tuple[int, int]]:
+        windows = sorted(
+            (
+                max(0, int(round(node.start_time * 1000)) - padding_ms),
+                int(round(node.end_time * 1000)) + padding_ms,
+            )
+            for node in nodes
+        )
+        merged: list[tuple[int, int]] = []
+        for start_ms, end_ms in windows:
+            if end_ms < start_ms:
+                raise ValueError("candidate window has invalid time bounds")
+            if merged and start_ms <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end_ms))
+            else:
+                merged.append((start_ms, end_ms))
+        return merged
+
+    def _face_tracks_for_candidate_windows(
+        self,
+        *,
+        video_id: str,
+        nodes: list[MomentNode],
+        padding_ms: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Read only Face tracks overlapping current candidates from Milvus."""
+        publication_getter = getattr(self.catalog, "get_modality_publication", None)
+        if not callable(publication_getter):
+            raise RuntimeError("face publication lookup is unavailable")
+        publication = publication_getter(video_id, "face")
+        if not publication or publication.get("status") != "ready":
+            raise RuntimeError("ready Face publication is missing")
+        asset_version = str(publication.get("asset_version") or "").strip()
+        row_count = int(publication.get("row_count") or 0)
+        if not asset_version or row_count < 0:
+            raise ValueError("Face publication is invalid")
+        if row_count == 0 or not nodes:
+            return (
+                np.empty((0, 512), dtype=np.float32),
+                np.empty((0, 3), dtype=np.int64),
+            )
+
+        windows = self._merged_candidate_windows(nodes, padding_ms)
+        overlap_expr = " or ".join(
+            f"(start_ms <= {end_ms} and end_ms >= {start_ms})"
+            for start_ms, end_ms in windows
+        )
+        expr = " and ".join(
+            (
+                f"video_id == {json.dumps(video_id, ensure_ascii=False)}",
+                f"asset_version == {json.dumps(asset_version, ensure_ascii=False)}",
+                f"({overlap_expr})",
+            )
+        )
+        client_getter = getattr(self.search_engine, "_get_milvus_client", None)
+        if not callable(client_getter):
+            raise RuntimeError("Milvus client lookup is unavailable")
+        collection = client_getter().collection_for("face")
+        query_iterator = getattr(collection, "query_iterator", None)
+        if not callable(query_iterator):
+            raise RuntimeError("Milvus query_iterator is required")
+        iterator = query_iterator(
+            expr=expr,
+            output_fields=[
+                "track_idx", "start_ms", "end_ms", "best_ms", "embedding",
+            ],
+            batch_size=512,
+            timeout=float(
+                getattr(self.settings, "milvus_query_timeout_seconds", 3.0)
+            ),
+        )
+        vectors: list[np.ndarray] = []
+        times: list[list[int]] = []
+        seen_tracks: set[int] = set()
+        try:
+            while True:
+                page = iterator.next()
+                if not page:
+                    break
+                for row in page:
+                    if not isinstance(row, dict):
+                        raise ValueError("Milvus returned a non-object Face row")
+                    values = {
+                        field: row.get(field)
+                        for field in ("track_idx", "start_ms", "end_ms", "best_ms")
+                    }
+                    if any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, np.integer))
+                        for value in values.values()
+                    ):
+                        raise ValueError("Face row has invalid integer metadata")
+                    track_idx = int(values["track_idx"])
+                    start_ms = int(values["start_ms"])
+                    end_ms = int(values["end_ms"])
+                    best_ms = int(values["best_ms"])
+                    if (
+                        track_idx < 0
+                        or track_idx in seen_tracks
+                        or start_ms < 0
+                        or end_ms <= start_ms
+                        or not start_ms <= best_ms <= end_ms
+                    ):
+                        raise ValueError("Face row violates the track contract")
+                    vector = np.asarray(row.get("embedding"), dtype=np.float32)
+                    if vector.shape != (512,) or not np.isfinite(vector).all():
+                        raise ValueError("Face row has an invalid embedding")
+                    norm = float(np.linalg.norm(vector))
+                    if not math.isfinite(norm) or norm <= 1e-12:
+                        raise ValueError("Face row has a zero embedding")
+                    seen_tracks.add(track_idx)
+                    vectors.append(vector / norm)
+                    times.append([start_ms, end_ms, best_ms])
+        finally:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                close()
+        return (
+            np.asarray(vectors, dtype=np.float32).reshape((-1, 512)),
+            np.asarray(times, dtype=np.int64).reshape((-1, 3)),
+        )
 
     def _restrict_to_current(
         self, nodes: list[MomentNode], results: list[dict[str, Any]]
