@@ -150,6 +150,47 @@ def test_voice_reference_makes_voice_tool_available_and_primary():
     assert fast["steps"][0]["tool_id"] == "voice.search"
 
 
+def test_registered_entity_voice_query_keeps_trusted_voice_as_primary():
+    orchestrator = FakeOrchestrator(
+        entity={"id": "person-1", "name": "王俊凯", "embedding_path": "entity.npz"},
+        modalities=["visual", "face", "speaker"],
+    )
+
+    proposal = SnapMindPlannerLab(orchestrator).propose(
+        "王俊凯声音出现的片段",
+        "assist",
+        None,
+        False,
+        voice_reference=VoiceReference(kind="entity", entity_id="person-1", label="王俊凯"),
+    )
+
+    for plan in proposal["plans"]:
+        voice = next(step for step in plan["steps"] if step["tool_id"] == "voice.search")
+        assert voice["role"] == "primary"
+
+
+def test_trusted_voice_is_support_for_non_voice_visual_query():
+    orchestrator = FakeOrchestrator(
+        entity={"id": "person-1", "name": "王俊凯", "embedding_path": "entity.npz"},
+        modalities=["visual", "face", "speaker"],
+    )
+
+    proposal = SnapMindPlannerLab(orchestrator).propose(
+        "王俊凯吃包子近景",
+        "assist",
+        None,
+        False,
+        voice_reference=VoiceReference(kind="entity", entity_id="person-1", label="王俊凯"),
+    )
+
+    for plan in proposal["plans"]:
+        steps = plan["steps"]
+        assert steps[0]["tool_id"] == "visual.search"
+        voice = next(step for step in steps if step["tool_id"] == "voice.search")
+        assert voice["role"] == "support"
+        assert voice["depends_on"] == [steps[0]["step_id"]]
+
+
 @pytest.mark.parametrize(
     "query",
     [

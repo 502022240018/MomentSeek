@@ -282,7 +282,8 @@ class HeuristicPlanGenerator:
     FACE_TERMS = ("这个人", "同一个人", "人物", "人脸", "face")
     VOICE_TERMS = (
         "这个声音", "同一个声音", "同样的声音", "相同声音", "声音相同", "声音一样",
-        "听起来一样", "音色相同", "声音匹配", "声音像", "声纹", "说话人",
+        "听起来一样", "音色相同", "声音匹配", "声音像", "声音出现", "声音片段",
+        "说话声音", "声纹", "说话人",
         "谁在说", "谁在讲话", "谁的声音", "声音是谁", "他说", "她说", "voice",
         "speaker",
     )
@@ -731,6 +732,45 @@ class SnapMindPlannerLab:
                         role="primary",
                     ),
                 )
+            if has_voice_reference and "speaker" in available:
+                voice_intent = _contains_any(query, HeuristicPlanGenerator.VOICE_TERMS)
+                voice_step = next(
+                    (step for step in accepted if step.tool_id == "voice.search"),
+                    None,
+                )
+                if voice_step is not None and voice_intent:
+                    voice_step.role = "primary"
+                    voice_step.depends_on = []
+                elif voice_step is None:
+                    primary_ids = [
+                        step.step_id
+                        for step in accepted
+                        if step.role == "primary" and step.operation == "search"
+                    ]
+                    role: EvidenceRole = "primary" if voice_intent or not primary_ids else "support"
+                    trusted_voice_step = _make_step(
+                        "trusted-voice",
+                        "voice.search",
+                        query,
+                        1.0,
+                        100 if plan.plan_id == "deep" else 80,
+                        (
+                            "用户已选择可信声音引用，作为声音身份主召回。"
+                            if role == "primary"
+                            else "用户已选择可信声音引用，只为现有候选补充声纹身份支持。"
+                        ),
+                        role=role,
+                        depends_on=[] if role == "primary" else primary_ids[:1],
+                    )
+                    insert_at = next(
+                        (
+                            index
+                            for index, step in enumerate(accepted)
+                            if step.role in {"constraint", "verifier", "fallback"}
+                        ),
+                        len(accepted),
+                    )
+                    accepted.insert(insert_at, trusted_voice_step)
             if len(accepted) > 6:
                 verifier = next(
                     (step for step in reversed(accepted) if step.role == "verifier"),
