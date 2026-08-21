@@ -98,10 +98,11 @@ CREATE TABLE IF NOT EXISTS speaker_identity_bindings (
 CREATE TABLE IF NOT EXISTS face_identity_bindings (
   video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
   asset_version TEXT NOT NULL,
+  group_version TEXT NOT NULL,
   group_idx INTEGER NOT NULL,
   entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY(video_id, asset_version, group_idx)
+  PRIMARY KEY(video_id, asset_version, group_version, group_idx)
 );
 CREATE TABLE IF NOT EXISTS voice_samples (
   id TEXT PRIMARY KEY,
@@ -180,6 +181,38 @@ class Catalog:
         voice_columns = {row["name"] for row in connection.execute("PRAGMA table_info(voice_samples)").fetchall()}
         if "voice_embedding" not in voice_columns:
             connection.execute("ALTER TABLE voice_samples ADD COLUMN voice_embedding BLOB")
+
+        face_binding_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(face_identity_bindings)"
+            ).fetchall()
+        }
+        if "group_version" not in face_binding_columns:
+            # Group indices are generation-local. Preserve legacy bindings as
+            # unversioned audit rows, but never apply them to a new generation.
+            connection.execute(
+                "ALTER TABLE face_identity_bindings "
+                "RENAME TO face_identity_bindings_legacy"
+            )
+            connection.execute(
+                """CREATE TABLE face_identity_bindings (
+                   video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+                   asset_version TEXT NOT NULL,
+                   group_version TEXT NOT NULL,
+                   group_idx INTEGER NOT NULL,
+                   entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                   PRIMARY KEY(video_id, asset_version, group_version, group_idx)
+                   )"""
+            )
+            connection.execute(
+                """INSERT INTO face_identity_bindings(
+                   video_id,asset_version,group_version,group_idx,entity_id,created_at
+                   ) SELECT video_id,asset_version,'',group_idx,entity_id,created_at
+                   FROM face_identity_bindings_legacy"""
+            )
+            connection.execute("DROP TABLE face_identity_bindings_legacy")
 
         grading_columns = {
             row["name"]
@@ -864,25 +897,37 @@ class Catalog:
                 (video_id, track_id, entity_id),
             )
 
-    def face_identity_bindings(self, video_id: str, asset_version: str) -> dict[int, dict]:
+    def face_identity_bindings(
+        self,
+        video_id: str,
+        asset_version: str,
+        group_version: str,
+    ) -> dict[int, dict]:
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT b.group_idx,b.entity_id,e.name AS entity_name
                    FROM face_identity_bindings b JOIN entities e ON e.id=b.entity_id
-                   WHERE b.video_id=? AND b.asset_version=?""",
-                (video_id, asset_version),
+                   WHERE b.video_id=? AND b.asset_version=? AND b.group_version=?""",
+                (video_id, asset_version, group_version),
             ).fetchall()
         return {int(row["group_idx"]): dict(row) for row in rows}
 
     def bind_face_identity(
-        self, video_id: str, asset_version: str, group_idx: int, entity_id: str
+        self,
+        video_id: str,
+        asset_version: str,
+        group_version: str,
+        group_idx: int,
+        entity_id: str,
     ) -> None:
         with self.connect() as connection:
             connection.execute(
-                """INSERT INTO face_identity_bindings(video_id,asset_version,group_idx,entity_id)
-                   VALUES(?,?,?,?) ON CONFLICT(video_id,asset_version,group_idx)
+                """INSERT INTO face_identity_bindings(
+                   video_id,asset_version,group_version,group_idx,entity_id
+                   ) VALUES(?,?,?,?,?)
+                   ON CONFLICT(video_id,asset_version,group_version,group_idx)
                    DO UPDATE SET entity_id=excluded.entity_id""",
-                (video_id, asset_version, group_idx, entity_id),
+                (video_id, asset_version, group_version, group_idx, entity_id),
             )
 
     def create_voice_sample(self, record: dict) -> dict:

@@ -430,20 +430,20 @@ function FacesPage({ videos, entities, refreshEntities, setNotice }: { videos: V
     if (!view) return;
     const entityId = selectedEntity[groupIdx];
     if (!entityId) return setNotice("请先选择人物库身份");
-    try { await api.addFaceGroupToLibrary(videoId, groupIdx, view.asset_version, { entity_id: entityId }); setNotice("代表脸已加入人物库"); await load(); }
+    try { await api.addFaceGroupToLibrary(videoId, groupIdx, view.asset_version, view.group_version, { entity_id: entityId }); setNotice("代表脸已加入人物库"); await load(); }
     catch (error) { setNotice(error instanceof Error ? error.message : "加入人物库失败"); }
   };
   const create = async (groupIdx: number) => {
     if (!view) return;
     const name = window.prompt("新人物名称")?.trim();
     if (!name) return;
-    try { await api.addFaceGroupToLibrary(videoId, groupIdx, view.asset_version, { new_entity_name: name }); await refreshEntities(); await load(); setNotice("已创建人物并加入代表脸"); }
+    try { await api.addFaceGroupToLibrary(videoId, groupIdx, view.asset_version, view.group_version, { new_entity_name: name }); await refreshEntities(); await load(); setNotice("已创建人物并加入代表脸"); }
     catch (error) { setNotice(error instanceof Error ? error.message : "创建人物失败"); }
   };
   return <section className="face-gallery-page">
-    <div className="panel face-gallery-toolbar"><div><span className="panel-label">FACE WORKSPACE</span><h2>视频主要人脸</h2><p>把同一人物的多段人脸轨迹合并，优先展示清晰、出现时间长的代表脸。</p></div><label>视频<select value={videoId} onChange={event => setVideoId(event.target.value)}><option value="">选择已建立 Face 索引的视频</option>{indexed.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><span>{loading ? "读取中…" : `${view?.groups.length || 0} 人`}</span></div>
+    <div className="panel face-gallery-toolbar"><div><span className="panel-label">FACE WORKSPACE</span><h2>视频主要人物候选</h2><p>把同一人物的多段人脸轨迹合并，优先展示清晰、出现时间长的候选；数量是聚类候选，不等同于精确人数。</p></div><label>视频<select value={videoId} onChange={event => setVideoId(event.target.value)}><option value="">选择已建立 Face 索引的视频</option>{indexed.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><span>{loading ? "读取中…" : `${view?.displayed_group_count || 0} 个候选`}</span></div>
     {!indexed.length && <div className="panel empty-list">请先为视频建立 Face 索引</div>}
-    {view?.legacy_backfilled && <div className="face-gallery-note">该视频已直接从 Milvus 旧人脸轨迹补齐人物分组；下次重建 Face 索引后可获得裁剪更准确的代表脸。</div>}
+    {view && <div className="face-gallery-note">展示 {view.displayed_group_count} / {view.eligible_group_count} 个主要候选；底层共 {view.total_group_count} 个保守身份分组。低频、短暂出现的人脸不会进入主视图。</div>}
     <div className="face-gallery-grid">{view?.groups.map((group, index) => <article className="panel face-gallery-card" key={group.group_idx}><a href={group.media_url} target="_blank" rel="noreferrer" className="face-portrait"><img loading="lazy" src={group.thumbnail_url} /><span>定位 {formatTime(group.best_ms / 1000)}</span></a><div className="face-gallery-info"><small>人物 {index + 1}</small><h3>{group.entity_name || "未命名人物"}</h3><p>{group.occurrence_count} 次检测 · 累计 {formatDuration(group.duration_ms / 1000)} · 首次 {formatTime(group.start_ms / 1000)}</p><div className="face-gallery-actions"><select value={selectedEntity[group.group_idx] || group.entity_id || ""} onChange={event => setSelectedEntity(value => ({ ...value, [group.group_idx]: event.target.value }))}><option value="">选择人物库身份</option>{entities.map(entity => <option key={entity.id} value={entity.id}>{entity.name}</option>)}</select><button className="outline" onClick={() => attach(group.group_idx)}>加入已有</button><button className="primary compact" onClick={() => create(group.group_idx)}>新建人物</button></div></div></article>)}</div>
   </section>;
 }

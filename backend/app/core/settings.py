@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     face_model: str = "buffalo_l"
     face_sample_fps: float = 2.0
     face_gallery_cosine_threshold: float = 0.52
+    face_gallery_max_groups: int = 24
+    face_gallery_min_duration_seconds: float = 3.0
+    face_gallery_min_occurrences: int = 3
     face_provider: str = "cpu"
     # ONNX Runtime otherwise creates one intra-op thread per physical CPU core
     # for every InsightFace session. On the shared Ascend host that means
@@ -261,6 +264,27 @@ class Settings(BaseSettings):
     def validate_face_positive(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("Face retrieval parameters must be greater than 0")
+        return value
+
+    @field_validator("face_gallery_max_groups", "face_gallery_min_occurrences")
+    @classmethod
+    def validate_face_gallery_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Face gallery display parameters must be greater than 0")
+        return value
+
+    @field_validator("face_gallery_min_duration_seconds")
+    @classmethod
+    def validate_face_gallery_duration(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("face_gallery_min_duration_seconds must not be negative")
+        return value
+
+    @field_validator("face_gallery_cosine_threshold")
+    @classmethod
+    def validate_face_gallery_cosine_threshold(cls, value: float) -> float:
+        if not -1.0 <= value <= 1.0:
+            raise ValueError("face_gallery_cosine_threshold must be between -1.0 and 1.0")
         return value
 
     @field_validator("face_identity_threshold")

@@ -213,7 +213,11 @@ class TestFaceDirectWrite:
 
         write_modality_from_memory(
             mock_ctx, "face",
-            {"embeddings": embeddings, "track_times_ms": track_times},
+            {
+                "embeddings": embeddings,
+                "track_times_ms": track_times,
+                "group_model_version": "major-people-v2:cosine=0.520",
+            },
         )
 
         mock_ctx.client.collection_for.assert_called_with("face")

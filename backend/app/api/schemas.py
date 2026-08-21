@@ -242,15 +242,16 @@ class VoiceSampleRequest(BaseModel):
 
 class FaceGroupLibraryRequest(BaseModel):
     asset_version: str
+    group_version: str
     entity_id: str | None = None
     new_entity_name: str | None = None
 
-    @field_validator("asset_version")
+    @field_validator("asset_version", "group_version")
     @classmethod
     def validate_asset_version(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("asset_version 不能为空")
+            raise ValueError("版本不能为空")
         return value
 
     @field_validator("entity_id", "new_entity_name")

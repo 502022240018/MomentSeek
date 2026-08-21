@@ -1,6 +1,43 @@
+import sqlite3
+
 import pytest
 
 from app.catalog.db import Catalog
+
+
+def test_legacy_face_binding_schema_is_migrated_without_reusing_binding(tmp_path):
+    path = tmp_path / "catalog.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """CREATE TABLE videos (id TEXT PRIMARY KEY);
+               CREATE TABLE entities (id TEXT PRIMARY KEY, name TEXT);
+               INSERT INTO videos(id) VALUES('video-1');
+               INSERT INTO entities(id,name) VALUES('entity-1','Alice');
+               CREATE TABLE face_identity_bindings (
+                 video_id TEXT NOT NULL,
+                 asset_version TEXT NOT NULL,
+                 group_idx INTEGER NOT NULL,
+                 entity_id TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY(video_id,asset_version,group_idx)
+               );
+               INSERT INTO face_identity_bindings(
+                 video_id,asset_version,group_idx,entity_id
+               ) VALUES('video-1','face-v1',3,'entity-1');"""
+        )
+
+    catalog = Catalog(path)
+
+    assert catalog.face_identity_bindings("video-1", "face-v1", "groups-v2") == {}
+    with catalog.connect() as connection:
+        legacy = connection.execute(
+            "SELECT group_version,group_idx,entity_id FROM face_identity_bindings"
+        ).fetchone()
+    assert dict(legacy) == {
+        "group_version": "",
+        "group_idx": 3,
+        "entity_id": "entity-1",
+    }
 
 
 def test_catalog_video_job_and_entity_roundtrip(tmp_path):

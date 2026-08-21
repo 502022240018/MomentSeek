@@ -429,6 +429,7 @@ class FaceMilvusIndexer:
         *,
         embeddings: np.ndarray,
         track_times_ms: np.ndarray,
+        group_model_version: str,
         group_embeddings: np.ndarray | None = None,
         group_track_indices: np.ndarray | None = None,
         group_times_ms: np.ndarray | None = None,
@@ -439,6 +440,9 @@ class FaceMilvusIndexer:
         group_importance_scores: np.ndarray | None = None,
     ) -> int:
         """P2 direct path: build rows from in-memory arrays and upsert."""
+        group_model_version = str(group_model_version).strip()
+        if not group_model_version:
+            raise ValueError("face group_model_version is required")
         emb_arr   = np.asarray(embeddings, dtype=np.float32)
         times_arr = np.asarray(track_times_ms, dtype=np.int32)
         if not len(emb_arr):
@@ -462,41 +466,133 @@ class FaceMilvusIndexer:
         ]
         track_count = _upsert_batched(col, rows, "face")
 
-        group_vectors = np.asarray(group_embeddings, dtype=np.float32) if group_embeddings is not None else np.empty((0, 512), dtype=np.float32)
-        if len(group_vectors):
-            track_indices = np.asarray(group_track_indices, dtype=np.int64)
-            group_times = np.asarray(group_times_ms, dtype=np.int64)
-            bboxes = np.asarray(group_bboxes, dtype=np.float32)
-            qualities = np.asarray(group_qualities, dtype=np.float32)
-            durations = np.asarray(group_durations_ms, dtype=np.int64)
-            occurrences = np.asarray(group_occurrence_counts, dtype=np.int64)
-            importance = np.asarray(group_importance_scores, dtype=np.float32)
-            group_rows = []
-            for idx in range(len(group_vectors)):
-                group_rows.append({
-                    "pk": face_group_pk(ctx.video_id, ctx.asset_version, idx, model_ver),
-                    "video_id": ctx.video_id,
-                    "asset_version": ctx.asset_version,
-                    "model_version": model_ver,
-                    "group_idx": idx,
-                    "representative_track_idx": int(track_indices[idx]),
-                    "start_ms": int(group_times[idx, 0]),
-                    "end_ms": int(group_times[idx, 1]),
-                    "best_ms": int(group_times[idx, 2]),
-                    "bbox_x1": float(bboxes[idx, 0]),
-                    "bbox_y1": float(bboxes[idx, 1]),
-                    "bbox_x2": float(bboxes[idx, 2]),
-                    "bbox_y2": float(bboxes[idx, 3]),
-                    "representative_quality": float(qualities[idx]),
-                    "duration_ms": int(durations[idx]),
-                    "occurrence_count": int(occurrences[idx]),
-                    "importance_score": float(importance[idx]),
-                    "embedding": group_vectors[idx].tolist(),
-                })
-            group_col = ctx.client.collection("face_groups")
-            _upsert_batched(group_col, group_rows, "face")
-            group_col.flush()
+        upsert_face_group_rows(
+            ctx,
+            group_model_version=group_model_version,
+            group_embeddings=group_embeddings,
+            group_track_indices=group_track_indices,
+            group_times_ms=group_times_ms,
+            group_bboxes=group_bboxes,
+            group_qualities=group_qualities,
+            group_durations_ms=group_durations_ms,
+            group_occurrence_counts=group_occurrence_counts,
+            group_importance_scores=group_importance_scores,
+        )
         return track_count
+
+
+def upsert_face_group_rows(
+    ctx: MilvusWriteContext,
+    *,
+    group_model_version: str,
+    group_embeddings: np.ndarray | None,
+    group_track_indices: np.ndarray | None,
+    group_times_ms: np.ndarray | None,
+    group_bboxes: np.ndarray | None,
+    group_qualities: np.ndarray | None,
+    group_durations_ms: np.ndarray | None,
+    group_occurrence_counts: np.ndarray | None,
+    group_importance_scores: np.ndarray | None,
+) -> int:
+    """Write one immutable derived Face group generation without touching tracks."""
+    model_version = str(group_model_version).strip()
+    if not model_version:
+        raise ValueError("face group_model_version is required")
+    vectors = (
+        np.asarray(group_embeddings, dtype=np.float32)
+        if group_embeddings is not None
+        else np.empty((0, 512), dtype=np.float32)
+    )
+    count = len(vectors)
+    if vectors.ndim != 2 or (count and vectors.shape[1] != 512):
+        raise ValueError("face group embeddings must have shape (N, 512)")
+    if not count:
+        return 0
+    arrays = {
+        "track_indices": np.asarray(group_track_indices, dtype=np.int64),
+        "times": np.asarray(group_times_ms, dtype=np.int64),
+        "bboxes": np.asarray(group_bboxes, dtype=np.float32),
+        "qualities": np.asarray(group_qualities, dtype=np.float32),
+        "durations": np.asarray(group_durations_ms, dtype=np.int64),
+        "occurrences": np.asarray(group_occurrence_counts, dtype=np.int64),
+        "importance": np.asarray(group_importance_scores, dtype=np.float32),
+    }
+    expected_shapes = {
+        "track_indices": (count,),
+        "times": (count, 3),
+        "bboxes": (count, 4),
+        "qualities": (count,),
+        "durations": (count,),
+        "occurrences": (count,),
+        "importance": (count,),
+    }
+    for name, expected in expected_shapes.items():
+        if arrays[name].shape != expected:
+            raise ValueError(
+                f"face group {name} must have shape {expected}, "
+                f"got {arrays[name].shape}"
+            )
+    if (
+        not np.isfinite(vectors).all()
+        or not np.isfinite(arrays["bboxes"]).all()
+        or not np.isfinite(arrays["qualities"]).all()
+        or not np.isfinite(arrays["importance"]).all()
+    ):
+        raise ValueError("face group arrays must be finite")
+    if np.any(np.linalg.norm(vectors, axis=1) <= 1e-12):
+        raise ValueError("face group embeddings must be non-zero")
+    if np.any(arrays["track_indices"] < 0):
+        raise ValueError("face group representative track indices must be non-negative")
+    if np.any(arrays["durations"] <= 0):
+        raise ValueError("face group durations must be positive")
+    if np.any(arrays["occurrences"] <= 0):
+        raise ValueError("face group occurrence counts must be positive")
+    if np.any((arrays["qualities"] < 0) | (arrays["qualities"] > 1)):
+        raise ValueError("face group qualities must be between 0 and 1")
+
+    rows = []
+    for idx in range(count):
+        start_ms, end_ms, best_ms = (int(value) for value in arrays["times"][idx])
+        if start_ms < 0 or end_ms <= start_ms or not start_ms <= best_ms <= end_ms:
+            raise ValueError(f"face group {idx} has invalid time bounds")
+        bbox = arrays["bboxes"][idx]
+        missing_bbox = bool(np.all(bbox == -1.0))
+        valid_bbox = bool(
+            np.all((bbox >= 0.0) & (bbox <= 1.0))
+            and bbox[2] > bbox[0]
+            and bbox[3] > bbox[1]
+        )
+        if not missing_bbox and not valid_bbox:
+            raise ValueError(f"face group {idx} has invalid representative bbox")
+        rows.append({
+            "pk": face_group_pk(
+                ctx.video_id,
+                ctx.asset_version,
+                idx,
+                model_version,
+            ),
+            "video_id": ctx.video_id,
+            "asset_version": ctx.asset_version,
+            "model_version": model_version,
+            "group_idx": idx,
+            "representative_track_idx": int(arrays["track_indices"][idx]),
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "best_ms": best_ms,
+            "bbox_x1": float(bbox[0]),
+            "bbox_y1": float(bbox[1]),
+            "bbox_x2": float(bbox[2]),
+            "bbox_y2": float(bbox[3]),
+            "representative_quality": float(arrays["qualities"][idx]),
+            "duration_ms": int(arrays["durations"][idx]),
+            "occurrence_count": int(arrays["occurrences"][idx]),
+            "importance_score": float(arrays["importance"][idx]),
+            "embedding": vectors[idx].tolist(),
+        })
+    collection = ctx.client.collection("face_groups")
+    written = _upsert_batched(collection, rows, "face")
+    collection.flush()
+    return written
 
 
 class SpeakerMilvusIndexer:
