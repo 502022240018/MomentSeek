@@ -137,11 +137,20 @@ def test_voice_reference_makes_voice_tool_available_and_primary():
     assert fast["steps"][0]["tool_id"] == "voice.search"
 
 
-def test_voice_query_without_reference_asks_user_and_does_not_expose_tool():
+@pytest.mark.parametrize(
+    "query",
+    [
+        "找到和这个声音相同的说话人",
+        "查找和参考声音相同的人出现的片段",
+        "找出听起来一样的声音",
+        "这是谁的声音",
+    ],
+)
+def test_voice_query_without_reference_asks_user_and_does_not_expose_tool(query):
     orchestrator = FakeOrchestrator(modalities=["visual", "speaker"])
     lab = SnapMindPlannerLab(orchestrator)
 
-    proposal = lab.propose("找到和这个声音相同的说话人", "assist", None, False)
+    proposal = lab.propose(query, "assist", None, False)
 
     assert "speaker" not in proposal["available_modalities"]
     assert all(
@@ -150,6 +159,17 @@ def test_voice_query_without_reference_asks_user_and_does_not_expose_tool():
         for step in plan["steps"]
     )
     assert proposal["clarifications"][0]["kind"] == "voice_reference_required"
+
+
+def test_generic_audio_query_does_not_require_voice_identity_reference():
+    lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["visual", "asr", "speaker"]))
+
+    proposal = lab.propose("找到背景声音很大的片段", "assist", None, False)
+
+    assert all(
+        item["kind"] != "voice_reference_required"
+        for item in proposal["clarifications"]
+    )
 
 
 def test_voice_search_only_fuses_confirmed_absolute_threshold_hits(monkeypatch):
