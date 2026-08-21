@@ -64,7 +64,8 @@ def _best_face_track_match(
     return None, None
 
 
-def _update_best_face_crop(track: Track, face, frame: np.ndarray, bbox: np.ndarray, timestamp: float) -> None:
+def face_detection_quality(face, frame: np.ndarray, bbox: np.ndarray) -> float:
+    """Score one detected face consistently for indexing and legacy refinement."""
     x1, y1, x2, y2 = bbox.astype(int)
     area = max(0, x2 - x1) * max(0, y2 - y1)
     height, width = frame.shape[:2]
@@ -76,7 +77,18 @@ def _update_best_face_crop(track: Track, face, frame: np.ndarray, bbox: np.ndarr
         sharpness = min(1.0, float(cv2.Laplacian(gray, cv2.CV_64F).var()) / 500.0)
     border_margin = min(x1, y1, width - x2, height - y2)
     border_score = min(1.0, max(0.0, border_margin) / max(1.0, 0.08 * min(width, height)))
-    quality = 0.50 * float(face.det_score) + 0.25 * relative_size + 0.15 * sharpness + 0.10 * border_score
+    return float(
+        0.50 * float(face.det_score)
+        + 0.25 * relative_size
+        + 0.15 * sharpness
+        + 0.10 * border_score
+    )
+
+
+def _update_best_face_crop(track: Track, face, frame: np.ndarray, bbox: np.ndarray, timestamp: float) -> None:
+    x1, y1, x2, y2 = bbox.astype(int)
+    height, width = frame.shape[:2]
+    quality = face_detection_quality(face, frame, bbox)
     if quality <= track.best_quality:
         return
     pad = max(4, int(0.15 * max(x2 - x1, y2 - y1)))
@@ -175,7 +187,12 @@ def build_face_index(
     qualities = np.asarray([track.best_quality for track in valid_tracks], dtype=np.float32)
     bboxes = np.asarray([track.best_bbox for track in valid_tracks], dtype=np.float32).reshape((-1, 4))
     detection_counts = np.asarray([track.detection_count for track in valid_tracks], dtype=np.int32)
-    from app.identity.face_gallery import cluster_face_tracks, face_group_arrays
+    from app.identity.face_gallery import (
+        FACE_GROUP_ALGORITHM_VERSION,
+        cluster_face_tracks,
+        face_group_arrays,
+        face_group_model_version,
+    )
     groups = cluster_face_tracks(
         embedding_array,
         track_times_array,
@@ -185,6 +202,7 @@ def build_face_index(
         cosine_threshold=gallery_cosine_threshold,
     )
     group_arrays = face_group_arrays(groups)
+    group_model_version = face_group_model_version(gallery_cosine_threshold)
     from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
 
     milvus_rows = write_modality_from_memory(
@@ -193,12 +211,18 @@ def build_face_index(
         {
             "embeddings": embedding_array,
             "track_times_ms": track_times_array,
+            "group_model_version": group_model_version,
             **group_arrays,
         },
     )
     return {
         "tracks": len(embeddings),
         "face_groups": len(groups),
+        "face_group_rows": len(groups),
+        "face_group_version": group_model_version,
+        "face_group_algorithm": FACE_GROUP_ALGORITHM_VERSION,
+        "face_group_cosine_threshold": float(gallery_cosine_threshold),
+        "face_group_source": "index-time-tracks",
         "detections": detections,
         "provider": encoder.provider,
         "schema_version": 3,

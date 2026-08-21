@@ -167,7 +167,11 @@ export type VideoFaceGroup = {
   representative_quality: number; duration_ms: number; occurrence_count: number; importance_score: number;
   thumbnail_url: string; media_url: string; entity_id?: string | null; entity_name?: string | null;
 };
-export type FaceGalleryView = { video_id: string; asset_version: string; legacy_backfilled: boolean; groups: VideoFaceGroup[] };
+export type FaceGalleryView = {
+  video_id: string; asset_version: string; group_version: string;
+  total_group_count: number; eligible_group_count: number; displayed_group_count: number;
+  groups: VideoFaceGroup[];
+};
 
 async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init);
@@ -211,8 +215,8 @@ export const api = {
     json<{ status: string; id: string }>(`/api/entities/${entityId}`, { method: "DELETE" }),
   speakers: (videoId: string) => json<SpeakerView>(`/api/videos/${videoId}/speakers`),
   faceGallery: (videoId: string) => json<FaceGalleryView>(`/api/videos/${videoId}/face-gallery`),
-  addFaceGroupToLibrary: (videoId: string, groupIdx: number, assetVersion: string, options: { entity_id?: string; new_entity_name?: string }) =>
-    json<Record<string, unknown>>(`/api/videos/${videoId}/face-gallery/${groupIdx}/library`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ asset_version: assetVersion, ...options }) }),
+  addFaceGroupToLibrary: (videoId: string, groupIdx: number, assetVersion: string, groupVersion: string, options: { entity_id?: string; new_entity_name?: string }) =>
+    json<Record<string, unknown>>(`/api/videos/${videoId}/face-gallery/${groupIdx}/library`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ asset_version: assetVersion, group_version: groupVersion, ...options }) }),
   updateSpeaker: (videoId: string, trackId: number, update: { display_name?: string; representative_utterance_index?: number; hidden?: boolean }) =>
     json<SpeakerView>(`/api/videos/${videoId}/speakers/${trackId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) }),
   updateUtterance: (videoId: string, utteranceIndex: number, update: { corrected_track_id: number | null; searchable: boolean }) =>

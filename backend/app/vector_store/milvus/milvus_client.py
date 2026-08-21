@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+import uuid
+from collections.abc import Iterable
 
 from pymilvus import Collection, CollectionSchema, connections, utility
 
@@ -567,6 +569,101 @@ class MilvusClient:
             return 0
         return int(rows[0].get("count(*)", 0))
 
+    def count_face_groups_version(
+        self,
+        video_id: str,
+        asset_version: str,
+        group_model_version: str,
+    ) -> int:
+        """Return rows for one immutable Face group generation."""
+        rows = self.collection("face_groups").query(
+            expr=(
+                f'video_id == "{video_id}" and '
+                f'asset_version == "{asset_version}" and '
+                f'model_version == "{group_model_version}"'
+            ),
+            output_fields=["count(*)"],
+        )
+        return int(rows[0].get("count(*)", 0)) if rows else 0
+
+
+class ExistingMilvusCollectionsClient:
+    """Maintenance-only client for an explicit set of existing collections.
+
+    Unlike :class:`MilvusClient`, this client never creates collections and
+    never validates unrelated modality schemas.  It uses an isolated PyMilvus
+    connection alias so constructing it cannot weaken or poison the
+    application singleton.  Operational migrations should request the exact
+    collections they need and fail if any are absent.
+    """
+
+    def __init__(self, required_collections: Iterable[str]) -> None:
+        names = tuple(dict.fromkeys(str(name).strip() for name in required_collections))
+        if not names or any(not name for name in names):
+            raise ValueError("required_collections must contain non-empty names")
+        settings = get_settings()
+        self._alias = f"maintenance_{uuid.uuid4().hex}"
+        self._required_collections = frozenset(names)
+        connections.connect(
+            alias=self._alias,
+            host=settings.milvus_host,
+            port=str(settings.milvus_port),
+            timeout=settings.milvus_query_timeout_seconds,
+        )
+        try:
+            missing = [
+                name
+                for name in names
+                if not utility.has_collection(name, using=self._alias)
+            ]
+            if missing:
+                raise RuntimeError(
+                    "required Milvus collections do not exist: "
+                    + ", ".join(sorted(missing))
+                )
+        except Exception:
+            connections.disconnect(self._alias)
+            raise
+
+    def close(self) -> None:
+        connections.disconnect(self._alias)
+
+    def collection(self, name: str) -> Collection:
+        if name not in self._required_collections:
+            raise ValueError(f"collection was not authorized for maintenance: {name}")
+        return Collection(name, using=self._alias)
+
+    def collection_for(self, modality: str) -> Collection:
+        try:
+            name = _COLLECTION_FOR_MODALITY[modality]
+        except KeyError as exc:
+            raise ValueError(f"unknown Milvus modality: {modality}") from exc
+        return self.collection(name)
+
+    def count_video_modality_version(
+        self, video_id: str, modality: str, asset_version: str
+    ) -> int:
+        rows = self.collection_for(modality).query(
+            expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}"'),
+            output_fields=["count(*)"],
+        )
+        return int(rows[0].get("count(*)", 0)) if rows else 0
+
+    def count_face_groups_version(
+        self,
+        video_id: str,
+        asset_version: str,
+        group_model_version: str,
+    ) -> int:
+        rows = self.collection("face_groups").query(
+            expr=(
+                f'video_id == "{video_id}" and '
+                f'asset_version == "{asset_version}" and '
+                f'model_version == "{group_model_version}"'
+            ),
+            output_fields=["count(*)"],
+        )
+        return int(rows[0].get("count(*)", 0)) if rows else 0
 
 # ---------------------------------------------------------------------------
 # Module-level singleton accessor

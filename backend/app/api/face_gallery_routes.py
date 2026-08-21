@@ -9,11 +9,12 @@ from fastapi.responses import FileResponse
 
 from app.api.schemas import FaceGroupLibraryRequest
 from app.identity.face_gallery_service import (
+    FaceGroupMigrationRequired,
     attach_group_to_entity,
     copy_thumbnail_as_reference,
     ensure_group_thumbnail,
     get_face_group,
-    published_face_version,
+    published_face_generation,
     video_face_groups,
 )
 from app.platform import context
@@ -30,8 +31,14 @@ def get_video_face_gallery(video_id: str) -> dict:
         return video_face_groups(
             context.catalog,
             video_id,
-            context.settings.face_gallery_cosine_threshold,
+            limit=context.settings.face_gallery_max_groups,
+            min_duration_ms=int(round(
+                context.settings.face_gallery_min_duration_seconds * 1000
+            )),
+            min_occurrence_count=context.settings.face_gallery_min_occurrences,
         )
+    except FaceGroupMigrationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -39,18 +46,32 @@ def get_video_face_gallery(video_id: str) -> dict:
 
 
 @router.get("/api/videos/{video_id}/face-gallery/{group_idx}/thumbnail")
-async def get_face_group_thumbnail(video_id: str, group_idx: int, asset_version: str):
+async def get_face_group_thumbnail(
+    video_id: str,
+    group_idx: int,
+    asset_version: str,
+    group_version: str,
+):
     video = context.catalog.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="视频不存在")
     try:
-        if published_face_version(context.catalog, video_id) != asset_version:
+        generation = published_face_generation(context.catalog, video_id)
+        if (
+            generation.asset_version != asset_version
+            or generation.group_version != group_version
+        ):
             raise HTTPException(status_code=409, detail="人脸索引已更新，请刷新页面")
-        group = get_face_group(video_id, asset_version, group_idx)
+        group = get_face_group(video_id, asset_version, group_version, group_idx)
         if not group:
             raise HTTPException(status_code=404, detail="人脸分组不存在")
         path = await run_in_threadpool(
-            ensure_group_thumbnail, context.settings, video, asset_version, group
+            ensure_group_thumbnail,
+            context.settings,
+            video,
+            asset_version,
+            group_version,
+            group,
         )
         return FileResponse(path, media_type="image/jpeg", content_disposition_type="inline", headers={"Cache-Control": "public, max-age=86400"})
     except HTTPException:
@@ -69,18 +90,32 @@ async def add_face_group_to_library(video_id: str, group_idx: int, request: Face
     created_entity_id: str | None = None
     created_reference_path = None
     try:
-        if published_face_version(context.catalog, video_id) != request.asset_version:
+        generation = published_face_generation(context.catalog, video_id)
+        if (
+            generation.asset_version != request.asset_version
+            or generation.group_version != request.group_version
+        ):
             raise HTTPException(status_code=409, detail="人脸索引已更新，请刷新页面")
         entity_id = request.entity_id
         if request.new_entity_name:
-            group = get_face_group(video_id, request.asset_version, group_idx)
+            group = get_face_group(
+                video_id,
+                request.asset_version,
+                request.group_version,
+                group_idx,
+            )
             if not group:
                 raise HTTPException(status_code=404, detail="人脸分组不存在")
             entity_id = uuid.uuid4().hex
             reference_path = context.settings.app_data_dir / "entities" / f"{entity_id}.jpg"
             created_reference_path = reference_path
             thumbnail = await run_in_threadpool(
-                ensure_group_thumbnail, context.settings, video, request.asset_version, group
+                ensure_group_thumbnail,
+                context.settings,
+                video,
+                request.asset_version,
+                request.group_version,
+                group,
             )
             await run_in_threadpool(copy_thumbnail_as_reference, thumbnail, reference_path)
             context.catalog.create_entity({
@@ -90,7 +125,12 @@ async def add_face_group_to_library(video_id: str, group_idx: int, request: Face
             created_entity_id = entity_id
             created_reference_path = reference_path
         result = attach_group_to_entity(
-            context.catalog, video_id, request.asset_version, group_idx, str(entity_id)
+            context.catalog,
+            video_id,
+            request.asset_version,
+            request.group_version,
+            group_idx,
+            str(entity_id),
         )
         return result
     except HTTPException:

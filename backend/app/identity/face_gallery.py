@@ -5,6 +5,16 @@ from dataclasses import dataclass
 import numpy as np
 
 
+FACE_GROUP_ALGORITHM_VERSION = "major-people-v2"
+
+
+def face_group_model_version(cosine_threshold: float) -> str:
+    """Return the immutable identity-clustering contract stored with group rows."""
+    if not -1.0 <= cosine_threshold <= 1.0:
+        raise ValueError("cosine_threshold must be between -1.0 and 1.0")
+    return f"{FACE_GROUP_ALGORITHM_VERSION}:cosine={cosine_threshold:.3f}"
+
+
 def _normalize(vector: np.ndarray) -> np.ndarray:
     value = np.asarray(vector, dtype=np.float32)
     norm = float(np.linalg.norm(value))
@@ -93,10 +103,15 @@ def cluster_face_tracks(
         representative = group_members[int(np.argmax(representative_scores))]
         duration_ms = int(sum(max(0, int(times[i, 1]) - int(times[i, 0])) for i in group_members))
         occurrence_count = int(sum(max(1, int(detections[i])) for i in group_members))
+        # Keep the score monotonic for long videos.  The former normalized
+        # formula saturated duration and occurrence at 30 s / 20 detections,
+        # leaving hundreds of identities tied at 0.9 in programme-length
+        # material.  The logarithms still damp outliers without flattening the
+        # useful ordering signal.
         importance = float(
-            0.55 * min(1.0, np.log1p(duration_ms / 1000.0) / np.log(31.0))
-            + 0.25 * min(1.0, np.log1p(occurrence_count) / np.log(21.0))
-            + 0.20 * float(quality_values[representative])
+            0.55 * np.log1p(duration_ms / 1000.0)
+            + 0.25 * np.log1p(occurrence_count)
+            + 0.20 * float(np.clip(quality_values[representative], 0.0, 1.0))
         )
         groups.append(FaceGroup(
             group_idx=0,
@@ -115,6 +130,33 @@ def cluster_face_tracks(
 
     groups.sort(key=lambda item: (-item.importance_score, item.start_ms))
     return [FaceGroup(**{**item.__dict__, "group_idx": idx}) for idx, item in enumerate(groups)]
+
+
+def select_major_face_groups(
+    groups: list[FaceGroup],
+    *,
+    limit: int = 24,
+    min_duration_ms: int = 3_000,
+    min_occurrence_count: int = 3,
+) -> list[FaceGroup]:
+    """Select bounded, presentation-worthy people without changing identity groups.
+
+    Clustering remains the complete factual derived dataset.  This function is
+    only the stable product view: a person is eligible when either screen time
+    or repeated detections indicate a meaningful appearance, then the already
+    deterministic importance order is capped for UI and API cost control.
+    """
+    if limit <= 0:
+        raise ValueError("limit must be greater than 0")
+    if min_duration_ms < 0 or min_occurrence_count <= 0:
+        raise ValueError("major-person thresholds are invalid")
+    eligible = [
+        group for group in groups
+        if group.duration_ms >= min_duration_ms
+        or group.occurrence_count >= min_occurrence_count
+    ]
+    eligible.sort(key=lambda item: (-item.importance_score, item.start_ms, item.group_idx))
+    return eligible[:limit]
 
 
 def face_group_arrays(groups: list[FaceGroup]) -> dict[str, np.ndarray]:

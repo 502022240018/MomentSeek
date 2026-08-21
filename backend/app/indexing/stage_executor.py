@@ -129,6 +129,23 @@ def _stage_publication(stage: str, context: StageContext, result: dict) -> dict:
             f"Milvus verification failed stage={stage} video={context.video['id']}: "
             f"expected={written_rows} persisted={persisted_rows}"
         )
+    if stage == "face":
+        group_version = str(result.get("face_group_version") or "").strip()
+        group_rows = result.get("face_group_rows")
+        if not group_version or group_rows is None:
+            raise RuntimeError(
+                "Face stage did not report its group version and row count; refusing publish"
+            )
+        persisted_group_rows = context.milvus_ctx.client.count_face_groups_version(
+            context.video["id"],
+            context.milvus_ctx.asset_version,
+            group_version,
+        )
+        if persisted_group_rows != int(group_rows):
+            raise RuntimeError(
+                f"Milvus Face group verification failed video={context.video['id']}: "
+                f"expected={group_rows} persisted={persisted_group_rows}"
+            )
     result["milvus_asset_version"] = context.milvus_ctx.asset_version
     result["milvus_row_count"] = persisted_rows
     metadata = channel_metadata(

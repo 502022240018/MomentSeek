@@ -71,12 +71,27 @@ def channel_metadata(
             })
         return payload
     if stage == "face":
+        group_version = str(result.get("face_group_version") or "").strip()
+        group_rows = result.get("face_group_rows")
+        if not group_version or group_rows is None:
+            raise ValueError("Face publication requires a verified group generation")
         return {
             "model_key": settings.face_model,
             "embedding_space": "arcface-identity",
             "sample_fps": float(options.get("face_sample_fps", settings.face_sample_fps)),
             "decode_status": str(result.get("decode_status") or "unknown"),
             "provider": str(result.get("provider") or settings.face_provider),
+            "group_version": group_version,
+            "group_row_count": int(group_rows),
+            "group_algorithm": str(result.get("face_group_algorithm") or ""),
+            "group_source": str(
+                result.get("face_group_source") or "index-time-tracks"
+            ),
+            "group_cosine_threshold": float(
+                result.get("face_group_cosine_threshold")
+                if result.get("face_group_cosine_threshold") is not None
+                else settings.face_gallery_cosine_threshold
+            ),
         }
     if stage == "asr":
         semantic_model = settings.asr_semantic_model
