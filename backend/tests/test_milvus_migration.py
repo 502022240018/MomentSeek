@@ -19,18 +19,25 @@ import numpy as np
 import pytest
 
 
-def test_runtime_collection_layout_replaces_only_asr():
+def test_runtime_collection_layout_replaces_asr_and_speaker_independently():
     from app.core.settings import Settings
     from app.vector_store.milvus.milvus_client import _runtime_collection_layout
 
     names, configs = _runtime_collection_layout(
-        Settings(_env_file=None, milvus_asr_collection="asr_embeddings_planner_v2")
+        Settings(
+            _env_file=None,
+            milvus_asr_collection="asr_embeddings_planner_v2",
+            milvus_speaker_collection="speaker_embeddings_diskann_v2",
+        )
     )
 
     assert names["asr"] == "asr_embeddings_planner_v2"
+    assert names["speaker"] == "speaker_embeddings_diskann_v2"
     assert names["visual"] == "visual_embeddings"
     assert "asr_embeddings_planner_v2" in configs
+    assert "speaker_embeddings_diskann_v2" in configs
     assert "asr_embeddings" not in configs
+    assert "speaker_embeddings" not in configs
 
 
 def test_runtime_collection_layout_rejects_reserved_name_collision():
@@ -40,6 +47,25 @@ def test_runtime_collection_layout_rejects_reserved_name_collision():
     with pytest.raises(ValueError, match="conflicts with reserved"):
         _runtime_collection_layout(
             Settings(_env_file=None, milvus_asr_collection="ocr_embeddings")
+        )
+
+    with pytest.raises(ValueError, match="conflicts with reserved"):
+        _runtime_collection_layout(
+            Settings(_env_file=None, milvus_speaker_collection="face_embeddings")
+        )
+
+
+def test_runtime_collection_layout_rejects_cross_modality_name_collision():
+    from app.core.settings import Settings
+    from app.vector_store.milvus.milvus_client import _runtime_collection_layout
+
+    with pytest.raises(ValueError, match="different names"):
+        _runtime_collection_layout(
+            Settings(
+                _env_file=None,
+                milvus_asr_collection="shared_blue_green",
+                milvus_speaker_collection="shared_blue_green",
+            )
         )
 
 

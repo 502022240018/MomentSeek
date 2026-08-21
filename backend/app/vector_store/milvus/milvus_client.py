@@ -219,18 +219,28 @@ _COLLECTION_FOR_MODALITY: dict[str, str] = {
 def _runtime_collection_layout(settings) -> tuple[dict[str, str], dict[str, dict]]:
     """Resolve deployment-local collection names without changing defaults."""
     modality_names = dict(_COLLECTION_FOR_MODALITY)
-    asr_name = str(settings.milvus_asr_collection)
-    if asr_name in _COLLECTION_CONFIGS and asr_name != "asr_embeddings":
-        raise ValueError(
-            f"MILVUS_ASR_COLLECTION conflicts with reserved collection: {asr_name}"
-        )
-    modality_names["asr"] = asr_name
+    requested = {
+        "asr": str(settings.milvus_asr_collection),
+        "speaker": str(settings.milvus_speaker_collection),
+    }
+    defaults = {"asr": "asr_embeddings", "speaker": "speaker_embeddings"}
+    for modality, name in requested.items():
+        reserved_by_other = set(_COLLECTION_CONFIGS) - {defaults[modality]}
+        if name in reserved_by_other:
+            raise ValueError(
+                f"MILVUS_{modality.upper()}_COLLECTION conflicts with reserved "
+                f"collection: {name}"
+            )
+    if requested["asr"] == requested["speaker"]:
+        raise ValueError("ASR and Speaker collections must use different names")
+    modality_names.update(requested)
     configs = {
         name: config
         for name, config in _COLLECTION_CONFIGS.items()
-        if name != "asr_embeddings"
+        if name not in defaults.values()
     }
-    configs[asr_name] = _COLLECTION_CONFIGS["asr_embeddings"]
+    for modality, name in requested.items():
+        configs[name] = _COLLECTION_CONFIGS[defaults[modality]]
     return modality_names, configs
 
 _OCR_V2_REQUIRED_FIELDS = frozenset({
