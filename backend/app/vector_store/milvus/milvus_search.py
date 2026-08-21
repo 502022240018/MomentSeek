@@ -896,3 +896,120 @@ def milvus_speaker_candidates(
     _log_dropped_time_rows("speaker", video_id, invalid_rows)
     candidates.sort(key=lambda c: c.score, reverse=True)
     return candidates
+
+
+def milvus_speaker_candidates_scoped(
+    client: MilvusClient,
+    queries: np.ndarray,
+    asset_versions: dict[str, str],
+    limit: int,
+    threshold: float | None = None,
+    profiler: RetrievalProfiler | None = None,
+) -> list[Candidate]:
+    """Search many published video versions and reference vectors in one RPC."""
+    if not asset_versions or limit <= 0:
+        return []
+    settings = get_settings()
+    if threshold is None:
+        threshold = settings.speaker_identity_threshold
+    vectors = np.asarray(queries, dtype=np.float32)
+    if vectors.ndim == 1:
+        vectors = vectors.reshape(1, -1)
+    if vectors.ndim != 2 or not len(vectors):
+        raise ValueError("Speaker scoped search requires at least one query vector")
+    vectors = np.vstack([normalize(vector) for vector in vectors])
+    versions = {
+        str(video_id): str(asset_version)
+        for video_id, asset_version in asset_versions.items()
+        if str(video_id) and str(asset_version)
+    }
+    if not versions:
+        return []
+    _verify_ann_index_type_once(client, "speaker")
+    collection = client.collection_for("speaker")
+    ann_limit = min(limit * settings.speaker_recall_multiplier, 16_384)
+    search_params = {
+        "metric_type": _MODALITY_METRIC["speaker"],
+        "params": {
+            "search_list": max(ann_limit, settings.speaker_diskann_search_list),
+        },
+    }
+    expression = " or ".join(
+        (
+            f'(video_id == {json.dumps(video_id)} and '
+            f'asset_version == {json.dumps(asset_version)})'
+        )
+        for video_id, asset_version in sorted(versions.items())
+    )
+    output_fields = [
+        "video_id", "asset_version", "utterance_idx", "start_ms", "end_ms",
+        "track_id", "asr_chunk_idx",
+    ]
+    try:
+        span = profiler.span("milvus_rpc", "speaker") if profiler else nullcontext()
+        with span:
+            result_sets = collection.search(
+                data=vectors.tolist(),
+                anns_field="embedding",
+                param=search_params,
+                limit=ann_limit,
+                expr=expression,
+                output_fields=output_fields,
+                timeout=settings.milvus_query_timeout_seconds,
+            )
+    except Exception as exc:
+        raise MilvusServiceError(f"Milvus scoped Speaker ANN search failed: {exc}") from exc
+    best: dict[tuple[str, int], Candidate] = {}
+    invalid_rows = 0
+    row_count = 0
+    for result_set in result_sets:
+        for hit in result_set:
+            row_count += 1
+            try:
+                video_id = str(hit.entity.get("video_id") or "")
+                asset_version = str(hit.entity.get("asset_version") or "")
+                if not video_id or versions.get(video_id) != asset_version:
+                    raise ValueError("Speaker hit escaped the published scope")
+                cosine = float(hit.distance)
+                if not np.isfinite(cosine):
+                    raise ValueError("speaker cosine must be finite")
+                entity = {field: hit.entity.get(field) for field in output_fields}
+                start_ms, end_ms = _required_time_window(entity)
+                utterance_idx = required_nonnegative_int_field(entity, "utterance_idx")
+                track_id = required_nonnegative_int_field(entity, "track_id")
+                asr_chunk_idx = required_nonnegative_int_field(entity, "asr_chunk_idx")
+            except (KeyError, TypeError, ValueError, OverflowError):
+                invalid_rows += 1
+                continue
+            above = cosine >= threshold
+            detail = f"[milvus] speaker cosine={cosine:.3f} track_id={track_id}"
+            candidate = Candidate(
+                video_id=video_id,
+                start_time=_seconds(start_ms),
+                end_time=_seconds(end_ms),
+                score=cosine,
+                modality="speaker",
+                evidence=detail if above else detail + " · 低于阈值",
+                raw_score=cosine,
+                decision="absolute_hit" if above else "weak",
+                above_threshold=above,
+                best_time=_seconds(start_ms),
+                unit_type="utterance",
+                unit_id=utterance_idx,
+                best_ms=start_ms,
+                features={
+                    "speaker_cosine": cosine,
+                    "track_id": track_id,
+                    "asr_chunk_idx": asr_chunk_idx,
+                    "source": "milvus",
+                },
+            )
+            key = (video_id, utterance_idx)
+            previous = best.get(key)
+            if previous is None or candidate.score > previous.score:
+                best[key] = candidate
+    _log_dropped_time_rows("speaker", "published-scope", invalid_rows)
+    if profiler:
+        profiler.increment("milvus", "speaker_rows", row_count)
+        profiler.increment("milvus", "speaker_requests")
+    return sorted(best.values(), key=lambda item: item.score, reverse=True)[:limit]

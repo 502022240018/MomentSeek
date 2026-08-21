@@ -953,6 +953,22 @@ class Catalog:
             ).fetchall()
         return [self._strip(dict(row), self._VOICE_SAMPLE_BLOB_FIELDS) for row in rows]
 
+    def list_voice_sample_embeddings(self, entity_id: str) -> list[dict]:
+        """Return the minimum private payload needed by trusted voice services.
+
+        Public entity APIs continue to use ``list_voice_samples`` and never see
+        the raw BLOB.  Keeping this as a separate, explicitly named method makes
+        accidental serialization much harder than adding an ``include_blob``
+        switch to the public-shaped result.
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT id,voice_embedding FROM voice_samples
+                   WHERE entity_id=? ORDER BY created_at,id""",
+                (entity_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     @staticmethod
     def _attach_video_folders(connection: sqlite3.Connection, videos: list[dict]) -> None:
         if not videos:

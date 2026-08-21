@@ -136,7 +136,7 @@ function App() {
         {notice && <div className="notice" onClick={() => setNotice("")}>{notice}<span>×</span></div>}
         <section className="page-content">
           {page === "search" && <SearchPage videos={videos} folders={folders} setNotice={setNotice} />}
-          {page === "planner" && plannerCapability && <PlannerLabPage videos={videos} folders={folders} capability={plannerCapability} setNotice={setNotice} />}
+          {page === "planner" && plannerCapability && <PlannerLabPage videos={videos} folders={folders} entities={entities} capability={plannerCapability} setNotice={setNotice} />}
           {page === "assets" && <AssetsPage videos={videos} folders={folders} refresh={refresh} setNotice={setNotice} />}
           {page === "indexes" && <IndexesPage jobs={jobs} videos={videos} refresh={refresh} setNotice={setNotice} />}
           {page === "entities" && <EntitiesPage entities={entities} videos={videos} refresh={refresh} setNotice={setNotice} />}

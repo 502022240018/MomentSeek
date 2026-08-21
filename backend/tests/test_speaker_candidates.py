@@ -20,6 +20,7 @@ from app.core.settings import get_settings
 from app.vector_store.milvus.milvus_search import (
     _reset_index_verification,
     milvus_speaker_candidates,
+    milvus_speaker_candidates_scoped,
 )
 
 _VIDEO_ID = "spk-video"
@@ -183,3 +184,32 @@ def test_zero_start_is_valid_when_end_is_positive():
     assert len(candidates) == 1
     assert candidates[0].start_time == 0.0
     assert candidates[0].end_time == 0.5
+
+
+def test_scoped_speaker_search_batches_videos_and_reference_vectors_once():
+    _reset_index_verification()
+    client, collection = _make_client([])
+    first = _hit(0.7, 0, video_id="a", asset_version="1")
+    stronger = _hit(0.9, 0, video_id="a", asset_version="1")
+    other = _hit(0.8, 1, video_id="b", asset_version="2")
+    stale = _hit(0.99, 2, video_id="b", asset_version="old")
+    collection.search.return_value = [[first, other], [stronger, stale]]
+
+    queries = np.vstack([_unit_query(), _unit_query()])
+    candidates = milvus_speaker_candidates_scoped(
+        client,
+        queries,
+        {"a": "1", "b": "2"},
+        limit=3,
+        threshold=-1.0,
+    )
+
+    collection.search.assert_called_once()
+    call = collection.search.call_args.kwargs
+    assert len(call["data"]) == 2
+    assert 'video_id == "a"' in call["expr"] and 'asset_version == "1"' in call["expr"]
+    assert 'video_id == "b"' in call["expr"] and 'asset_version == "2"' in call["expr"]
+    assert [(item.video_id, item.unit_id, item.score) for item in candidates] == [
+        ("a", 0, 0.9),
+        ("b", 1, 0.8),
+    ]

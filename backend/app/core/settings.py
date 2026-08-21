@@ -130,6 +130,9 @@ class Settings(BaseSettings):
     speaker_identity_threshold: float = 0.50  # CAM++ same-speaker cutoff
     speaker_diskann_search_list: int = 128    # DiskANN search_list (dynamically raised to >= ann_limit)
     speaker_recall_multiplier: int = 1        # ann_limit = limit * this (re-score removed → 1)
+    speaker_preview_padding_seconds: float = 1.0
+    speaker_preview_min_seconds: float = 4.0
+    speaker_preview_max_seconds: float = 12.0
 
     ocr_engine: str = "rapidocr"
     ocr_device: str = "auto"
@@ -159,6 +162,10 @@ class Settings(BaseSettings):
     planner_lab_prompt_path: Path = Path(
         "deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt"
     )
+    # Voice retrieval remains isolated to Planner Lab until its evidence and
+    # preview UX have passed the experiment gate.
+    planner_voice_search_enabled: bool = True
+    planner_voice_ambiguous_threshold: float = 0.35
 
     # Query encoders live in the API process, independently from indexing
     # workers. Production can pay model load/kernel compilation during startup
@@ -274,11 +281,22 @@ class Settings(BaseSettings):
             raise ValueError("Speaker retrieval parameters must be greater than 0")
         return value
 
-    @field_validator("speaker_identity_threshold")
+    @field_validator("speaker_identity_threshold", "planner_voice_ambiguous_threshold")
     @classmethod
     def validate_speaker_identity_threshold(cls, value: float) -> float:
         if not -1.0 <= value <= 1.0:
-            raise ValueError("speaker_identity_threshold must be between -1.0 and 1.0")
+            raise ValueError("Speaker similarity thresholds must be between -1.0 and 1.0")
+        return value
+
+    @field_validator(
+        "speaker_preview_padding_seconds",
+        "speaker_preview_min_seconds",
+        "speaker_preview_max_seconds",
+    )
+    @classmethod
+    def validate_speaker_preview_seconds(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("Speaker preview durations must not be negative")
         return value
 
     @field_validator("face_diskann_search_list", "face_recall_multiplier")

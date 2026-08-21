@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from "react";
 import {
   api, CandidatePlan, EvidenceRole, IdentityClarification, PlanSetResponse, PlannerExecution, PlanStep,
-  Folder, PlannerLabCapabilities, PlannerMode, SearchResult, Video,
+  Entity, Folder, PlannerLabCapabilities, PlannerMode, SearchResult, SpeakerView, Video,
+  VoiceReferenceInput,
 } from "./api";
 
 function clock(seconds: number) {
@@ -32,7 +33,7 @@ const planMeta: Record<string, { icon: string; eyebrow: string; accent: string }
 
 const toolGlyph: Record<string, string> = {
   "visual.search": "◉", "face.search": "◎", "asr.search": "≋",
-  "ocr.search": "▤", "confidence.filter": "⌁", "vlm.rerank": "✦",
+  "ocr.search": "▤", "voice.search": "◖", "confidence.filter": "⌁", "vlm.rerank": "✦",
 };
 
 const roleMeta: Record<EvidenceRole, { label: string; hint: string }> = {
@@ -51,15 +52,24 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-export function PlannerLabPage({ videos, folders, capability, setNotice }: {
+export function PlannerLabPage({ videos, folders, entities, capability, setNotice }: {
   videos: Video[];
   folders: Folder[];
+  entities: Entity[];
   capability: PlannerLabCapabilities;
   setNotice: (value: string) => void;
 }) {
   const ready = videos.filter(video => video.status === "ready" || video.indexed_modalities.length);
   const [query, setQuery] = useState("");
   const [image, setImage] = useState<File>();
+  const [voicePanelOpen, setVoicePanelOpen] = useState(false);
+  const [voiceMode, setVoiceMode] = useState<"upload" | "entity" | "utterance">("upload");
+  const [voiceFile, setVoiceFile] = useState<File>();
+  const [voiceEntityId, setVoiceEntityId] = useState("");
+  const [voiceVideoId, setVoiceVideoId] = useState("");
+  const [voiceUtteranceIndex, setVoiceUtteranceIndex] = useState<number>();
+  const [voiceView, setVoiceView] = useState<SpeakerView>();
+  const [voiceLoading, setVoiceLoading] = useState(false);
   const [mode, setMode] = useState<PlannerMode>("assist");
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
   const [expandedFolderIds, setExpandedFolderIds] = useState<string[]>([]);
@@ -76,10 +86,36 @@ export function PlannerLabPage({ videos, folders, capability, setNotice }: {
   const [playing, setPlaying] = useState<SearchResult>();
   const [expandedResult, setExpandedResult] = useState("");
   const [identityChoices, setIdentityChoices] = useState<Record<string, "generic_visual" | "keep_original">>({});
+  const [voiceClarificationChoices, setVoiceClarificationChoices] = useState<Record<string, boolean>>({});
 
   const selectedPlan = planSet?.plans.find(plan => plan.plan_id === selectedPlanId);
   const clarifications = planSet?.clarifications ?? [];
-  const unresolvedClarifications = clarifications.filter(item => !identityChoices[item.clarification_id]);
+  const voiceEntities = entities.filter(entity => (entity.voice_sample_count || 0) > 0);
+  const speakerVideos = ready.filter(video => video.indexed_modalities.includes("speaker"));
+  const voiceReference = useMemo<VoiceReferenceInput | undefined>(() => {
+    if (voiceMode === "upload" && voiceFile) {
+      return { kind: "upload", label: voiceFile.name };
+    }
+    if (voiceMode === "entity" && voiceEntityId) {
+      const entity = entities.find(item => item.id === voiceEntityId);
+      if (entity && (entity.voice_sample_count || 0) > 0) {
+        return { kind: "entity", entity_id: entity.id, label: entity.name };
+      }
+    }
+    if (voiceMode === "utterance" && voiceVideoId && voiceUtteranceIndex != null) {
+      const video = videos.find(item => item.id === voiceVideoId);
+      return {
+        kind: "utterance",
+        video_id: voiceVideoId,
+        utterance_index: voiceUtteranceIndex,
+        label: `${video?.name || voiceVideoId} · 片段 ${voiceUtteranceIndex + 1}`,
+      };
+    }
+    return undefined;
+  }, [entities, videos, voiceEntityId, voiceFile, voiceMode, voiceUtteranceIndex, voiceVideoId]);
+  const unresolvedClarifications = clarifications.filter(item => item.kind === "voice_reference_required"
+    ? !voiceReference && !voiceClarificationChoices[item.clarification_id]
+    : !identityChoices[item.clarification_id]);
   const nextStep = execution?.executed_steps ?? 0;
   const canEdit = mode === "assist";
   const scope = selectedVideoIds.length ? selectedVideoIds : undefined;
@@ -123,7 +159,8 @@ export function PlannerLabPage({ videos, folders, capability, setNotice }: {
     setIdentityChoices({});
     try {
       const value = await api.plannerLabPlans({
-        queryText: query.trim(), queryImage: image, videoIds: scope, mode,
+        queryText: query.trim(), queryImage: image,
+        voiceReference, videoIds: scope, mode,
       });
       setPlanSet(value);
       setOriginalPlanSet(clone(value));
@@ -181,6 +218,49 @@ export function PlannerLabPage({ videos, folders, capability, setNotice }: {
     setNotice("参考图已添加，请重新生成策略；系统将使用图片人物证据。");
   };
 
+  const resetForVoiceReference = (message: string) => {
+    setPlanSet(undefined);
+    setOriginalPlanSet(undefined);
+    setVoiceClarificationChoices({});
+    setExecution(undefined);
+    setExecutionHistory([]);
+    setNotice(message);
+  };
+
+  const attachVoiceFile = (file?: File) => {
+    if (!file) return;
+    setVoiceMode("upload");
+    setVoiceFile(file);
+    setVoicePanelOpen(true);
+    resetForVoiceReference("参考声音已添加，请重新生成策略；系统只确认达到声纹阈值的片段。");
+  };
+
+  const chooseVoiceEntity = (entityId: string) => {
+    setVoiceMode("entity");
+    setVoiceEntityId(entityId);
+    if (entityId) resetForVoiceReference("已选择人物库声纹，请重新生成策略。");
+  };
+
+  const chooseVoiceVideo = async (videoId: string) => {
+    setVoiceMode("utterance");
+    setVoiceVideoId(videoId);
+    setVoiceUtteranceIndex(undefined);
+    setVoiceView(undefined);
+    if (!videoId) return;
+    setVoiceLoading(true);
+    try {
+      setVoiceView(await api.speakers(videoId));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "声音片段加载失败");
+    } finally { setVoiceLoading(false); }
+  };
+
+  const chooseVoiceUtterance = (value: string) => {
+    const index = value === "" ? undefined : Number(value);
+    setVoiceUtteranceIndex(index);
+    if (index != null) resetForVoiceReference("已选择视频声音片段，请重新生成策略。");
+  };
+
   const updateStep = (stepId: string, update: Partial<PlanStep>) => {
     if (!selectedPlan) return;
     updatePlan(selectedPlan.plan_id, plan => ({
@@ -206,7 +286,9 @@ export function PlannerLabPage({ videos, folders, capability, setNotice }: {
     setRunning(true);
     try {
       const value = await api.plannerLabExecute({
-        queryText: query.trim(), queryImage: image, videoIds: scope,
+        queryText: query.trim(), queryImage: image,
+        queryAudio: voiceMode === "upload" ? voiceFile : undefined,
+        voiceReference, videoIds: scope,
         plan, maxSteps,
       });
       if (preserveHistory && execution) setExecutionHistory(value => [...value, execution]);
@@ -287,8 +369,16 @@ export function PlannerLabPage({ videos, folders, capability, setNotice }: {
           <textarea value={query} onChange={event => setQuery(event.target.value)} placeholder="例如：找到厨师一边做菜，一边和客人讨论菜品的片段…" />
           <div className="query-canvas-footer">
             <label className={`image-attach ${image ? "attached" : ""}`}><input type="file" accept="image/*" onChange={event => setImage(event.target.files?.[0])} /><span>{image ? "✓" : "+"}</span><div><b>{image ? image.name : "添加参考图"}</b><small>{image ? "点击更换图片" : "人物、物体或视觉风格"}</small></div></label>
+            <button type="button" className={`voice-attach ${voiceReference ? "attached" : ""}`} onClick={() => setVoicePanelOpen(value => !value)}><span>{voiceReference ? "✓" : "◖"}</span><div><b>{voiceReference?.label || "添加参考声音"}</b><small>{voiceReference ? "声纹引用已确认" : "上传、人物库或视频片段"}</small></div><em>{voicePanelOpen ? "⌃" : "⌄"}</em></button>
             <button type="button" className="scope-trigger" onClick={() => setScopeOpen(value => !value)}><span>▣</span><div><b>{selectedVideoIds.length ? `${selectedVideoIds.length} 个视频` : "全部可检索视频"}</b><small>{selectedVideoIds.length ? `${selectedFolderCount} 个完整文件夹 · 共 ${ready.length} 个视频可选` : `${scopeGroups.length} 个文件夹 · ${ready.length} 个视频已就绪`}</small></div><em>{scopeOpen ? "⌃" : "⌄"}</em></button>
           </div>
+          {voicePanelOpen && <div className="voice-reference-panel">
+            <div className="voice-reference-head"><div><b>选择参考声音</b><small>只有达到绝对身份阈值的结果才会参与排序</small></div>{voiceReference && <button type="button" onClick={() => { setVoiceFile(undefined); setVoiceEntityId(""); setVoiceVideoId(""); setVoiceUtteranceIndex(undefined); setVoiceView(undefined); resetForVoiceReference("已移除参考声音。"); }}>移除</button>}</div>
+            <div className="voice-reference-tabs">{(["upload", "entity", "utterance"] as const).map(item => <button type="button" key={item} className={voiceMode === item ? "selected" : ""} onClick={() => setVoiceMode(item)}>{item === "upload" ? "上传音频" : item === "entity" ? "人物库" : "视频片段"}</button>)}</div>
+            {voiceMode === "upload" && <label className={`voice-upload ${voiceFile ? "selected" : ""}`}><input type="file" accept="audio/*,video/*" onChange={event => attachVoiceFile(event.target.files?.[0])} /><span>◖</span><div><b>{voiceFile?.name || "选择一段清晰的人声"}</b><small>支持音频或视频；执行时转为 16 kHz 单声道并提取声纹</small></div></label>}
+            {voiceMode === "entity" && <div className="voice-reference-fields"><label><span>已注册人物</span><select value={voiceEntityId} onChange={event => chooseVoiceEntity(event.target.value)}><option value="">选择含声音样本的人物</option>{voiceEntities.map(entity => <option key={entity.id} value={entity.id}>{entity.name} · {entity.voice_sample_count} 条样本</option>)}</select></label>{!voiceEntities.length && <p>人物库还没有声音样本，可先从视频说话人页面加入。</p>}</div>}
+            {voiceMode === "utterance" && <div className="voice-reference-fields"><label><span>来源视频</span><select value={voiceVideoId} onChange={event => chooseVoiceVideo(event.target.value)}><option value="">选择已建立说话人索引的视频</option>{speakerVideos.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><label><span>声音片段</span><select disabled={!voiceView || voiceLoading} value={voiceUtteranceIndex ?? ""} onChange={event => chooseVoiceUtterance(event.target.value)}><option value="">{voiceLoading ? "正在加载…" : "选择有声片段"}</option>{voiceView?.utterances.filter(item => item.searchable).map(item => <option key={item.index} value={item.index}>{clock(item.start_ms / 1000)}–{clock(item.end_ms / 1000)} · {item.text || "无文本"}</option>)}</select></label>{voiceView && voiceUtteranceIndex != null && <audio controls preload="metadata" src={voiceView.utterances.find(item => item.index === voiceUtteranceIndex)?.clip_url} />}</div>}
+          </div>}
           {scopeOpen && <div className="scope-popover">
             <div className="scope-search"><span>⌕</span><input value={scopeSearch} onChange={event => setScopeSearch(event.target.value)} placeholder="搜索文件夹或视频名称" /><button type="button" onClick={() => setSelectedVideoIds([])}>检索全部</button></div>
             <div className="scope-list scope-folder-list">{filteredScopeGroups.map(group => {
@@ -325,6 +415,18 @@ export function PlannerLabPage({ videos, folders, capability, setNotice }: {
     {planSet && !planning && <section id="strategy-section" className="strategy-section">
       <div className="strategy-heading"><div className="section-title"><span>03</span><div><h3>选择一条检索路线</h3><p>三套方案使用不同的速度、覆盖度与精度取舍</p></div></div><div className="generated-by"><span className={planSet.planner_trace.status === "ok" ? "ok" : "fallback"}>✦</span><div><b>{planSet.planner_trace.status === "ok" ? "Qwen3.5 已生成" : "已使用备用计划"}</b><small>{planSet.query_intent}</small></div></div></div>
       {!!clarifications.length && <div className="identity-clarifications">{clarifications.map(item => {
+        if (item.kind === "voice_reference_required") {
+          const skipped = voiceClarificationChoices[item.clarification_id];
+          return <article className={`identity-clarification voice ${voiceReference || skipped ? "resolved" : ""}`} key={item.clarification_id}>
+            <div className="identity-clarification-icon">◖</div>
+            <div className="identity-clarification-copy"><small>参考声音待确认</small><h4>需要可信声音引用</h4><p>{item.message}</p><em>可上传音频、选择人物库声纹，或选取视频中的一条说话片段。</em></div>
+            <div className="identity-clarification-actions">
+              <button type="button" onClick={() => { setVoicePanelOpen(true); document.querySelector(".query-canvas")?.scrollIntoView({ behavior: "smooth", block: "center" }); }}>选择参考声音并重生成</button>
+              <button type="button" className={skipped ? "selected" : ""} onClick={() => setVoiceClarificationChoices(value => ({ ...value, [item.clarification_id]: true }))}>不使用声纹继续</button>
+            </div>
+            {(voiceReference || skipped) && <strong>✓ {voiceReference ? `已选择 ${voiceReference.label}` : "已确认不使用声纹"}</strong>}
+          </article>;
+        }
         const choice = identityChoices[item.clarification_id];
         return <article className={`identity-clarification ${choice ? "resolved" : ""}`} key={item.clarification_id}>
           <div className="identity-clarification-icon">?</div>
@@ -409,7 +511,7 @@ function Output({ execution, toolMap, expandedResult, setExpandedResult, setPlay
         <div className="trace-scores"><label><span>集合重合度 <b>{Math.round(item.top_k_jaccard * 100)}%</b></span><i><em style={{ width: `${item.top_k_jaccard * 100}%` }} /></i></label><label><span>顺序稳定度 <b>{Math.round(item.rank_stability * 100)}%</b></span><i><em style={{ width: `${item.rank_stability * 100}%` }} /></i></label></div>
       </article>{index < execution.trace.length - 1 && <div className="trace-arrow">→</div>}</React.Fragment>)}</div>
     </div>
-    <div className="results-heading"><div><b>高相关片段</b><small>按融合得分排序 · 点击卡片查看证据</small></div><div className="result-legend"><span><i className="visual" />视觉</span><span><i className="asr" />语音</span><span><i className="rerank" />VLM 重排</span></div></div>
+    <div className="results-heading"><div><b>高相关片段</b><small>按融合得分排序 · 点击卡片查看证据</small></div><div className="result-legend"><span><i className="visual" />视觉</span><span><i className="asr" />ASR</span><span><i className="speaker" />声纹</span><span><i className="rerank" />VLM 重排</span></div></div>
     <div className="evidence-results">{execution.results.map((result, index) => {
       const key = `${result.video_id}-${result.start_time}`;
       const sources = Object.entries(result.planner_evidence?.source_contrib || {});

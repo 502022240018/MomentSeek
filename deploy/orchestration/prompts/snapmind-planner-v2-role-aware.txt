@@ -18,6 +18,9 @@ Planning rules:
 - Use target_id to group evidence for the same user requirement and depends_on for prerequisites.
 - A fallback step must set fallback_for to a previous primary step_id.
 - Use face.search only when a query image or a known catalog identity is available.
+- Use voice.search only when voice_reference is non-null. It is an opaque trusted slot: never invent or copy entity IDs, video IDs, utterance IDs, paths, or vectors into a plan.
+- Prefer voice.search as primary when the user explicitly asks for the same voice/speaker. For a visual action involving the referenced speaker, prefer visual as primary and voice.search as support.
+- Voice similarity is identity evidence with an absolute threshold. Do not request score normalization or treat an ambiguous voice match as confirmed support.
 - The input field matched_entity is the authoritative catalog match. When it is non-null, use face.search to cover the identity requirement; do not rely on other modalities to prove that identity.
 - Extract explicit person names from the query into identity_mentions. Each mention must include the exact name as written, a visual_fallback_query that describes the remaining visible action/scene without relying on identity, and a short rationale. Do not add occupations, roles, brands, objects, or names not literally present in the query. When matched_entity is null, never invent face evidence for a named person; the application may ask the user how to proceed.
 - Prefer ASR as primary for spoken quotations/topics and OCR as primary for visible text.

@@ -5,7 +5,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
 
+from app.api.planner_lab_routes import _voice_reference
 from app.orchestration.retrieval_orchestration import OrchestrationError
 from app.orchestration.snapmind_lab import (
     CandidatePlan,
@@ -14,6 +16,7 @@ from app.orchestration.snapmind_lab import (
     MomentNode,
     PlanStep,
     SnapMindPlannerLab,
+    VoiceReference,
 )
 
 
@@ -99,6 +102,115 @@ def test_fallback_always_returns_three_distinct_plans():
     assert [plan.plan_id for plan in plan_set.plans] == ["fast", "balanced", "deep"]
     assert len({tuple(step.tool_id for step in plan.steps) for plan in plan_set.plans}) == 3
     assert all(1 <= len(plan.steps) <= 6 for plan in plan_set.plans)
+
+
+def test_upload_voice_reference_is_deferred_during_planning_but_required_for_execution():
+    value = '{"kind":"upload","label":"reference.wav"}'
+
+    reference = _voice_reference(value, None, require_upload=False)
+
+    assert reference is not None
+    assert reference.kind == "upload"
+    with pytest.raises(HTTPException, match="upload 声音引用必须附带音频文件"):
+        _voice_reference(value, None, require_upload=True)
+
+
+def test_voice_reference_makes_voice_tool_available_and_primary():
+    orchestrator = FakeOrchestrator(modalities=["visual", "speaker"])
+    lab = SnapMindPlannerLab(orchestrator)
+
+    proposal = lab.propose(
+        "找到和这个声音相同的说话人",
+        "assist",
+        None,
+        False,
+        voice_reference=VoiceReference(kind="upload", label="reference.wav"),
+    )
+
+    assert "speaker" in proposal["available_modalities"]
+    assert proposal["voice_reference"] == {
+        "kind": "upload",
+        "label": "reference.wav",
+        "trusted_slot": True,
+    }
+    fast = next(plan for plan in proposal["plans"] if plan["plan_id"] == "fast")
+    assert fast["steps"][0]["tool_id"] == "voice.search"
+
+
+def test_voice_query_without_reference_asks_user_and_does_not_expose_tool():
+    orchestrator = FakeOrchestrator(modalities=["visual", "speaker"])
+    lab = SnapMindPlannerLab(orchestrator)
+
+    proposal = lab.propose("找到和这个声音相同的说话人", "assist", None, False)
+
+    assert "speaker" not in proposal["available_modalities"]
+    assert all(
+        step["tool_id"] != "voice.search"
+        for plan in proposal["plans"]
+        for step in plan["steps"]
+    )
+    assert proposal["clarifications"][0]["kind"] == "voice_reference_required"
+
+
+def test_voice_search_only_fuses_confirmed_absolute_threshold_hits(monkeypatch):
+    orchestrator = FakeOrchestrator(modalities=["visual", "speaker"])
+    lab = SnapMindPlannerLab(orchestrator)
+    plan = CandidatePlan(
+        plan_id="fast",
+        label="Voice",
+        description="test",
+        estimated_cost="low",
+        fusion="combsum",
+        result_limit=10,
+        steps=[_step("voice", "voice.search")],
+    )
+
+    def fake_voice_search(*_args, **_kwargs):
+        return [
+            {
+                "video_id": "video-1", "video_name": "demo.mp4",
+                "utterance_index": 2, "track_id": 1,
+                "start_ms": 10000, "end_ms": 13000,
+                "score": 0.82, "text": "confirmed", "clip_url": "/confirmed",
+            },
+            {
+                "video_id": "video-1", "video_name": "demo.mp4",
+                "utterance_index": 3, "track_id": 1,
+                "start_ms": 20000, "end_ms": 23000,
+                "score": 0.42, "text": "ambiguous", "clip_url": "/ambiguous",
+            },
+        ]
+
+    monkeypatch.setattr(
+        "app.identity.speaker_service.voice_search_vectors",
+        fake_voice_search,
+    )
+    outcome = lab.execute(
+        "找到同一个声音",
+        None,
+        plan,
+        None,
+        voice_vectors=np.ones((1, 192), dtype=np.float32),
+    )
+
+    assert outcome["count"] == 1
+    assert outcome["results"][0]["planner_evidence"]["raw_scores"]["voice.search"] == 0.82
+    assert outcome["trace"][0]["tool_trace"]["confirmed_count"] == 1
+    assert outcome["trace"][0]["tool_trace"]["ambiguous_count"] == 1
+
+
+def test_voice_plan_without_reference_fails_closed():
+    lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["speaker"]))
+    plan = CandidatePlan(
+        plan_id="fast",
+        label="Voice",
+        description="test",
+        estimated_cost="low",
+        steps=[_step("voice", "voice.search")],
+    )
+
+    with pytest.raises(OrchestrationError, match="参考声音"):
+        lab.execute("找到同一个声音", None, plan, None)
 
 
 def test_cross_modal_results_merge_into_one_auditable_moment():

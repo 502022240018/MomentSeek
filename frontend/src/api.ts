@@ -1,4 +1,5 @@
 export type IndexModality = "visual" | "face" | "asr" | "ocr";
+export type PublishedModality = IndexModality | "speaker";
 
 export type Video = {
   id: string;
@@ -8,7 +9,7 @@ export type Video = {
   width: number;
   height: number;
   status: string;
-  indexed_modalities: IndexModality[];
+  indexed_modalities: PublishedModality[];
   folder_ids: string[];
   folders: FolderRef[];
   speaker_indexed?: boolean;
@@ -174,12 +175,22 @@ export type IdentityClarification = {
   message: string; visual_fallback_query: string; rationale?: string;
   options: Array<"upload_reference" | "generic_visual" | "keep_original">;
 };
+export type VoiceReferenceInput =
+  | { kind: "upload"; label: string }
+  | { kind: "entity"; entity_id: string; label: string }
+  | { kind: "utterance"; video_id: string; utterance_index: number; label: string };
+export type VoiceReferenceClarification = {
+  clarification_id: string; kind: "voice_reference_required"; message: string;
+  options: Array<"upload_voice" | "choose_utterance" | "choose_entity" | "continue_without_voice">;
+};
+export type PlannerClarification = IdentityClarification | VoiceReferenceClarification;
 export type PlanSetResponse = {
   mode: PlannerMode; query_intent: string; constraints: string[]; negative_constraints: string[];
   available_modalities: string[]; plans: CandidatePlan[];
   matched_entity?: { id?: string; name?: string } | null;
   identity_mentions?: Array<{ name: string; visual_fallback_query: string; rationale?: string }>;
-  clarifications?: IdentityClarification[];
+  voice_reference?: { kind: string; label: string; trusted_slot: boolean } | null;
+  clarifications?: PlannerClarification[];
   planner_trace: Record<string, any>; scope: Record<string, any>;
 };
 export type PlannerExecution = {
@@ -219,6 +230,7 @@ export type SearchResponse = {
 
 export type SpeakerUtterance = {
   index: number; start_ms: number; end_ms: number; asr_chunk_index: number;
+  preview_start_ms: number; preview_end_ms: number;
   text: string; auto_track_id: number; track_id: number | null; searchable: boolean; clip_url: string;
 };
 
@@ -228,7 +240,7 @@ export type VideoSpeaker = {
 };
 
 export type SpeakerView = { video_id: string; tracks: VideoSpeaker[]; utterances: SpeakerUtterance[] };
-export type VoiceHit = { video_id: string; video_name: string; utterance_index: number; track_id: number | null; start_ms: number; end_ms: number; score: number; text: string; clip_url: string };
+export type VoiceHit = { video_id: string; video_name: string; utterance_index: number; track_id: number | null; start_ms: number; end_ms: number; preview_start_ms: number; preview_end_ms: number; score: number; text: string; clip_url: string };
 export type VideoFaceGroup = {
   group_idx: number; representative_track_idx: number; start_ms: number; end_ms: number; best_ms: number;
   representative_quality: number; duration_ms: number; occurrence_count: number; importance_score: number;
@@ -278,12 +290,15 @@ export const api = {
   orchestrationProfiles: () => json<OrchestrationProfiles>("/api/orchestration/profiles"),
   plannerLabCapabilities: () => json<PlannerLabCapabilities>("/api/planner-lab/capabilities"),
   plannerLabPlans: (params: {
-    queryText: string; queryImage?: File; videoIds?: string[]; folderIds?: string[];
+    queryText: string; queryImage?: File; queryAudio?: File;
+    voiceReference?: VoiceReferenceInput; videoIds?: string[]; folderIds?: string[];
     mode: PlannerMode; orchestrationProfile?: string;
   }) => {
     const form = new FormData();
     form.append("query_text", params.queryText);
     if (params.queryImage) form.append("query_image", params.queryImage);
+    if (params.queryAudio) form.append("query_audio", params.queryAudio);
+    if (params.voiceReference) form.append("voice_reference", JSON.stringify(params.voiceReference));
     if (params.videoIds?.length) form.append("video_ids", JSON.stringify(params.videoIds));
     if (params.folderIds?.length) form.append("folder_ids", JSON.stringify(params.folderIds));
     form.append("mode", params.mode);
@@ -291,13 +306,16 @@ export const api = {
     return json<PlanSetResponse>("/api/planner-lab/plans", { method: "POST", body: form });
   },
   plannerLabExecute: (params: {
-    queryText: string; queryImage?: File; plan: CandidatePlan;
+    queryText: string; queryImage?: File; queryAudio?: File;
+    voiceReference?: VoiceReferenceInput; plan: CandidatePlan;
     videoIds?: string[]; folderIds?: string[]; maxSteps?: number;
   }) => {
     const form = new FormData();
     form.append("query_text", params.queryText);
     form.append("plan", JSON.stringify(params.plan));
     if (params.queryImage) form.append("query_image", params.queryImage);
+    if (params.queryAudio) form.append("query_audio", params.queryAudio);
+    if (params.voiceReference) form.append("voice_reference", JSON.stringify(params.voiceReference));
     if (params.videoIds?.length) form.append("video_ids", JSON.stringify(params.videoIds));
     if (params.folderIds?.length) form.append("folder_ids", JSON.stringify(params.folderIds));
     if (params.maxSteps != null) form.append("max_steps", String(params.maxSteps));

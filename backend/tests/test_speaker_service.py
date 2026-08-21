@@ -1,24 +1,91 @@
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, Mock
-import re
 
 import numpy as np
 import pytest
 from fastapi import HTTPException
 from app.api import speaker_routes
 from app.catalog.db import Catalog
+from app.platform import context
 from app.identity.speaker_service import (
     SpeakerMilvusCoverageError,
     _attach_voice_hit_texts,
     _load_speaker_data,
     _speaker_data_from_milvus,
+    _speaker_preview_bounds_ms,
     _texts_from_milvus,
     _voice_search_vectors_milvus,
+    encode_voice_reference_file,
     speaker_utterance_embedding,
     video_speakers,
     voice_search,
     voice_search_vectors,
 )
-from app.platform import context
+
+
+def test_speaker_preview_expands_short_evidence_without_changing_evidence_bounds():
+    assert _speaker_preview_bounds_ms(1000, 1500, duration_seconds=10.0) == (0, 4000)
+    assert _speaker_preview_bounds_ms(9000, 9500, duration_seconds=10.0) == (6000, 10000)
+
+
+def test_uploaded_voice_reference_is_normalized_and_cleans_temporary_wav(tmp_path):
+    source = tmp_path / "reference.webm"
+    source.write_bytes(b"media")
+    settings = SimpleNamespace(
+        app_model_dir=Path("/models"),
+        speaker_model_repo="speaker-repo",
+        speaker_model_cache_dir="speaker-cache",
+        speaker_device="cpu",
+        resolve_path=lambda value: value,
+    )
+    encoded = np.zeros((1, 192), dtype=np.float32)
+    encoded[0, :2] = [3.0, 4.0]
+
+    with (
+        patch("app.identity.speaker_service.subprocess.run") as ffmpeg,
+        patch(
+            "app.indexing.modalities.speaker.speaker.encode_voice_query",
+            return_value=encoded,
+        ) as encode,
+    ):
+        ffmpeg.return_value = SimpleNamespace(returncode=0, stderr="")
+        result = encode_voice_reference_file(settings, source)
+
+    assert np.allclose(result[0, :2], [0.6, 0.8])
+    assert not source.with_suffix(".voice.wav").exists()
+    assert "-ar" in ffmpeg.call_args.args[0]
+    assert "16000" in ffmpeg.call_args.args[0]
+    encode.assert_called_once()
+
+
+def test_uploaded_voice_reference_cleans_temporary_wav_when_encoding_fails(tmp_path):
+    source = tmp_path / "reference.mp4"
+    source.write_bytes(b"media")
+    wav_path = source.with_suffix(".voice.wav")
+    wav_path.write_bytes(b"temporary")
+    settings = SimpleNamespace(
+        app_model_dir=Path("/models"),
+        speaker_model_repo="speaker-repo",
+        speaker_model_cache_dir="speaker-cache",
+        speaker_device="cpu",
+        resolve_path=lambda value: value,
+    )
+
+    with (
+        patch(
+            "app.identity.speaker_service.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stderr=""),
+        ),
+        patch(
+            "app.indexing.modalities.speaker.speaker.encode_voice_query",
+            side_effect=RuntimeError("encoder failed"),
+        ),
+        pytest.raises(RuntimeError, match="encoder failed"),
+    ):
+        encode_voice_reference_file(settings, source)
+
+    assert not wav_path.exists()
 
 
 def _make_speaker_data(vectors: np.ndarray) -> dict:
@@ -174,65 +241,24 @@ def test_voice_search_matches_individual_utterances(tmp_path):
     mock_collection = Mock()
     mock_client.collection_for.return_value = mock_collection
 
-    # Mock search() to return per-video results
-    # When querying video "a", return 2 hits (both utterances from video "a")
-    # When querying video "b", return 1 hit (best match from video "b")
     def mock_search_side_effect(data, anns_field, param, limit, expr, output_fields, timeout=None):
-        # Extract video_id from expr using regex for robustness
-        match = re.search(r'video_id\s*==\s*["\']([^"\']+)["\']', expr)
-        if not match:
-            return [[]]  # Return empty if expr format unexpected
-
-        video_id = match.group(1)
-
-        if video_id == "a":
-            # Video "a" has 2 utterances
-            mock_hit_a0 = Mock()
-            mock_hit_a0.distance = 1.0  # Perfect self-match
-            mock_hit_a0.entity = Mock()
-            mock_hit_a0.entity.get = lambda field, default=None: {
-                "utterance_idx": 0,
-                "start_ms": 0,
-                "end_ms": 1000,
-                "track_id": 0,
-                "asr_chunk_idx": 0,
-                "embedding": [1.0, 0.0],
-                "_distance": 1.0,
-            }.get(field, default)
-
-            mock_hit_a1 = Mock()
-            mock_hit_a1.distance = 0.0  # Low similarity to second utterance
-            mock_hit_a1.entity = Mock()
-            mock_hit_a1.entity.get = lambda field, default=None: {
-                "utterance_idx": 1,
-                "start_ms": 2000,
-                "end_ms": 3000,
-                "track_id": 1,
-                "asr_chunk_idx": 1,
-                "embedding": [0.0, 1.0],
-                "_distance": 0.0,
-            }.get(field, default)
-
-            return [[mock_hit_a0, mock_hit_a1]]
-
-        elif video_id == "b":
-            # Video "b" has 2 utterances, return best match
-            mock_hit_b = Mock()
-            mock_hit_b.distance = 0.99  # High match to video "a"'s query
-            mock_hit_b.entity = Mock()
-            mock_hit_b.entity.get = lambda field, default=None: {
-                "utterance_idx": 0,
-                "start_ms": 0,
-                "end_ms": 1000,
-                "track_id": 0,
-                "asr_chunk_idx": 0,
-                "embedding": [0.99, 0.01],
-                "_distance": 0.99,
-            }.get(field, default)
-
-            return [[mock_hit_b]]
-
-        return [[]]
+        assert 'video_id == "a"' in expr and 'video_id == "b"' in expr
+        hits = []
+        for video_id, utterance_idx, distance in (("a", 0, 1.0), ("a", 1, 0.0), ("b", 0, 0.99)):
+            hit = Mock()
+            hit.distance = distance
+            hit.entity = Mock()
+            hit.entity.get = lambda field, default=None, values={
+                "video_id": video_id,
+                "asset_version": "7",
+                "utterance_idx": utterance_idx,
+                "start_ms": utterance_idx * 2000,
+                "end_ms": utterance_idx * 2000 + 1000,
+                "track_id": utterance_idx,
+                "asr_chunk_idx": utterance_idx,
+            }: values.get(field, default)
+            hits.append(hit)
+        return [hits for _ in data]
 
     mock_collection.search.side_effect = mock_search_side_effect
 
@@ -256,6 +282,9 @@ def test_voice_search_matches_individual_utterances(tmp_path):
     assert hits[0]["score"] == pytest.approx(0.99)
     assert {hit["video_id"] for hit in hits[:2]} == {"a", "b"}
     assert all("text" in hit and "clip_url" in hit for hit in hits)
+    mock_collection.search.assert_called_once()
+    expression = mock_collection.search.call_args.kwargs["expr"]
+    assert 'video_id == "a"' in expression and 'video_id == "b"' in expression
 
 
 def test_voice_search_skips_videos_without_published_speaker(tmp_path):
@@ -293,28 +322,24 @@ def test_voice_search_skips_videos_without_published_speaker(tmp_path):
     mock_client.collection_for.return_value = mock_collection
 
     def mock_search_side_effect(data, anns_field, param, limit, expr, output_fields, timeout=None):
-        match = re.search(r'video_id\s*==\s*["\']([^"\']+)["\']', expr)
-        video_id = match.group(1) if match else ""
-        if video_id == "a":
+        assert 'video_id == "a"' in expr and 'video_id == "b"' in expr
+        assert 'video_id == "c"' not in expr
+        hits = []
+        for video_id, distance in (("a", 1.0), ("b", 0.8)):
             hit = Mock()
-            hit.distance = 1.0
+            hit.distance = distance
             hit.entity = Mock()
-            hit.entity.get = lambda field, default=None: {
-                "utterance_idx": 0, "start_ms": 0, "end_ms": 1000,
-                "track_id": 0, "asr_chunk_idx": 0, "_distance": 1.0,
-            }.get(field, default)
-            return [[hit]]
-        if video_id == "b":
-            hit = Mock()
-            hit.distance = 0.8
-            hit.entity = Mock()
-            hit.entity.get = lambda field, default=None: {
-                "utterance_idx": 0, "start_ms": 0, "end_ms": 1000,
-                "track_id": 0, "asr_chunk_idx": 0, "_distance": 0.8,
-            }.get(field, default)
-            return [[hit]]
-        # Video "c" must never reach Milvus search — it is skipped upstream.
-        raise AssertionError(f"search must not be called for skipped video {video_id!r}")
+            hit.entity.get = lambda field, default=None, values={
+                "video_id": video_id,
+                "asset_version": "7",
+                "utterance_idx": 0,
+                "start_ms": 0,
+                "end_ms": 1000,
+                "track_id": 0,
+                "asr_chunk_idx": 0,
+            }: values.get(field, default)
+            hits.append(hit)
+        return [hits for _ in data]
 
     mock_collection.search.side_effect = mock_search_side_effect
 
@@ -333,6 +358,7 @@ def test_voice_search_skips_videos_without_published_speaker(tmp_path):
     returned_videos = {hit["video_id"] for hit in hits}
     assert "c" not in returned_videos          # skipped, contributed nothing
     assert returned_videos == {"b"}            # "a"/utt0 is the excluded query source
+    mock_collection.search.assert_called_once()
 
 
 def test_speaker_utterance_embedding_uses_primary_loader():
@@ -570,9 +596,9 @@ def test_voice_search_returns_only_milvus_results(tmp_path):
     }
 
     with (
-        patch(
-            "app.identity.speaker_service._voice_search_vectors_milvus",
-            return_value=([milvus_hit], {"a"}),
+            patch(
+                "app.identity.speaker_service._voice_search_vectors_milvus",
+                return_value=[milvus_hit],
         ),
     ):
         hits = voice_search_vectors(
@@ -588,7 +614,7 @@ def test_voice_search_returns_only_milvus_results(tmp_path):
 def test_voice_search_explicit_empty_scope_does_not_connect_to_milvus(tmp_path):
     catalog = Catalog(tmp_path / "catalog.sqlite3")
 
-    hits, covered = _voice_search_vectors_milvus(
+    hits = _voice_search_vectors_milvus(
         catalog,
         queries=np.asarray([[1.0] + [0.0] * 191], dtype=np.float32),
         video_ids=[],
@@ -597,7 +623,6 @@ def test_voice_search_explicit_empty_scope_does_not_connect_to_milvus(tmp_path):
     )
 
     assert hits == []
-    assert covered == set()
 
 
 def test_voice_hit_texts_reads_asr_once_per_video():

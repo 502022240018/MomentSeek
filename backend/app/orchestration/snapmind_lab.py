@@ -12,7 +12,6 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.orchestration.retrieval_orchestration import (
-    ALLOWED_MODALITIES,
     OrchestrationError,
     RerankPlan,
     RetrievalPlan,
@@ -27,6 +26,7 @@ FusionMethod = Literal["rrf", "combsum", "combmnz"]
 Operation = Literal["search", "rerank", "filter"]
 EvidenceRole = Literal["primary", "support", "constraint", "verifier", "fallback"]
 FailurePolicy = Literal["skip", "rollback", "fallback", "abort"]
+VoiceReferenceKind = Literal["upload", "utterance", "entity"]
 
 
 class StepQualityGate(BaseModel):
@@ -136,6 +136,38 @@ class PlannerLabScope(BaseModel):
         return normalized or None
 
 
+class VoiceReference(BaseModel):
+    """Opaque user-selected reference; plans never own these identifiers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: VoiceReferenceKind
+    entity_id: str | None = None
+    video_id: str | None = None
+    utterance_index: int | None = Field(default=None, ge=0)
+    label: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def validate_reference(self):
+        if self.kind == "entity" and not (self.entity_id or "").strip():
+            raise ValueError("entity 声音引用必须提供 entity_id")
+        if self.kind == "utterance" and (
+            not (self.video_id or "").strip() or self.utterance_index is None
+        ):
+            raise ValueError("utterance 声音引用必须提供 video_id 和 utterance_index")
+        if self.kind == "upload" and any(
+            value is not None for value in (self.entity_id, self.video_id, self.utterance_index)
+        ):
+            raise ValueError("upload 声音引用不能携带实体或片段标识")
+        return self
+
+    def planner_summary(self) -> dict[str, Any]:
+        # Identifiers deliberately stay outside the LLM context.  The model
+        # may choose voice.search, but only the deterministic executor can
+        # resolve the trusted slot selected by the user.
+        return {"kind": self.kind, "label": self.label, "trusted_slot": True}
+
+
 @dataclass(frozen=True)
 class Capability:
     tool_id: str
@@ -188,6 +220,11 @@ CAPABILITIES: tuple[Capability, ...] = (
         "ocr.search", "OCR 词法与语义检索", "ocr", ("search", "rerank"),
         (0.0, 1.0), "per_step_minmax", 80, 0.75, "low", "low",
         "screen_text_segment", "搜索字幕、招牌、Logo、幻灯片和画面文字。",
+    ),
+    Capability(
+        "voice.search", "声纹相似说话人检索", "speaker", ("search",),
+        (-1.0, 1.0), "absolute_cosine", 80, 1.0, "low", "medium",
+        "speaker_utterance", "使用用户明确选择的参考声音搜索同一说话人的片段。",
     ),
     Capability(
         "confidence.filter", "置信度与共识过滤", "aggregate", ("filter",),
@@ -243,22 +280,36 @@ class HeuristicPlanGenerator:
     ASR_TERMS = ("说", "提到", "谈到", "讲话", "台词", "语音", "听到", "讨论", "asr")
     TEMPORAL_TERMS = ("先", "随后", "然后", "之后", "之前", "同时", "直到", "before", "after", "then")
     FACE_TERMS = ("这个人", "同一个人", "人物", "人脸", "face")
+    VOICE_TERMS = (
+        "这个声音", "同一个声音", "相同声音", "声纹", "说话人", "谁在说",
+        "他说", "她说", "voice", "speaker",
+    )
 
     def generate(
         self,
         query: str,
         available_modalities: list[str],
         has_query_image: bool,
+        has_voice_reference: bool = False,
     ) -> PlanSet:
         available = set(available_modalities)
         wants_ocr = _contains_any(query, self.OCR_TERMS)
         wants_asr = _contains_any(query, self.ASR_TERMS)
         wants_face = has_query_image and _contains_any(query, self.FACE_TERMS)
+        wants_voice = has_voice_reference and _contains_any(query, self.VOICE_TERMS)
         temporal = _contains_any(query, self.TEMPORAL_TERMS)
-        preferred = "face" if wants_face else "ocr" if wants_ocr else "asr" if wants_asr else "visual"
+        preferred = (
+            "voice" if wants_voice else "face" if wants_face else "ocr"
+            if wants_ocr else "asr" if wants_asr else "visual"
+        )
+        if preferred == "voice":
+            preferred = "speaker"
         primary_modality = preferred if preferred in available else next(iter(sorted(available)), "visual")
-        primary = f"{primary_modality}.search"
-        searchable = [name for name in (primary_modality, "visual", "asr", "ocr") if name in available]
+        primary = "voice.search" if primary_modality == "speaker" else f"{primary_modality}.search"
+        searchable = [
+            name for name in (primary_modality, "speaker", "visual", "asr", "ocr")
+            if name in available
+        ]
         searchable = list(dict.fromkeys(searchable))
 
         fast = CandidatePlan(
@@ -273,9 +324,11 @@ class HeuristicPlanGenerator:
             result_limit=24, early_stop_threshold=0.9,
             steps=[
                 _make_step(
-                    f"s{index + 1}", f"{modality}.search", query,
-                    {"visual": 1.0, "face": 1.0, "asr": 0.85, "ocr": 0.7}[modality],
-                    {"visual": 100, "face": 80, "asr": 90, "ocr": 70}[modality],
+                    f"s{index + 1}",
+                    "voice.search" if modality == "speaker" else f"{modality}.search",
+                    query,
+                    {"visual": 1.0, "face": 1.0, "speaker": 1.0, "asr": 0.85, "ocr": 0.7}[modality],
+                    {"visual": 100, "face": 80, "speaker": 80, "asr": 90, "ocr": 70}[modality],
                     "补充独立模态证据并更新融合排名。",
                     role="primary" if index == 0 else "support",
                     depends_on=[] if index == 0 else ["s1"],
@@ -285,9 +338,11 @@ class HeuristicPlanGenerator:
         )
         deep_steps = [
             _make_step(
-                f"s{index + 1}", f"{modality}.search", query,
-                {"visual": 1.1, "face": 1.1, "asr": 0.9, "ocr": 0.75}[modality],
-                {"visual": 140, "face": 100, "asr": 120, "ocr": 100}[modality],
+                f"s{index + 1}",
+                "voice.search" if modality == "speaker" else f"{modality}.search",
+                query,
+                {"visual": 1.1, "face": 1.1, "speaker": 1.1, "asr": 0.9, "ocr": 0.75}[modality],
+                {"visual": 140, "face": 100, "speaker": 100, "asr": 120, "ocr": 100}[modality],
                 "扩大召回并积累可审计的跨模态证据。",
                 role="primary" if index == 0 else "support",
                 depends_on=[] if index == 0 else ["s1"],
@@ -430,8 +485,41 @@ class SnapMindPlannerLab:
             },
         }
 
-    def _available_modalities(self, video_ids: list[str] | None, has_query_image: bool) -> list[str]:
-        values = self.orchestrator._available_modalities(video_ids)
+    def _available_modalities(
+        self,
+        video_ids: list[str] | None,
+        has_query_image: bool,
+        has_voice_reference: bool = False,
+    ) -> list[str]:
+        raw_values = list(self.orchestrator._available_modalities(video_ids))
+        values = [
+            value for value in raw_values
+            if value != "speaker"
+        ]
+        if (
+            has_voice_reference
+            and getattr(self.settings, "planner_voice_search_enabled", True)
+        ):
+            scoped_ids = video_ids
+            has_ready_speaker = "speaker" in raw_values
+            if scoped_ids is None and not has_ready_speaker:
+                has_ready_speaker = any(
+                    (
+                        video.get("index_publications", {}).get("speaker", {}).get("status")
+                        == "ready"
+                    )
+                    for video in self.catalog.list_videos()
+                )
+            elif scoped_ids is not None and not has_ready_speaker:
+                has_ready_speaker = any(
+                    (
+                        publication := self.catalog.get_modality_publication(video_id, "speaker")
+                    )
+                    and publication.get("status") == "ready"
+                    for video_id in scoped_ids
+                )
+            if has_ready_speaker:
+                values = [*values, "speaker"]
         if not has_query_image:
             # Text can still resolve a registered face entity, so face remains
             # available when the catalog knows the name. The prompt is told not
@@ -454,6 +542,11 @@ class SnapMindPlannerLab:
 
     @staticmethod
     def _identity_primary_modality(residual_query: str, available: set[str]) -> str:
+        if "speaker" in available and _contains_any(
+            residual_query,
+            HeuristicPlanGenerator.VOICE_TERMS,
+        ):
+            return "speaker"
         if "asr" in available and _contains_any(residual_query, HeuristicPlanGenerator.ASR_TERMS):
             return "asr"
         if "ocr" in available and _contains_any(residual_query, HeuristicPlanGenerator.OCR_TERMS):
@@ -471,9 +564,12 @@ class SnapMindPlannerLab:
     ) -> list[PlanStep]:
         primary_modality = self._identity_primary_modality(residual_query, available)
         primary_top_k = {"fast": 100, "balanced": 150, "deep": 300}[plan_id]
+        primary_tool = (
+            "voice.search" if primary_modality == "speaker" else f"{primary_modality}.search"
+        )
         primary = _make_step(
             "identity-primary",
-            f"{primary_modality}.search",
+            primary_tool,
             residual_query,
             1.0,
             primary_top_k,
@@ -523,6 +619,7 @@ class SnapMindPlannerLab:
         has_query_image: bool,
         query: str,
         matched_entity: dict[str, Any] | None = None,
+        has_voice_reference: bool = False,
     ) -> PlanSet:
         available = set(available_modalities)
         entity_name = str((matched_entity or {}).get("name") or "").strip()
@@ -546,7 +643,9 @@ class SnapMindPlannerLab:
                     continue
                 if step.tool_id == "vlm.rerank" and not self.settings.orchestration_enabled:
                     continue
-                if capability.modality in ALLOWED_MODALITIES and capability.modality not in available:
+                if capability.modality != "aggregate" and capability.modality not in available:
+                    continue
+                if step.tool_id == "voice.search" and not has_voice_reference:
                     continue
                 if capability.modality == "face" and not has_query_image:
                     if not matched_entity:
@@ -606,7 +705,12 @@ class SnapMindPlannerLab:
                     "deep": "扩大主召回，并对更多身份候选做多帧语义复核。",
                 }[plan.plan_id]
             if not accepted:
-                fallback = self.fallback_generator.generate(query, available_modalities, has_query_image)
+                fallback = self.fallback_generator.generate(
+                    query,
+                    available_modalities,
+                    has_query_image,
+                    has_voice_reference,
+                )
                 replacement = next(item for item in fallback.plans if item.plan_id == plan.plan_id)
                 accepted = replacement.steps
             if matched_entity and "face" in available and not any(
@@ -687,6 +791,24 @@ class SnapMindPlannerLab:
             })
         return clarifications
 
+    def _voice_clarifications(
+        self,
+        query: str,
+        has_voice_reference: bool,
+    ) -> list[dict[str, Any]]:
+        if (
+            has_voice_reference
+            or not getattr(self.settings, "planner_voice_search_enabled", True)
+            or not _contains_any(query, HeuristicPlanGenerator.VOICE_TERMS)
+        ):
+            return []
+        return [{
+            "clarification_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"voice:{query}")),
+            "kind": "voice_reference_required",
+            "message": "这条查询需要先指定参考声音，系统不会根据文字猜测说话人声纹。",
+            "options": ["upload_voice", "choose_utterance", "choose_entity", "continue_without_voice"],
+        }]
+
     @staticmethod
     def _normalize_llm_payload(payload: dict[str, Any]) -> dict[str, Any]:
         """Repair model-owned identifiers before strict semantic validation.
@@ -732,13 +854,24 @@ class SnapMindPlannerLab:
         video_ids: list[str] | None,
         has_query_image: bool,
         profile_name: str | None = None,
+        voice_reference: VoiceReference | None = None,
     ) -> dict[str, Any]:
-        available = self._available_modalities(video_ids, has_query_image)
+        has_voice_reference = voice_reference is not None
+        available = self._available_modalities(
+            video_ids,
+            has_query_image,
+            has_voice_reference,
+        )
         if not available:
             raise OrchestrationError("所选范围没有可用的检索索引")
         matched_entity = self.catalog.find_entity_in_text(query) if not has_query_image else None
         public_entity = self._public_entity(matched_entity)
-        fallback = self.fallback_generator.generate(query, available, has_query_image)
+        fallback = self.fallback_generator.generate(
+            query,
+            available,
+            has_query_image,
+            has_voice_reference,
+        )
         if self.settings.orchestration_enabled:
             deep = next(item for item in fallback.plans if item.plan_id == "deep")
             deep.steps = [step for step in deep.steps if step.tool_id != "confidence.filter"]
@@ -786,10 +919,16 @@ class SnapMindPlannerLab:
                     "mode": mode,
                     "available_modalities": available,
                     "has_query_image": has_query_image,
+                    "voice_reference": (
+                        voice_reference.planner_summary() if voice_reference else None
+                    ),
                     "matched_entity": public_entity,
                     "capability_registry": [
                         item.as_dict() for item in CAPABILITIES
-                        if item.tool_id != "vlm.rerank" or self.settings.orchestration_enabled
+                        if (
+                            (item.tool_id != "vlm.rerank" or self.settings.orchestration_enabled)
+                            and (item.modality == "aggregate" or item.modality in available)
+                        )
                     ],
                 }
                 response, elapsed = provider.chat(
@@ -820,6 +959,7 @@ class SnapMindPlannerLab:
                     has_query_image,
                     query,
                     matched_entity,
+                    has_voice_reference,
                 )
                 trace = {
                     "status": "ok",
@@ -842,17 +982,24 @@ class SnapMindPlannerLab:
             has_query_image,
             query,
             matched_entity,
+            has_voice_reference,
         )
-        clarifications = self._identity_clarifications(
-            query,
-            plan_set,
-            matched_entity,
-            has_query_image,
-        )
+        clarifications = [
+            *self._identity_clarifications(
+                query,
+                plan_set,
+                matched_entity,
+                has_query_image,
+            ),
+            *self._voice_clarifications(query, has_voice_reference),
+        ]
         return {
             "mode": mode,
             "available_modalities": available,
             "matched_entity": public_entity,
+            "voice_reference": (
+                voice_reference.planner_summary() if voice_reference else None
+            ),
             "clarifications": clarifications,
             "planner_trace": trace,
             **plan_set.model_dump(),
@@ -968,7 +1115,12 @@ class SnapMindPlannerLab:
             return float(item.get("score", 0.0))
 
         scores = [score_for_role(item) for item in results]
-        normalized = _minmax(scores)
+        capability = CAPABILITY_BY_ID[step.tool_id]
+        normalized = (
+            [min(1.0, max(0.0, (score + 1.0) / 2.0)) for score in scores]
+            if capability.calibration == "absolute_cosine"
+            else _minmax(scores)
+        )
         matched_count = 0
         new_count = 0
         unmatched_count = 0
@@ -1067,6 +1219,109 @@ class SnapMindPlannerLab:
             list(step.parameters.get("visual_subqueries", [])),
         )
         return [dict(item) for item in results]
+
+    def _voice_search_step(
+        self,
+        voice_vectors: np.ndarray | None,
+        step: PlanStep,
+        video_ids: list[str] | None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Adapt Speaker Milvus hits into the standard Planner moment contract."""
+        if voice_vectors is None:
+            raise OrchestrationError("voice.search 缺少用户确认的参考声音")
+        from app.identity.speaker_service import voice_search_vectors
+
+        confirmed_threshold = min(
+            1.0,
+            max(-1.0, float(getattr(self.settings, "speaker_identity_threshold", 0.50))),
+        )
+        ambiguous_threshold = min(
+            confirmed_threshold,
+            max(
+                -1.0,
+                float(getattr(self.settings, "planner_voice_ambiguous_threshold", 0.35)),
+            ),
+        )
+        hits = voice_search_vectors(
+            self.catalog,
+            query_vectors=voice_vectors,
+            video_ids=video_ids,
+            limit=step.top_k,
+        )
+        confirmed: list[dict[str, Any]] = []
+        ambiguous: list[dict[str, Any]] = []
+        rejected_count = 0
+        for hit in hits:
+            score = float(hit.get("score", float("nan")))
+            start_ms = int(hit.get("start_ms", -1))
+            end_ms = int(hit.get("end_ms", -1))
+            if not math.isfinite(score) or start_ms < 0 or end_ms <= start_ms:
+                rejected_count += 1
+                continue
+            diagnostic = {
+                "video_id": str(hit.get("video_id") or ""),
+                "utterance_index": int(hit.get("utterance_index", -1)),
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "score": round(score, 6),
+                "text": str(hit.get("text") or ""),
+            }
+            if score < confirmed_threshold:
+                if score >= ambiguous_threshold:
+                    ambiguous.append(diagnostic)
+                else:
+                    rejected_count += 1
+                continue
+            video_id = diagnostic["video_id"]
+            start_time = start_ms / 1000.0
+            end_time = end_ms / 1000.0
+            preview_start_time = int(hit.get("preview_start_ms", start_ms)) / 1000.0
+            preview_end_time = int(hit.get("preview_end_ms", end_ms)) / 1000.0
+            text = diagnostic["text"]
+            confirmed.append({
+                "video_id": video_id,
+                "video_name": str(hit.get("video_name") or video_id),
+                "start_time": start_time,
+                "end_time": end_time,
+                "original_start_time": start_time,
+                "original_end_time": end_time,
+                "preview_start_time": preview_start_time,
+                "preview_end_time": preview_end_time,
+                "score": score,
+                "modalities": ["speaker"],
+                "media_url": f"/api/videos/{video_id}/media",
+                "thumbnail_url": (
+                    f"/api/videos/{video_id}/frame?time={(start_time + end_time) / 2:.3f}"
+                ),
+                "clip_url": str(hit.get("clip_url") or ""),
+                "above_threshold": True,
+                "voice_match_status": "confirmed",
+                "utterance_index": diagnostic["utterance_index"],
+                "track_id": hit.get("track_id"),
+                "evidence": [{
+                    "modality": "speaker",
+                    "score": score,
+                    "detail": "参考声音与该说话片段达到同一说话人阈值",
+                    "text": text,
+                    "best_time": (start_time + end_time) / 2,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "identity_status": "confirmed",
+                }],
+            })
+        return confirmed, {
+            "status": "ok",
+            "strategy": "trusted_reference_speaker_ann",
+            "raw_hit_count": len(hits),
+            "confirmed_count": len(confirmed),
+            "ambiguous_count": len(ambiguous),
+            "rejected_count": rejected_count,
+            "thresholds": {
+                "confirmed": confirmed_threshold,
+                "ambiguous": ambiguous_threshold,
+            },
+            "ambiguous_matches": ambiguous[:20],
+        }
 
     def _face_support_step(
         self,
@@ -1571,8 +1826,14 @@ class SnapMindPlannerLab:
         plan: CandidatePlan,
         video_ids: list[str] | None,
         max_steps: int | None = None,
+        voice_vectors: np.ndarray | None = None,
     ) -> dict[str, Any]:
         self._validate_plan(plan)
+        if any(step.enabled and step.tool_id == "voice.search" for step in plan.steps):
+            if not getattr(self.settings, "planner_voice_search_enabled", True):
+                raise OrchestrationError("Planner 声纹工具未启用")
+            if voice_vectors is None:
+                raise OrchestrationError("计划需要参考声音，请先上传或选择声音引用")
         execution_id = uuid.uuid4().hex
         started = time.perf_counter()
         nodes: list[MomentNode] = []
@@ -1630,7 +1891,13 @@ class SnapMindPlannerLab:
                         )
                         nodes = sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)
                     else:
-                        if step.tool_id == "face.search" and effective_role == "support" and nodes:
+                        if step.tool_id == "voice.search":
+                            raw_results, tool_trace = self._voice_search_step(
+                                voice_vectors,
+                                step,
+                                video_ids,
+                            )
+                        elif step.tool_id == "face.search" and effective_role == "support" and nodes:
                             raw_results, tool_trace = self._face_support_step(
                                 query, image_path, nodes, step
                             )
