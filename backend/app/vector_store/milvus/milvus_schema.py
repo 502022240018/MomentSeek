@@ -94,6 +94,14 @@ def face_pk(video_id: str, asset_ver: str, track_idx: int, model_ver: str = MODE
     return make_pk(video_id, asset_ver, model_ver, "face", f"t{track_idx:08d}")
 
 
+def face_group_pk(video_id: str, asset_ver: str, group_idx: int, model_ver: str = MODEL_VERSIONS["face"]) -> str:
+    return make_pk(video_id, asset_ver, model_ver, "face_group", f"g{group_idx:08d}")
+
+
+def entity_face_sample_pk(entity_id: str, sample_id: str) -> str:
+    return "#".join(part.replace("#", "_") for part in ("entity_face", entity_id, sample_id))
+
+
 def speaker_pk(video_id: str, asset_ver: str, utterance_idx: int, model_ver: str = MODEL_VERSIONS["speaker"]) -> str:
     return make_pk(video_id, asset_ver, model_ver, "speaker", f"u{utterance_idx:08d}")
 
@@ -262,6 +270,40 @@ def create_face_schema() -> CollectionSchema:
         FieldSchema("embedding",    DataType.FLOAT_VECTOR, dim=EMBEDDING_DIMS["face"]),
     ]
     return CollectionSchema(fields, description="Face track embeddings (InsightFace)")
+
+
+def create_face_group_schema() -> CollectionSchema:
+    fields = _common_fields() + [
+        FieldSchema("group_idx", DataType.INT64),
+        FieldSchema("representative_track_idx", DataType.INT64),
+        FieldSchema("start_ms", DataType.INT64),
+        FieldSchema("end_ms", DataType.INT64),
+        FieldSchema("best_ms", DataType.INT64),
+        FieldSchema("bbox_x1", DataType.FLOAT, default_value=-1.0),
+        FieldSchema("bbox_y1", DataType.FLOAT, default_value=-1.0),
+        FieldSchema("bbox_x2", DataType.FLOAT, default_value=-1.0),
+        FieldSchema("bbox_y2", DataType.FLOAT, default_value=-1.0),
+        FieldSchema("representative_quality", DataType.FLOAT, default_value=0.0),
+        FieldSchema("duration_ms", DataType.INT64, default_value=0),
+        FieldSchema("occurrence_count", DataType.INT64, default_value=0),
+        FieldSchema("importance_score", DataType.FLOAT, default_value=0.0),
+        FieldSchema("embedding", DataType.FLOAT_VECTOR, dim=EMBEDDING_DIMS["face"]),
+    ]
+    return CollectionSchema(fields, description="Per-video face identity groups")
+
+
+def create_entity_face_sample_schema() -> CollectionSchema:
+    fields = [
+        FieldSchema("pk", DataType.VARCHAR, max_length=_PK_LEN, is_primary=True),
+        FieldSchema("entity_id", DataType.VARCHAR, max_length=_VID_LEN),
+        FieldSchema("sample_id", DataType.VARCHAR, max_length=_VID_LEN),
+        FieldSchema("source_video_id", DataType.VARCHAR, max_length=_VID_LEN),
+        FieldSchema("source_asset_version", DataType.VARCHAR, max_length=_VER_LEN),
+        FieldSchema("source_group_idx", DataType.INT64),
+        FieldSchema("quality", DataType.FLOAT, default_value=0.0),
+        FieldSchema("embedding", DataType.FLOAT_VECTOR, dim=EMBEDDING_DIMS["face"]),
+    ]
+    return CollectionSchema(fields, description="Face samples attached to named entities")
 
 
 def create_speaker_schema() -> CollectionSchema:

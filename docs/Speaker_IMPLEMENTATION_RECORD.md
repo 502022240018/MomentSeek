@@ -145,7 +145,7 @@ SPEAKER_RECALL_MULTIPLIER=1
 - **随 4.1 删除**:`milvus_speaker_candidates` 中 `raw_emb is None` 双分支、`normalize`+`np.dot` 重算块、`limit*2` 扩召回。
 - **更新过时注释**:`_ann_search` 原 "DiskANN ... not supported" 注释改为准确的三分支描述。
 - **HNSW 分支 + `_HNSW_EF`**:speaker→DISKANN、face=IVF_FLAT、visual HNSW 在独立 v2 函数后,`_ann_search` 已无模态命中 HNSW 分支。**保守保留 + 加注**("当前无模态使用,保留以备将来"),避免过度删改。
-- **保留**(勿删):`save_speaker_index` + `SpeakerMilvusIndexer.upsert_from_npz` 离线恢复路径(对齐 OCR/ASR);不动索引构建链路。
+- **平台级收口**：已删除 `save_speaker_index` 与 `SpeakerMilvusIndexer.upsert_from_npz`。Speaker builder 只读取已发布的 ASR Milvus 版本并内存直写 Speaker Milvus；历史 NPZ 仅为冷备，不参与运行或恢复逻辑。
 
 ---
 
@@ -167,7 +167,7 @@ Speaker 查询是声纹向量,无文本、无词面语义,BM25 无意义。
 `backend/scripts/migrate_speaker_diskann_index.py` 是正式环境的一次性迁移命令。
 它会先检查索引类型；只有旧 HNSW（或缺索引）时，才 release collection、替换
 `embedding` 索引为 DiskANN、重新 load 并核验类型和行数。schema 与行数据均不变，
-因此不删除 collection、不改 manifest 指针、也不需重新嵌入 Speaker 向量。
+因此不删除 collection、不改 Catalog publication 指针、也不需重新嵌入 Speaker 向量。
 
 执行时必须显式传入：
 ```bash

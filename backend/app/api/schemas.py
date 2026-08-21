@@ -240,6 +240,26 @@ class VoiceSampleRequest(BaseModel):
     bind_track_id: int | None = Field(default=None, ge=0)
 
 
+class FaceGroupLibraryRequest(BaseModel):
+    asset_version: str
+    group_version: str
+    entity_id: str | None = None
+    new_entity_name: str | None = None
+
+    @field_validator("asset_version", "group_version")
+    @classmethod
+    def validate_asset_version(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("版本不能为空")
+        return value
+
+    @field_validator("entity_id", "new_entity_name")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        return value.strip() if value and value.strip() else None
+
+
 class HealthResponse(BaseModel):
     status: str
     version: str

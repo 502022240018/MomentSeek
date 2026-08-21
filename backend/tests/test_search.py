@@ -1,5 +1,3 @@
-import json
-
 import numpy as np
 import pytest
 
@@ -36,18 +34,19 @@ def _create_video(settings, catalog, video_id="video-1", name="video.mp4", durat
     return settings.index_dir / video_id
 
 
-def _write_manifest(index_dir, video_id, channels, duration_ms=60000, segment_ms=5000):
-    index_dir.mkdir(parents=True, exist_ok=True)
-    (index_dir / "index_manifest.json").write_text(
-        json.dumps({
-            "schema_version": 3,
-            "video_id": video_id,
-            "duration_ms": duration_ms,
-            "segment_ms": segment_ms,
-            "channels": channels,
-        }, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+def _publish(catalog, video_id, channels, **_unused):
+    for modality, raw in channels.items():
+        channel = dict(raw)
+        asset_version = str(channel.pop("milvus_asset_version", "1"))
+        row_count = int(channel.pop("milvus_row_count", 1))
+        channel.pop("file", None)
+        catalog.publish_modality(
+            video_id,
+            modality,
+            asset_version=asset_version,
+            row_count=row_count,
+            metadata=channel,
+        )
 
 
 def test_visual_adjacent_segments_remain_separate():
@@ -117,11 +116,101 @@ def test_visual_priority_does_not_cross_threshold_tiers():
     assert [item.modalities for item in results] == [["ocr"], ["visual"], ["face"]]
 
 
-def test_search_rejects_legacy_index_without_v3_manifest(tmp_path):
+def test_visual_priority_uses_support_to_rank_primary_backed_results():
+    candidates = [
+        Candidate("video-1", 0, 1, 0.90, "visual"),
+        Candidate("video-1", 0, 1, 0.10, "ocr"),
+        Candidate("video-1", 10, 11, 0.80, "visual"),
+        Candidate("video-1", 10, 11, 1.00, "ocr"),
+        Candidate("video-1", 20, 21, 0.99, "asr"),
+    ]
+    videos = [{"id": "video-1", "name": "video.mp4"}]
+
+    results = _fuse_candidate_groups(
+        candidates,
+        videos,
+        merge_gap=0,
+        max_result_seconds=5,
+        primary_modality="visual",
+    )
+
+    assert [(item.start_time, item.modalities) for item in results] == [
+        (10, ["ocr", "visual"]),
+        (0, ["ocr", "visual"]),
+        (20, ["asr"]),
+    ]
+    assert results[0].score > results[1].score
+
+
+def test_pure_ocr_groups_respect_max_result_seconds():
+    candidates = [
+        Candidate("video-1", 0, 1, 0.95, "ocr"),
+        Candidate("video-1", 1, 2, 0.99, "ocr"),
+        Candidate("video-1", 2, 3, 0.98, "ocr"),
+        Candidate("video-1", 3, 4, 0.97, "ocr"),
+    ]
+
+    groups = _groups(candidates, gap=2, max_duration=2)
+
+    assert [(min(item.start_time for item in group), max(item.end_time for item in group)) for group in groups] == [
+        (0, 2),
+        (2, 4),
+    ]
+    assert all(max(item.end_time for item in group) - min(item.start_time for item in group) <= 2 for group in groups)
+
+
+def test_pure_ocr_group_can_reach_exact_max_result_seconds():
+    candidates = [
+        Candidate("video-1", 0, 1, 0.98, "ocr"),
+        Candidate("video-1", 1, 2, 0.99, "ocr"),
+    ]
+
+    groups = _groups(candidates, gap=2, max_duration=2)
+
+    assert len(groups) == 1
+    assert min(item.start_time for item in groups[0]) == 0
+    assert max(item.end_time for item in groups[0]) == 2
+
+
+def test_mixed_ocr_groups_respect_max_result_seconds_before_auxiliary_merge():
+    ocr_early = Candidate("video-1", 0, 1, 0.95, "ocr")
+    ocr_seed = Candidate("video-1", 1, 2, 0.99, "ocr")
+    ocr_late = Candidate("video-1", 2, 3, 0.98, "ocr")
+    face = Candidate("video-1", 2.2, 2.8, 0.90, "face", raw_score=0.72)
+
+    groups = _groups([ocr_early, ocr_seed, ocr_late, face], gap=2, max_duration=2)
+
+    face_group = next(group for group in groups if face in group)
+    assert ocr_late in face_group
+    assert ocr_seed not in face_group
+    assert all(max(item.end_time for item in group) - min(item.start_time for item in group) <= 2 for group in groups)
+
+
+def test_fuse_candidate_groups_caps_ocr_only_result_windows():
+    candidates = [
+        Candidate("video-1", 0, 1, 0.95, "ocr"),
+        Candidate("video-1", 1, 2, 0.99, "ocr"),
+        Candidate("video-1", 2, 3, 0.98, "ocr"),
+    ]
+    videos = [{"id": "video-1", "name": "video.mp4"}]
+
+    results = _fuse_candidate_groups(candidates, videos, merge_gap=2, max_result_seconds=2)
+
+    assert [(item.start_time, item.end_time) for item in results] == [(0, 2), (2, 3)]
+    assert all((item.end_time - item.start_time) <= 2 for item in results)
+
+
+def test_search_ignores_legacy_npz_without_catalog_publication(tmp_path):
     settings = _settings(tmp_path)
     catalog = Catalog(settings.db_path)
     index_dir = _create_video(settings, catalog)
-    catalog.update_video("video-1", indexed_modalities=["visual"])
+    # Simulate a pre-publication database that claimed visual availability.
+    # The public Catalog API deliberately cannot create this stale state.
+    with catalog.connect() as connection:
+        connection.execute(
+            "UPDATE videos SET indexed_modalities=? WHERE id=?",
+            ('["visual"]', "video-1"),
+        )
     index_dir.mkdir(parents=True)
     np.savez_compressed(
         index_dir / "visual.npz",
@@ -132,8 +221,10 @@ def test_search_rejects_legacy_index_without_v3_manifest(tmp_path):
 
     engine = SearchEngine(settings, catalog)
 
-    with pytest.raises(ValueError, match="索引版本过旧"):
-        engine.search("football", None, ["visual"], ["video-1"])
+    # Ready publications, not the stale compatibility flag or cold NPZ, define
+    # online visibility. With no publication there is simply no visual channel
+    # to query.
+    assert engine.search("football", None, ["visual"], ["video-1"]) == []
 
 
 def test_visual_query_subqueries_use_one_batched_encoder_call(tmp_path):
@@ -164,6 +255,31 @@ def test_visual_query_subqueries_use_one_batched_encoder_call(tmp_path):
     )]
 
 
+def test_optional_face_channel_does_not_block_non_face_image_search(tmp_path):
+    engine = SearchEngine(_settings(tmp_path), Catalog(_settings(tmp_path).db_path))
+
+    class NoFaceEncoder:
+        def encode_reference(self, _path):
+            raise ValueError("参考图中未检测到人脸")
+
+    engine._face_encoder = NoFaceEncoder()
+
+    assert engine._resolve_face_query(None, "product.jpg", optional=True) is None
+
+
+def test_face_only_image_search_reports_missing_face(tmp_path):
+    engine = SearchEngine(_settings(tmp_path), Catalog(_settings(tmp_path).db_path))
+
+    class NoFaceEncoder:
+        def encode_reference(self, _path):
+            raise ValueError("参考图中未检测到人脸")
+
+    engine._face_encoder = NoFaceEncoder()
+
+    with pytest.raises(ValueError, match="未检测到人脸"):
+        engine._resolve_face_query(None, "product.jpg", optional=False)
+
+
 def test_semantic_query_is_encoded_once_per_model_per_request(tmp_path):
     settings = _settings(tmp_path)
     engine = SearchEngine(settings, Catalog(settings.db_path))
@@ -172,14 +288,14 @@ def test_semantic_query_is_encoded_once_per_model_per_request(tmp_path):
         calls.append((text, model)) or np.asarray([1.0, 0.0], dtype=np.float32)
     )
     cache = {}
-    manifest = {
+    publication = {
         "semantic_model_key": "semantic-a",
         "semantic_status": "complete",
     }
     embeddings = np.ones((1, 2), dtype=np.float32)
 
-    first = engine._semantic_query("hello", manifest, embeddings, cache, None)
-    second = engine._semantic_query("hello", manifest, embeddings, cache, None)
+    first = engine._semantic_query("hello", publication, embeddings, cache, None)
+    second = engine._semantic_query("hello", publication, embeddings, cache, None)
 
     assert np.array_equal(first, second)
     assert calls == [("hello", "semantic-a")]
@@ -234,7 +350,7 @@ def test_prewarm_loads_visual_default_and_reports_resident_models(tmp_path):
     assert len(visual_calls) == 1
 
 
-def test_prewarm_scans_deduplicated_manifest_model_keys(tmp_path):
+def test_prewarm_scans_deduplicated_publication_model_keys(tmp_path):
     settings = Settings(
         _env_file=None,
         app_data_dir=tmp_path / "runtime",
@@ -244,31 +360,23 @@ def test_prewarm_scans_deduplicated_manifest_model_keys(tmp_path):
     )
     settings.ensure_dirs()
     catalog = Catalog(settings.db_path)
-    visual_dir = _create_video(
+    _create_video(
         settings,
         catalog,
         video_id="visual-model",
     )
-    catalog.update_video("visual-model", indexed_modalities=["visual"])
-    _write_manifest(visual_dir, "visual-model", {
+    _publish(catalog, "visual-model", {
         "visual": {
-            "file": "visual.npz",
             "model_key": "chinese-clip-vit-b16",
         }
     })
-    np.savez_compressed(visual_dir / "visual.npz", value=np.asarray([1]))
-
-    asr_dir = _create_video(settings, catalog, video_id="semantic-model")
-    catalog.update_video("semantic-model", indexed_modalities=["asr"])
-    _write_manifest(asr_dir, "semantic-model", {
+    _create_video(settings, catalog, video_id="semantic-model")
+    _publish(catalog, "semantic-model", {
         "asr": {
-            "file": "asr.npz",
-            "semantic_model_key": "semantic-from-manifest",
+            "semantic_model_key": "semantic-from-publication",
             "semantic_status": "complete",
         }
     })
-    np.savez_compressed(asr_dir / "asr.npz", value=np.asarray([1]))
-
     engine = SearchEngine(settings, catalog)
     visual_calls = []
     text_calls = []
@@ -296,7 +404,7 @@ def test_prewarm_scans_deduplicated_manifest_model_keys(tmp_path):
         settings.visual_model,
         "chinese-clip-vit-b16",
     }
-    assert set(text_calls) == {"semantic-from-manifest"}
+    assert set(text_calls) == {"semantic-from-publication"}
     assert status["requested_visual_models"] == sorted(set(visual_calls))
     assert status["requested_text_models"] == sorted(set(text_calls))
 
@@ -316,19 +424,13 @@ def test_prewarm_ignores_disabled_and_failed_semantic_models(tmp_path):
         ("ocr", "failed"),
     ):
         video_id = f"{channel}-{semantic_status}"
-        index_dir = _create_video(settings, catalog, video_id=video_id)
-        catalog.update_video(video_id, indexed_modalities=[channel])
-        _write_manifest(index_dir, video_id, {
+        _create_video(settings, catalog, video_id=video_id)
+        _publish(catalog, video_id, {
             channel: {
-                "file": f"{channel}.npz",
                 "semantic_model_key": f"unused-{channel}-model",
                 "semantic_status": semantic_status,
             }
         })
-        np.savez_compressed(
-            index_dir / f"{channel}.npz",
-            value=np.asarray([1]),
-        )
 
     engine = SearchEngine(settings, catalog)
 
@@ -368,16 +470,13 @@ def test_prewarm_discovers_complete_ocr_model_when_asr_semantic_is_disabled(
     )
     settings.ensure_dirs()
     catalog = Catalog(settings.db_path)
-    index_dir = _create_video(settings, catalog, video_id="ocr-semantic")
-    catalog.update_video("ocr-semantic", indexed_modalities=["ocr"])
-    _write_manifest(index_dir, "ocr-semantic", {
+    _create_video(settings, catalog, video_id="ocr-semantic")
+    _publish(catalog, "ocr-semantic", {
         "ocr": {
-            "file": "ocr.npz",
             "semantic_model_key": "ocr-semantic-model",
             "semantic_status": "complete",
         }
     })
-    np.savez_compressed(index_dir / "ocr.npz", value=np.asarray([1]))
     engine = SearchEngine(settings, catalog)
 
     class StubVisual:
@@ -414,16 +513,13 @@ def test_required_prewarm_fails_for_missing_complete_semantic_model(tmp_path):
     )
     settings.ensure_dirs()
     catalog = Catalog(settings.db_path)
-    index_dir = _create_video(settings, catalog, video_id="asr-semantic")
-    catalog.update_video("asr-semantic", indexed_modalities=["asr"])
-    _write_manifest(index_dir, "asr-semantic", {
+    _create_video(settings, catalog, video_id="asr-semantic")
+    _publish(catalog, "asr-semantic", {
         "asr": {
-            "file": "asr.npz",
             "semantic_model_key": "missing-semantic-model",
             "semantic_status": "complete",
         }
     })
-    np.savez_compressed(index_dir / "asr.npz", value=np.asarray([1]))
     engine = SearchEngine(settings, catalog)
 
     class StubVisual:
@@ -469,340 +565,11 @@ def test_query_model_status_reads_encoder_maps_under_lock(tmp_path):
     assert status["text_models"] == ["text-a"]
 
 
-@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
-def test_asr_v3_lexical_search_uses_chunk_times_and_texts(tmp_path):
-    settings = _settings(tmp_path)
-    catalog = Catalog(settings.db_path)
-    index_dir = _create_video(settings, catalog, name="interview.mp4")
-    catalog.update_video("video-1", indexed_modalities=["asr"])
-    _write_manifest(index_dir, "video-1", {
-        "asr": {
-            "file": "asr.npz",
-            "engine": "whisper",
-            "model_key": "small",
-            "language": "zh",
-            "semantic_model_key": "fake-semantic",
-            "embedding_space": "minilm-text-semantic",
-            "decode_status": "complete",
-            "semantic_status": "disabled",
-        }
-    })
-    np.savez_compressed(
-        index_dir / "asr.npz",
-        chunk_times_ms=np.asarray([[10000, 13000], [14000, 17000], [40000, 42000]], dtype=np.int32),
-        texts=np.asarray(["我们正在讨论电影投资", "电影投资需要长期判断", "今天天气很好"]),
-        embeddings=np.empty((0, 0), dtype=np.float16),
-        embedding_chunk_indices=np.empty((0,), dtype=np.int32),
-    )
-
-    engine = SearchEngine(settings, catalog)
-    engine._encode_asr_query = (  # type: ignore[method-assign]
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("disabled semantic index must not encode a query")
-        )
-    )
-
-    results = engine.search("电影投资", None, ["asr"], ["video-1"])
-
-    assert len(results) == 1
-    assert results[0]["start_time"] == 10
-    assert results[0]["end_time"] == 17
-    assert results[0]["media_url"] == "/api/videos/video-1/media"
-    assert results[0]["clip_url"] == "/api/videos/video-1/clip?start=10.000&end=17.000"
-    assert results[0]["evidence"][0]["unit_type"] == "chunk"
-
-
-@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
-def test_asr_v3_sparse_semantic_indices_map_embeddings_to_chunks(tmp_path):
-    settings = _settings(tmp_path)
-    catalog = Catalog(settings.db_path)
-    index_dir = _create_video(settings, catalog, name="interview.mp4")
-    catalog.update_video("video-1", indexed_modalities=["asr"])
-    _write_manifest(index_dir, "video-1", {
-        "asr": {
-            "file": "asr.npz",
-            "engine": "whisper",
-            "model_key": "small",
-            "language": "zh",
-            "semantic_model_key": "fake-semantic",
-            "embedding_space": "minilm-text-semantic",
-            "decode_status": "complete",
-            "semantic_status": "complete",
-        }
-    })
-    np.savez_compressed(
-        index_dir / "asr.npz",
-        chunk_times_ms=np.asarray([[10000, 13000], [20000, 21000], [30000, 33000]], dtype=np.int32),
-        texts=np.asarray(["这部电影需要很多资金支持", "", "今天天气很好"]),
-        embeddings=np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float16),
-        embedding_chunk_indices=np.asarray([0, 2], dtype=np.int32),
-    )
-    engine = SearchEngine(settings, catalog)
-    engine._encode_asr_query = lambda text, model_name: np.asarray([1.0, 0.0], dtype=np.float32)  # type: ignore[method-assign]
-
-    results = engine.search("投资预算", None, ["asr"], ["video-1"])
-
-    assert results
-    assert results[0]["start_time"] == 10
-    assert results[0]["decision"] == "semantic_hit"
-    assert results[0]["evidence"][0]["semantic_score"] is not None
-    assert results[0]["evidence"][0]["unit_id"] == 0
-
-
-@pytest.mark.skip(reason="ASR migrated to Milvus; NPZ v3 fallback removed")
-def test_asr_search_falls_back_to_lexical_when_semantic_query_model_missing(tmp_path):
-    settings = _settings(tmp_path)
-    catalog = Catalog(settings.db_path)
-    index_dir = _create_video(settings, catalog, name="interview.mp4")
-    catalog.update_video("video-1", indexed_modalities=["asr"])
-    _write_manifest(index_dir, "video-1", {
-        "asr": {
-            "file": "asr.npz",
-            "engine": "funasr",
-            "model_key": "iic/SenseVoiceSmall",
-            "language": "zh",
-            "semantic_model_key": "missing-semantic",
-            "embedding_space": "minilm-text-semantic",
-            "decode_status": "complete",
-            "semantic_status": "complete",
-        }
-    })
-    np.savez_compressed(
-        index_dir / "asr.npz",
-        chunk_times_ms=np.asarray([[10000, 13000]], dtype=np.int32),
-        texts=np.asarray(["电影投资需要长期判断"]),
-        embeddings=np.asarray([[1.0, 0.0]], dtype=np.float16),
-        embedding_chunk_indices=np.asarray([0], dtype=np.int32),
-    )
-    engine = SearchEngine(settings, catalog)
-    engine._encode_asr_query = lambda *_args: (_ for _ in ()).throw(FileNotFoundError("missing semantic"))  # type: ignore[method-assign]
-
-    results = engine.search("电影投资", None, ["asr"], ["video-1"])
-
-    assert results
-    assert results[0]["decision"] == "lexical_hit"
-    assert results[0]["evidence"][0]["semantic_score"] is None
-
-
-@pytest.mark.skip(reason="OCR migrated to Milvus; NPZ v3 fallback removed")
-def test_ocr_legacy_v3_requires_rebuild(tmp_path):
-    settings = _settings(tmp_path)
-    catalog = Catalog(settings.db_path)
-    index_dir = _create_video(settings, catalog, name="legacy.mp4")
-    catalog.update_video("video-1", indexed_modalities=["ocr"])
-    _write_manifest(index_dir, "video-1", {
-        "ocr": {
-            "file": "ocr.npz",
-            "schema_version": 3,
-            "model_key": "PP-OCRv6",
-            "decode_status": "complete",
-            "semantic_status": "disabled",
-        }
-    })
-    np.savez_compressed(
-        index_dir / "ocr.npz",
-        chunk_times_ms=np.asarray([[5000, 6000, 5000]], dtype=np.int32),
-        embeddings=np.empty((0, 0), dtype=np.float16),
-        embedding_chunk_indices=np.empty((0,), dtype=np.int32),
-        box_chunk_indices=np.asarray([0], dtype=np.int32),
-        box_texts=np.asarray(["FIFA"]),
-        box_scores=np.asarray([0.95], dtype=np.float32),
-        boxes=np.zeros((1, 4, 2), dtype=np.float32),
-    )
-
-    with pytest.raises(ValueError, match="缺少帧级数组"):
-        SearchEngine(settings, catalog).search("FIFA", None, ["ocr"], ["video-1"])
-
-
-@pytest.mark.skip(reason="OCR migrated to Milvus; NPZ v3 fallback removed")
-def test_ocr_v3_search_groups_box_text_by_frame(tmp_path):
-    settings = _settings(tmp_path)
-    catalog = Catalog(settings.db_path)
-    index_dir = _create_video(settings, catalog, name="match.mp4")
-    catalog.update_video("video-1", indexed_modalities=["ocr"])
-    _write_manifest(index_dir, "video-1", {
-        "ocr": {
-            "file": "ocr.npz",
-            "engine": "rapidocr",
-            "schema_version": 3,
-            "model_key": "PP-OCRv6",
-            "semantic_model_key": "fake-semantic",
-            "embedding_space": "minilm-text-semantic",
-            "sample_fps": 0.05,
-            "decode_status": "complete",
-            "semantic_status": "disabled",
-        }
-    })
-    np.savez_compressed(
-        index_dir / "ocr.npz",
-        frame_times_ms=np.asarray([5000, 40000], dtype=np.int32),
-        frame_windows_ms=np.asarray([[5000, 6000], [40000, 41000]], dtype=np.int32),
-        embeddings=np.empty((0, 0), dtype=np.float16),
-        embedding_frame_indices=np.empty((0,), dtype=np.int32),
-        box_frame_indices=np.asarray([0, 0, 0, 1], dtype=np.int32),
-        box_texts=np.asarray(["FIFA", "WORLD", "CUP", "UNRELATED"]),
-        box_scores=np.asarray([0.95, 0.93, 0.90, 0.91], dtype=np.float32),
-        boxes=np.zeros((4, 4, 2), dtype=np.float32),
-    )
-
-    engine = SearchEngine(settings, catalog)
-    engine._encode_asr_query = (  # type: ignore[method-assign]
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("disabled semantic index must not encode a query")
-        )
-    )
-
-    results = engine.search("FIFA", None, ["ocr"], ["video-1"])
-
-    assert len(results) == 1
-    assert results[0]["start_time"] == 5
-    assert results[0]["end_time"] == 6
-    assert results[0]["thumbnail_url"] == "/api/videos/video-1/frame?time=5.000"
-    assert results[0]["evidence"][0]["text"] == "FIFA"
-    assert results[0]["evidence"][0]["features"]["ocr_frame_text"] == "FIFA WORLD CUP"
-    assert results[0]["evidence"][0]["features"]["ocr_score"] == 0.95
-
-
-@pytest.mark.skip(reason="OCR migrated to Milvus; NPZ v3 fallback removed")
-def test_ocr_v3_sparse_semantic_indices_map_embeddings_to_frames(tmp_path):
-    settings = _settings(tmp_path)
-    catalog = Catalog(settings.db_path)
-    index_dir = _create_video(settings, catalog, name="match.mp4")
-    catalog.update_video("video-1", indexed_modalities=["ocr"])
-    _write_manifest(index_dir, "video-1", {
-        "ocr": {
-            "file": "ocr.npz",
-            "engine": "rapidocr",
-            "schema_version": 3,
-            "model_key": "PP-OCRv6",
-            "semantic_model_key": "fake-semantic",
-            "embedding_space": "minilm-text-semantic",
-            "sample_fps": 0.05,
-            "decode_status": "complete",
-            "semantic_status": "complete",
-        }
-    })
-    np.savez_compressed(
-        index_dir / "ocr.npz",
-        frame_times_ms=np.asarray([5000, 40000], dtype=np.int32),
-        frame_windows_ms=np.asarray([[5000, 6000], [40000, 41000]], dtype=np.int32),
-        embeddings=np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float16),
-        embedding_frame_indices=np.asarray([0, 1], dtype=np.int32),
-        box_frame_indices=np.asarray([0, 0, 1], dtype=np.int32),
-        box_texts=np.asarray(["FIFA", "WORLD CUP", "UNRELATED"]),
-        box_scores=np.asarray([0.95, 0.93, 0.91], dtype=np.float32),
-        boxes=np.zeros((3, 4, 2), dtype=np.float32),
-    )
-    engine = SearchEngine(settings, catalog)
-    engine._encode_asr_query = lambda text, model_name: np.asarray([1.0, 0.0], dtype=np.float32)  # type: ignore[method-assign]
-
-    results = engine.search("soccer tournament", None, ["ocr"], ["video-1"])
-
-    assert results
-    assert results[0]["start_time"] == 5
-    assert results[0]["decision"] == "semantic_hit"
-    assert results[0]["evidence"][0]["modality"] == "ocr"
-    assert results[0]["evidence"][0]["unit_id"] == 0
-
-
-@pytest.mark.skip(reason="Face migrated to Milvus; NPZ v3 fallback removed")
-def test_face_v3_search_uses_track_times_and_on_demand_thumbnail(tmp_path):
-    settings = _settings(tmp_path)
-    catalog = Catalog(settings.db_path)
-    index_dir = _create_video(settings, catalog, name="faces.mp4")
-    catalog.update_video("video-1", indexed_modalities=["face"])
-    _write_manifest(index_dir, "video-1", {
-        "face": {
-            "file": "face.npz",
-            "model_key": "buffalo_l",
-            "embedding_space": "arcface-identity",
-            "sample_fps": 1.0,
-            "decode_status": "complete",
-        }
-    })
-    np.savez_compressed(
-        index_dir / "face.npz",
-        track_times_ms=np.asarray([[10000, 15000, 12000], [30000, 35000, 32000]], dtype=np.int32),
-        embeddings=np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
-    )
-
-    class StubFace:
-        def encode_reference(self, image_path):
-            return np.asarray([1.0, 0.0], dtype=np.float32)
-
-    engine = SearchEngine(settings, catalog)
-    engine._face = lambda: StubFace()  # type: ignore[method-assign]
-
-    results = engine.search(None, "query.jpg", ["face"], ["video-1"])
-
-    assert results[0]["start_time"] == 10
-    assert results[0]["end_time"] == 15
-    assert results[0]["thumbnail_url"] == "/api/videos/video-1/frame?time=12.000"
-    assert results[0]["evidence"][0]["unit_type"] == "track"
-    assert results[0]["evidence"][0]["best_ms"] == 12000
-
-
-@pytest.mark.skip(reason="Visual migrated to Milvus; NPZ v3 fallback removed")
-def test_visual_search_encodes_query_with_each_manifest_model(tmp_path):
-    settings = _settings(tmp_path)
-    catalog = Catalog(settings.db_path)
-    for video_id, model_key, vector in (
-        ("siglip-video", "siglip2-so400m-384", [1.0, 0.0]),
-        ("chinese-video", "chinese-clip-vit-b16", [0.0, 1.0]),
-    ):
-        index_dir = _create_video(settings, catalog, video_id=video_id, name=f"{video_id}.mp4", duration=10)
-        catalog.update_video(video_id, indexed_modalities=["visual"])
-        _write_manifest(index_dir, video_id, {
-            "visual": {
-                "file": "visual.npz",
-                "model_key": model_key,
-                "embedding_space": "siglip2-image-text",
-                "sample_fps": 5.0,
-                "decode_status": "complete",
-            }
-        }, duration_ms=10000)
-        np.savez_compressed(
-            index_dir / "visual.npz",
-            frame_embeddings=np.asarray([vector], dtype=np.float16),
-            frame_times_ms=np.asarray([1000], dtype=np.int32),
-            segment_frame_offsets=np.asarray([0, 1, 1], dtype=np.int32),
-        )
-
-    class StubClip:
-        def __init__(self, vector):
-            self.vector = vector
-
-        def encode_query(self, text, image_path, alpha):
-            return self.vector
-
-    calls: list[str] = []
-
-    def fake_clip(model_key=None):
-        calls.append(model_key)
-        if model_key == "chinese-clip-vit-b16":
-            return StubClip(np.asarray([0.0, 1.0], dtype=np.float32))
-        return StubClip(np.asarray([1.0, 0.0], dtype=np.float32))
-
-    engine = SearchEngine(settings, catalog)
-    engine._clip = fake_clip  # type: ignore[method-assign]
-
-    results = engine.search("stadium", None, ["visual"], limit=10)
-
-    assert {result["video_id"] for result in results} == {"siglip-video", "chinese-video"}
-    assert set(calls) == {"siglip2-so400m-384", "chinese-clip-vit-b16"}
-
-
-# ---------------------------------------------------------------------------
-# shadow_compare decoupling tests
-# ---------------------------------------------------------------------------
-
 def _make_visual_index(settings, catalog, video_id="v-shadow"):
-    """Create a minimal v3 visual index for shadow_compare tests."""
-    index_dir = _create_video(settings, catalog, video_id=video_id, duration=20)
-    catalog.update_video(video_id, indexed_modalities=["visual"])
-    _write_manifest(index_dir, video_id, {
+    """Create a minimal published visual index for Milvus search tests."""
+    _create_video(settings, catalog, video_id=video_id, duration=20)
+    _publish(catalog, video_id, {
         "visual": {
-            "file": "visual.npz",
             "model_key": "siglip2-so400m-384",
             "embedding_space": "siglip2-image-text",
             "sample_fps": 5.0,
@@ -810,16 +577,10 @@ def _make_visual_index(settings, catalog, video_id="v-shadow"):
             "milvus_asset_version": "1",
         }
     }, duration_ms=20000)
-    np.savez_compressed(
-        index_dir / "visual.npz",
-        frame_embeddings=np.asarray([[1.0, 0.0], [0.5, 0.5]], dtype=np.float16),
-        frame_times_ms=np.asarray([1000, 6000], dtype=np.int32),
-        segment_frame_offsets=np.asarray([0, 1, 2], dtype=np.int32),
-    )
     return video_id
 
 
-def test_milvus_batches_are_scored_before_next_batch_is_loaded(tmp_path):
+def test_milvus_search_scores_each_selected_video_once(tmp_path):
     from unittest.mock import patch
 
     settings = _settings(tmp_path)
@@ -832,13 +593,6 @@ def test_milvus_batches_are_scored_before_next_batch_is_loaded(tmp_path):
     engine = SearchEngine(settings, catalog)
     events = []
 
-    def fake_query(_client, modality, batch_ids, _fields, _profiler):
-        events.append(("query", modality, tuple(batch_ids)))
-        return {
-            video_id: [{"video_id": video_id}]
-            for video_id in batch_ids
-        }
-
     def fake_candidates(video, **_kwargs):
         events.append(("score", video["id"]))
         return [Candidate(video["id"], 0.0, 1.0, 0.8, "visual")]
@@ -848,20 +602,12 @@ def test_milvus_batches_are_scored_before_next_batch_is_loaded(tmp_path):
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
             engine,
-            "_query_rows_for_videos",
-            side_effect=fake_query,
-        ),
-        patch.object(
-            engine,
             "_milvus_candidates_for_video",
             side_effect=fake_candidates,
         ),
     ):
         engine.search("football", None, ["visual"])
 
-    # After the fix (Visual removed from BULK_QUERY_FIELDS), _query_rows_for_videos
-    # is never called for visual modality. Visual uses ANN search directly without
-    # pre-fetching rows. Only scoring events should occur.
     assert sorted(events) == sorted(("score", video_id) for video_id in video_ids)
 
 
@@ -896,11 +642,6 @@ def test_query_encoding_finishes_before_local_candidate_scoring(tmp_path):
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
             engine,
-            "_query_rows_for_videos",
-            return_value={video_id: [{"video_id": video_id}]},
-        ),
-        patch.object(
-            engine,
             "_milvus_candidates_for_video",
             side_effect=fake_candidates,
         ),
@@ -919,7 +660,7 @@ def test_query_encoding_finishes_before_local_candidate_scoring(tmp_path):
     assert "visual_scoring" in timing["local_processing"]
 
 
-def test_milvus_is_primary_and_npz_is_not_read_on_success(tmp_path):
+def test_milvus_publication_is_the_online_retrieval_source(tmp_path):
     from unittest.mock import patch
 
     settings = _settings(tmp_path)
@@ -940,62 +681,12 @@ def test_milvus_is_primary_and_npz_is_not_read_on_success(tmp_path):
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
             engine,
-            "_query_rows_for_videos",
-            return_value={video_id: []},
-        ),
-        patch.object(
-            engine,
             "_milvus_candidates_for_video",
             return_value=[milvus_hit],
         ) as milvus_search,
-        patch("app.retrieval.search.np.load") as npz_load,
     ):
         results = engine.search("football", None, ["visual"], [video_id])
 
     milvus_search.assert_called_once()
-    npz_load.assert_not_called()
     assert results[0]["start_time"] == 5.0
     assert results[0]["evidence"][0]["features"] == {}
-
-
-def test_visual_ann_does_not_bulk_fetch_rows(tmp_path):
-    """Regression: visual must NOT appear in the BULK_QUERY_FIELDS pre-fetch loop.
-
-    The v2 ANN implementation (milvus_visual_candidates_ann) issues its own
-    collection.search() call and never consumes pre-fetched rows.  Before the
-    fix, the full query_iterator traversal ran for every visual-indexed video,
-    reading all frame embeddings from Milvus before the ANN search — a no-op
-    fetch that wasted significant I/O.
-
-    This test guards against that regression by asserting that
-    _query_rows_for_videos is never called with modality="visual" during a
-    real Milvus-routed visual search.
-    """
-    from unittest.mock import MagicMock, patch
-
-    settings = _settings(tmp_path)
-    catalog = Catalog(settings.db_path)
-    video_id = _make_visual_index(settings, catalog, video_id="v-ann-no-bulk")
-    engine = SearchEngine(settings, catalog)
-
-    milvus_hit = Candidate(video_id, 2.0, 7.0, 0.88, "visual")
-    query_rows_calls: list[str] = []
-
-    def spy_query_rows(_client, modality, _video_ids, _fields, _profiler):
-        query_rows_calls.append(modality)
-        return {video_id: []}
-
-    with (
-        patch.object(engine, "_prepare_query_vectors"),
-        patch.object(engine, "_get_milvus_client", return_value=MagicMock()),
-        patch.object(engine, "_query_rows_for_videos", side_effect=spy_query_rows),
-        patch.object(engine, "_milvus_candidates_for_video", return_value=[milvus_hit]),
-    ):
-        engine.search("football", None, ["visual"], [video_id])
-
-    assert "visual" not in query_rows_calls, (
-        "_query_rows_for_videos must never be called with modality='visual'; "
-        "visual uses ANN (collection.search) directly and pre-fetching all "
-        "frame embeddings is a costly no-op.  "
-        f"Actual calls: {query_rows_calls}"
-    )

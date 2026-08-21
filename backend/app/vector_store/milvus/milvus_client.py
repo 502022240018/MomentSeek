@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+import uuid
+from collections.abc import Iterable
 
 from pymilvus import Collection, CollectionSchema, connections, utility
 
@@ -17,6 +19,8 @@ from app.core.settings import get_settings
 from .milvus_schema import (
     create_asr_schema,
     create_face_schema,
+    create_face_group_schema,
+    create_entity_face_sample_schema,
     create_ocr_schema,
     create_speaker_schema,
     create_visual_schema,
@@ -78,9 +82,25 @@ _STATIC_INDEX_CONFIGS: dict[str, dict] = {
         },
     },
     "face_embeddings": {
-        "index_type": "IVF_FLAT",
-        "metric_type": "L2",
-        "params": {"nlist": 1024},
+        # Migrated IVF_FLAT → DISKANN for 千万级 scale (disk-resident vectors +
+        # PQ in memory). Face is the highest-dimension modality (512), so the
+        # memory saving is the largest of all modalities. COSINE retained: face
+        # embeddings are unit-normalised ArcFace vectors (faces.py), and
+        # visual/speaker proved DiskANN supports COSINE in this stack.
+        "index_type": "DISKANN",
+        "metric_type": "COSINE",
+        "params": {
+            "max_degree": 56,
+            "search_list_size": 128,
+            "pq_code_budget_gb": 0.125,
+            "build_dram_budget_gb": 32.0,
+        },
+    },
+    "face_groups": {
+        "index_type": "IVF_FLAT", "metric_type": "L2", "params": {"nlist": 256},
+    },
+    "entity_face_samples": {
+        "index_type": "IVF_FLAT", "metric_type": "L2", "params": {"nlist": 256},
     },
     "speaker_embeddings": {
         # Migrated HNSW → DISKANN for 千万级 scale (disk-resident vectors +
@@ -169,6 +189,17 @@ _COLLECTION_CONFIGS: dict[str, dict] = {
     "face_embeddings": {
         "schema": create_face_schema,
         "index": _STATIC_INDEX_CONFIGS["face_embeddings"],
+        "video_scoped": True,
+    },
+    "face_groups": {
+        "schema": create_face_group_schema,
+        "index": _STATIC_INDEX_CONFIGS["face_groups"],
+        "video_scoped": True,
+    },
+    "entity_face_samples": {
+        "schema": create_entity_face_sample_schema,
+        "index": _STATIC_INDEX_CONFIGS["entity_face_samples"],
+        "video_scoped": False,
     },
     "speaker_embeddings": {
         "schema": create_speaker_schema,
@@ -183,6 +214,24 @@ _COLLECTION_FOR_MODALITY: dict[str, str] = {
     "face":    "face_embeddings",
     "speaker": "speaker_embeddings",
 }
+
+
+def _runtime_collection_layout(settings) -> tuple[dict[str, str], dict[str, dict]]:
+    """Resolve deployment-local collection names without changing defaults."""
+    modality_names = dict(_COLLECTION_FOR_MODALITY)
+    asr_name = str(settings.milvus_asr_collection)
+    if asr_name in _COLLECTION_CONFIGS and asr_name != "asr_embeddings":
+        raise ValueError(
+            f"MILVUS_ASR_COLLECTION conflicts with reserved collection: {asr_name}"
+        )
+    modality_names["asr"] = asr_name
+    configs = {
+        name: config
+        for name, config in _COLLECTION_CONFIGS.items()
+        if name != "asr_embeddings"
+    }
+    configs[asr_name] = _COLLECTION_CONFIGS["asr_embeddings"]
+    return modality_names, configs
 
 _OCR_V2_REQUIRED_FIELDS = frozenset({
     "text",
@@ -320,6 +369,9 @@ class MilvusClient:
         if self._ready:
             return
         s = get_settings()
+        self._collection_for_modality, self._collection_configs = (
+            _runtime_collection_layout(s)
+        )
         host = s.milvus_host
         port = str(s.milvus_port)
         logger.info("Connecting to Milvus at %s:%s", host, port)
@@ -331,14 +383,16 @@ class MilvusClient:
         )
         self._ready = True
         self._init_collections()
-        logger.info("MilvusClient ready — %d collections", len(_COLLECTION_CONFIGS))
+        logger.info(
+            "MilvusClient ready — %d collections", len(self._collection_configs)
+        )
 
     # ------------------------------------------------------------------
     # Collection init
     # ------------------------------------------------------------------
 
     def _init_collections(self) -> None:
-        for name, config in _COLLECTION_CONFIGS.items():
+        for name, config in self._collection_configs.items():
             if not utility.has_collection(name):
                 logger.info("Creating collection: %s", name)
                 schema: CollectionSchema = config["schema"]()
@@ -361,7 +415,7 @@ class MilvusClient:
                 col = Collection(name)
                 if name == "ocr_embeddings":
                     _validate_existing_ocr_collection(col)
-                elif name == "asr_embeddings":
+                elif name == self._collection_for_modality["asr"]:
                     _validate_existing_asr_collection(col)
                 load_state = utility.load_state(name)
                 if load_state.name != "Loaded":
@@ -378,7 +432,7 @@ class MilvusClient:
         return Collection(name)
 
     def collection_for(self, modality: str) -> Collection:
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         return Collection(name)
 
     def stats(self, name: str) -> dict:
@@ -406,7 +460,9 @@ class MilvusClient:
         """
         counts: dict[str, int] = {}
         expr = f'video_id == "{video_id}"'
-        for name in _COLLECTION_CONFIGS:
+        for name, config in self._collection_configs.items():
+            if not config.get("video_scoped", True):
+                continue
             col = Collection(name)
             try:
                 result = col.delete(expr)
@@ -425,7 +481,9 @@ class MilvusClient:
         """
         counts: dict[str, int] = {}
         expr = f'video_id == "{video_id}" and asset_version == "{asset_version}"'
-        for name in _COLLECTION_CONFIGS:
+        for name, config in self._collection_configs.items():
+            if not config.get("video_scoped", True):
+                continue
             col = Collection(name)
             try:
                 result = col.delete(expr)
@@ -455,7 +513,7 @@ class MilvusClient:
         Returns:
             Number of records deleted, or -1 on failure.
         """
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         try:
             # Check if collection exists first
             if not utility.has_collection(name):
@@ -474,6 +532,10 @@ class MilvusClient:
                 "delete_video_modality video=%s modality=%s deleted=%d",
                 video_id, modality, count,
             )
+            if modality == "face" and utility.has_collection("face_groups"):
+                groups = Collection("face_groups")
+                groups.delete(expr)
+                groups.flush()
             return count
         except Exception as exc:
             logger.warning(
@@ -485,7 +547,7 @@ class MilvusClient:
         self, video_id: str, modality: str, keep_asset_version: str
     ) -> int:
         """Remove superseded rows only after *keep_asset_version* is published."""
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         try:
             if not utility.has_collection(name):
                 return 0
@@ -496,6 +558,10 @@ class MilvusClient:
             )
             result = col.delete(expr)
             col.flush()
+            if modality == "face" and utility.has_collection("face_groups"):
+                groups = Collection("face_groups")
+                groups.delete(expr)
+                groups.flush()
             return int(getattr(result, "delete_count", 0))
         except Exception as exc:
             logger.warning(
@@ -508,7 +574,7 @@ class MilvusClient:
         self, video_id: str, modality: str, asset_version: str
     ) -> int:
         """Return the persisted rows for one published modality version."""
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         rows = Collection(name).query(
             expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}"'),
             output_fields=["count(*)"],
@@ -517,7 +583,7 @@ class MilvusClient:
 
     def count_video_modality(self, video_id: str, modality: str) -> int:
         """Return the persisted row count for one video and modality."""
-        name = _COLLECTION_FOR_MODALITY[modality]
+        name = self._collection_for_modality[modality]
         rows = Collection(name).query(
             expr=f'video_id == "{video_id}"',
             output_fields=["count(*)"],
@@ -526,6 +592,102 @@ class MilvusClient:
             return 0
         return int(rows[0].get("count(*)", 0))
 
+    def count_face_groups_version(
+        self,
+        video_id: str,
+        asset_version: str,
+        group_model_version: str,
+    ) -> int:
+        """Return rows for one immutable Face group generation."""
+        rows = self.collection("face_groups").query(
+            expr=(
+                f'video_id == "{video_id}" and '
+                f'asset_version == "{asset_version}" and '
+                f'model_version == "{group_model_version}"'
+            ),
+            output_fields=["count(*)"],
+        )
+        return int(rows[0].get("count(*)", 0)) if rows else 0
+
+
+class ExistingMilvusCollectionsClient:
+    """Maintenance-only client for an explicit set of existing collections.
+
+    Unlike :class:`MilvusClient`, this client never creates collections and
+    never validates unrelated modality schemas.  It uses an isolated PyMilvus
+    connection alias so constructing it cannot weaken or poison the
+    application singleton.  Operational migrations should request the exact
+    collections they need and fail if any are absent.
+    """
+
+    def __init__(self, required_collections: Iterable[str]) -> None:
+        names = tuple(dict.fromkeys(str(name).strip() for name in required_collections))
+        if not names or any(not name for name in names):
+            raise ValueError("required_collections must contain non-empty names")
+        settings = get_settings()
+        self._collection_for_modality, _ = _runtime_collection_layout(settings)
+        self._alias = f"maintenance_{uuid.uuid4().hex}"
+        self._required_collections = frozenset(names)
+        connections.connect(
+            alias=self._alias,
+            host=settings.milvus_host,
+            port=str(settings.milvus_port),
+            timeout=settings.milvus_query_timeout_seconds,
+        )
+        try:
+            missing = [
+                name
+                for name in names
+                if not utility.has_collection(name, using=self._alias)
+            ]
+            if missing:
+                raise RuntimeError(
+                    "required Milvus collections do not exist: "
+                    + ", ".join(sorted(missing))
+                )
+        except Exception:
+            connections.disconnect(self._alias)
+            raise
+
+    def close(self) -> None:
+        connections.disconnect(self._alias)
+
+    def collection(self, name: str) -> Collection:
+        if name not in self._required_collections:
+            raise ValueError(f"collection was not authorized for maintenance: {name}")
+        return Collection(name, using=self._alias)
+
+    def collection_for(self, modality: str) -> Collection:
+        try:
+            name = self._collection_for_modality[modality]
+        except KeyError as exc:
+            raise ValueError(f"unknown Milvus modality: {modality}") from exc
+        return self.collection(name)
+
+    def count_video_modality_version(
+        self, video_id: str, modality: str, asset_version: str
+    ) -> int:
+        rows = self.collection_for(modality).query(
+            expr=(f'video_id == "{video_id}" and asset_version == "{asset_version}"'),
+            output_fields=["count(*)"],
+        )
+        return int(rows[0].get("count(*)", 0)) if rows else 0
+
+    def count_face_groups_version(
+        self,
+        video_id: str,
+        asset_version: str,
+        group_model_version: str,
+    ) -> int:
+        rows = self.collection("face_groups").query(
+            expr=(
+                f'video_id == "{video_id}" and '
+                f'asset_version == "{asset_version}" and '
+                f'model_version == "{group_model_version}"'
+            ),
+            output_fields=["count(*)"],
+        )
+        return int(rows[0].get("count(*)", 0)) if rows else 0
 
 # ---------------------------------------------------------------------------
 # Module-level singleton accessor

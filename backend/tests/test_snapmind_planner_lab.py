@@ -49,6 +49,9 @@ class FakeCatalog:
     def find_entity_in_text(self, _query):
         return self.entity
 
+    def get_modality_publication(self, _video_id, _modality):
+        return None
+
 
 class FakeOrchestrator:
     def __init__(
@@ -180,7 +183,65 @@ def test_support_top_k_does_not_prune_primary_pool():
     assert outcome["trace"][1]["output_candidate_count"] == 2
 
 
-def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnostic(tmp_path):
+def test_face_support_verifies_milvus_candidate_windows_and_keeps_weak_diagnostic():
+    first = np.zeros(512, dtype=np.float32)
+    first[:2] = [0.8, 0.6]
+    second = np.zeros(512, dtype=np.float32)
+    second[:2] = [0.25, np.sqrt(1.0 - 0.25**2)]
+    boundary_only = np.zeros(512, dtype=np.float32)
+    boundary_only[0] = 1.0
+    rows = [
+        {
+            "track_idx": 0,
+            "start_ms": 10_000,
+            "end_ms": 13_000,
+            "best_ms": 11_000,
+            "embedding": first,
+        },
+        {
+            "track_idx": 1,
+            "start_ms": 30_000,
+            "end_ms": 33_000,
+            "best_ms": 31_000,
+            "embedding": second,
+        },
+        {
+            "track_idx": 2,
+            "start_ms": 7_000,
+            "end_ms": 10_000,
+            "best_ms": 9_000,
+            "embedding": boundary_only,
+        },
+    ]
+
+    class Iterator:
+        def __init__(self):
+            self.done = False
+
+        def next(self):
+            if self.done:
+                return []
+            self.done = True
+            return rows
+
+        def close(self):
+            pass
+
+    class Collection:
+        expr = None
+
+        @classmethod
+        def query_iterator(cls, *, expr, output_fields, batch_size, timeout):
+            del output_fields, batch_size, timeout
+            cls.expr = expr
+            return Iterator()
+
+    class Client:
+        @staticmethod
+        def collection_for(modality):
+            assert modality == "face"
+            return Collection()
+
     class WindowFaceSearchEngine(FakeSearchEngine):
         def __init__(self):
             self.global_face_calls = 0
@@ -193,27 +254,18 @@ def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnost
 
         @staticmethod
         def _resolve_face_query(_text, _image):
-            return np.asarray([1.0, 0.0], dtype=np.float32)
+            vector = np.zeros(512, dtype=np.float32)
+            vector[0] = 1.0
+            return vector
 
-    face_dir = tmp_path / "video-1"
-    face_dir.mkdir()
-    np.savez(
-        face_dir / "face.npz",
-        embeddings=np.asarray(
-            [
-                [0.8, 0.6],
-                [0.25, np.sqrt(1.0 - 0.25**2)],
-            ],
-            dtype=np.float32,
-        ),
-        track_times_ms=np.asarray(
-            [[10_000, 13_000, 11_000], [30_000, 33_000, 31_000]],
-            dtype=np.int32,
-        ),
-    )
     orchestrator = FakeOrchestrator()
-    orchestrator.settings.index_dir = tmp_path
     orchestrator.search_engine = WindowFaceSearchEngine()
+    orchestrator.search_engine._get_milvus_client = lambda: Client()
+    orchestrator.catalog.get_modality_publication = lambda *_args: {
+        "status": "ready",
+        "asset_version": "face-v1",
+        "row_count": 3,
+    }
     lab = SnapMindPlannerLab(orchestrator)
     face_support = _step("s2", "face.search").model_copy(update={
         "role": "support",
@@ -248,6 +300,10 @@ def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnost
     assert tool_trace["confirmed_count"] == 1
     assert tool_trace["ambiguous_count"] == 1
     assert tool_trace["ambiguous_matches"][0]["cosine"] == pytest.approx(0.25)
+    assert 'asset_version == "face-v1"' in Collection.expr
+    assert "start_ms < 13000 and end_ms > 10000" in Collection.expr
+    assert "start_ms < 33000 and end_ms > 30000" in Collection.expr
+    assert confirmed["evidence"][-1]["features"]["source"] == "candidate_window_milvus"
 
 
 def test_reranker_face_evidence_pool_keeps_confirmed_and_ambiguous_without_scoring():
@@ -291,6 +347,61 @@ def test_reranker_face_evidence_pool_keeps_confirmed_and_ambiguous_without_scori
     assert trace["status_counts"] == {"confirmed": 1, "ambiguous": 1}
     assert ambiguous.support_contributions == {}
     assert ambiguous.aggregate_score == pytest.approx(0.6)
+
+
+def test_face_support_rejects_invalid_milvus_track_without_scoring():
+    class Iterator:
+        done = False
+
+        def next(self):
+            if self.done:
+                return []
+            self.done = True
+            return [{
+                "track_idx": 0,
+                "start_ms": 10_000,
+                "end_ms": 10_000,
+                "best_ms": 10_000,
+                "embedding": np.ones(512, dtype=np.float32),
+            }]
+
+        def close(self):
+            pass
+
+    collection = SimpleNamespace(query_iterator=lambda **_kwargs: Iterator())
+    client = SimpleNamespace(collection_for=lambda _modality: collection)
+    orchestrator = FakeOrchestrator()
+    orchestrator.catalog.get_modality_publication = lambda *_args: {
+        "status": "ready",
+        "asset_version": "face-v1",
+        "row_count": 1,
+    }
+    orchestrator.search_engine._get_milvus_client = lambda: client
+    orchestrator.search_engine._resolve_face_query = lambda *_args: np.ones(
+        512, dtype=np.float32
+    )
+    lab = SnapMindPlannerLab(orchestrator)
+    face_support = _step("s2", "face.search").model_copy(update={
+        "role": "support", "depends_on": ["s1"], "query": "王俊凯",
+    })
+    plan = CandidatePlan(
+        plan_id="balanced",
+        label="Balanced",
+        description="test",
+        estimated_cost="medium",
+        early_stop_threshold=1,
+        steps=[_step("s1", "visual.search"), face_support],
+    )
+
+    outcome = lab.execute("王俊凯吃包子特写", None, plan, None)
+
+    assert all(
+        item["planner_evidence"]["support_source_count"] == 0
+        for item in outcome["results"]
+    )
+    tool_trace = outcome["trace"][1]["tool_trace"]
+    assert tool_trace["confirmed_count"] == 0
+    assert tool_trace["errors"][0]["reason"] == "face_milvus_unavailable:ValueError"
 
 
 def test_face_primary_keeps_global_recall_behavior():

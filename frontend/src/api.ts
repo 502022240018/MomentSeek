@@ -94,12 +94,7 @@ export type Evidence = {
   modality: string;
   score: number;
   raw_score?: number | null;
-  robust_z?: number | null;
-  percentile?: number | null;
   decision?: string;
-  distribution_reliable?: boolean | null;
-  distribution_median?: number | null;
-  distribution_mad?: number | null;
   detail?: string;
   best_time?: number | null;
   unit_type?: string | null;
@@ -107,9 +102,6 @@ export type Evidence = {
   best_ms?: number | null;
   text?: string | null;
   features?: Record<string, unknown>;
-  visual_top1?: number | null;
-  visual_top3?: number | null;
-  visual_mean?: number | null;
 };
 
 export type SearchResult = {
@@ -237,6 +229,16 @@ export type VideoSpeaker = {
 
 export type SpeakerView = { video_id: string; tracks: VideoSpeaker[]; utterances: SpeakerUtterance[] };
 export type VoiceHit = { video_id: string; video_name: string; utterance_index: number; track_id: number | null; start_ms: number; end_ms: number; score: number; text: string; clip_url: string };
+export type VideoFaceGroup = {
+  group_idx: number; representative_track_idx: number; start_ms: number; end_ms: number; best_ms: number;
+  representative_quality: number; duration_ms: number; occurrence_count: number; importance_score: number;
+  thumbnail_url: string; media_url: string; entity_id?: string | null; entity_name?: string | null;
+};
+export type FaceGalleryView = {
+  video_id: string; asset_version: string; group_version: string;
+  total_group_count: number; eligible_group_count: number; displayed_group_count: number;
+  groups: VideoFaceGroup[];
+};
 
 async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init);
@@ -306,6 +308,9 @@ export const api = {
   deleteEntity: (entityId: string) =>
     json<{ status: string; id: string }>(`/api/entities/${entityId}`, { method: "DELETE" }),
   speakers: (videoId: string) => json<SpeakerView>(`/api/videos/${videoId}/speakers`),
+  faceGallery: (videoId: string) => json<FaceGalleryView>(`/api/videos/${videoId}/face-gallery`),
+  addFaceGroupToLibrary: (videoId: string, groupIdx: number, assetVersion: string, groupVersion: string, options: { entity_id?: string; new_entity_name?: string }) =>
+    json<Record<string, unknown>>(`/api/videos/${videoId}/face-gallery/${groupIdx}/library`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ asset_version: assetVersion, group_version: groupVersion, ...options }) }),
   updateSpeaker: (videoId: string, trackId: number, update: { display_name?: string; representative_utterance_index?: number; hidden?: boolean }) =>
     json<SpeakerView>(`/api/videos/${videoId}/speakers/${trackId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) }),
   updateUtterance: (videoId: string, utteranceIndex: number, update: { corrected_track_id: number | null; searchable: boolean }) =>

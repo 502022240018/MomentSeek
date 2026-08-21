@@ -48,6 +48,22 @@
 > 备份恢复，勿继续启动新版本。Speaker 向量本身未变，不需要为了此次索引切换重跑
 > Speaker 模型。
 
+> **Face DiskANN index upgrade（一次性）**：若已有 `face_embeddings` 使用旧
+> `IVF_FLAT/L2` 索引，在启用新应用版本前停止 Face 写入，先检查并执行：
+>
+> ```bash
+> docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+>   exec app python scripts/migrate_face_diskann_index.py
+>
+> docker compose --env-file .env -f compose/compose.yml -f compose/compose.ascend.yml \
+>   exec app python scripts/migrate_face_diskann_index.py \
+>   --execute --confirm-rebuild-face-index
+> ```
+>
+> 脚本只重建 `embedding` 索引，不读取 NPZ、不删除 collection 或行数据。只有输出
+> `status=migrated` 或 `status=already_compatible`，且迁移前后 `row_count` 一致，
+> 才可启用新版本。所有正式环境完成迁移后可删除该一次性脚本。
+
 ## 3. 预检查与灰度
 
 以下命令在应用容器中运行；把 Compose 文件组合替换为本环境实际使用的组合。若本环境自带 Milvus，命令追加 `-f compose/compose.milvus.yml`。

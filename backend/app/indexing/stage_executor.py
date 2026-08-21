@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app.catalog.db import Catalog
 from app.core.model_pool import ModelPool
 from app.core.settings import Settings
-from app.indexing.pipeline_manifest import write_stage_manifest
+from app.indexing.publication import channel_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ class StageContext:
     video_path: str
     index_dir: Path
     working_dir: Path
+    catalog: Catalog
     milvus_ctx: Any | None = None
 
 
@@ -64,13 +67,12 @@ def execute_stage(
     if settings.milvus_enabled and settings.milvus_write_enabled:
         from app.vector_store.milvus.milvus_stage_lock import video_stage_lock
 
-        # A stage publication updates the shared per-video manifest.  Serialise
-        # all Milvus-backed stages of one video, not merely identical stages,
-        # so independent rebuild requests cannot overwrite each other's
-        # publication pointer.
+        # Serialise publications for one video so an older, slower attempt can
+        # never overwrite the active Catalog pointer of a newer attempt.
         lock = video_stage_lock(index_dir, video_id=video["id"], stage="publish")
     with lock:
-        milvus_ctx = _setup_milvus_context(video["id"], index_dir, settings)
+        catalog = Catalog(settings.db_path)
+        milvus_ctx = _setup_milvus_context(video["id"], settings)
         context = StageContext(
             video=video,
             options=options,
@@ -79,6 +81,7 @@ def execute_stage(
             video_path=str(settings.resolve_path(video["file_path"])),
             index_dir=index_dir,
             working_dir=working_dir,
+            catalog=catalog,
             milvus_ctx=milvus_ctx,
         )
         return runner(context)
@@ -86,7 +89,6 @@ def execute_stage(
 
 def _setup_milvus_context(
     video_id: str,
-    index_dir: Path,
     settings: Settings | None = None,
 ):
     if settings is not None and not (
@@ -94,17 +96,14 @@ def _setup_milvus_context(
     ):
         return None
     try:
-        from app.vector_store.milvus.milvus_asset_version import reserve_next_attempt_version
         from app.vector_store.milvus.milvus_client import get_milvus_client
         from app.vector_store.milvus.milvus_indexer import MilvusWriteContext
 
         client = get_milvus_client()
         return MilvusWriteContext(
             video_id=video_id,
-            # Reserve before writing so an interrupted attempt is never reused.
-            # Online readers keep using the per-stage manifest until
-            # _write_manifest validates and publishes this version.
-            asset_version=reserve_next_attempt_version(index_dir),
+            # UUID attempts need no local counter file and are never reused.
+            asset_version=uuid.uuid4().hex,
             client=client,
         )
     except Exception as exc:
@@ -113,45 +112,65 @@ def _setup_milvus_context(
         ) from exc
 
 
-def _write_manifest(stage: str, context: StageContext, result: dict) -> None:
-    if context.milvus_ctx is not None:
-        written_rows = result.get("milvus_rows")
-        if written_rows is None:
-            raise RuntimeError(
-                f"Milvus stage={stage} did not report its written row count; refusing publish"
-            )
-        persisted_rows = context.milvus_ctx.client.count_video_modality_version(
-            context.video["id"], stage, context.milvus_ctx.asset_version
+def _stage_publication(stage: str, context: StageContext, result: dict) -> dict:
+    """Verify one completed Milvus write without making it visible yet."""
+    if context.milvus_ctx is None:
+        raise RuntimeError("Milvus publication requires a write context")
+    written_rows = result.get("milvus_rows")
+    if written_rows is None:
+        raise RuntimeError(
+            f"Milvus stage={stage} did not report its written row count; refusing publish"
         )
-        if persisted_rows != int(written_rows):
+    persisted_rows = context.milvus_ctx.client.count_video_modality_version(
+        context.video["id"], stage, context.milvus_ctx.asset_version
+    )
+    if persisted_rows != int(written_rows):
+        raise RuntimeError(
+            f"Milvus verification failed stage={stage} video={context.video['id']}: "
+            f"expected={written_rows} persisted={persisted_rows}"
+        )
+    if stage == "face":
+        group_version = str(result.get("face_group_version") or "").strip()
+        group_rows = result.get("face_group_rows")
+        if not group_version or group_rows is None:
             raise RuntimeError(
-                f"Milvus verification failed stage={stage} video={context.video['id']}: "
-                f"expected={written_rows} persisted={persisted_rows}"
+                "Face stage did not report its group version and row count; refusing publish"
             )
-        result["milvus_asset_version"] = context.milvus_ctx.asset_version
-        result["milvus_row_count"] = persisted_rows
-    write_stage_manifest(
+        persisted_group_rows = context.milvus_ctx.client.count_face_groups_version(
+            context.video["id"],
+            context.milvus_ctx.asset_version,
+            group_version,
+        )
+        if persisted_group_rows != int(group_rows):
+            raise RuntimeError(
+                f"Milvus Face group verification failed video={context.video['id']}: "
+                f"expected={group_rows} persisted={persisted_group_rows}"
+            )
+    result["milvus_asset_version"] = context.milvus_ctx.asset_version
+    result["milvus_row_count"] = persisted_rows
+    metadata = channel_metadata(
         stage,
-        index_dir=context.index_dir,
-        video=context.video,
+        result=result,
         options=context.options,
         settings=context.settings,
-        result=result,
     )
-    if context.milvus_ctx is not None:
-        # The manifest is the per-modality publication pointer.  Only after it
-        # points at the fully verified new version can older rows be reclaimed.
-        deleted = context.milvus_ctx.client.delete_video_modality_except_version(
-            context.video["id"], stage, context.milvus_ctx.asset_version
-        )
-        if deleted < 0:
-            logger.warning(
-                "published stage=%s video=%s but deferred old-version cleanup failed",
-                stage, context.video["id"],
-            )
-        from app.vector_store.milvus.milvus_asset_version import publish_asset_version
+    return {
+        "modality": stage,
+        "asset_version": context.milvus_ctx.asset_version,
+        "row_count": persisted_rows,
+        "metadata": metadata,
+    }
 
-        publish_asset_version(context.index_dir, context.milvus_ctx.asset_version)
+
+def _publish_stage(stage: str, context: StageContext, result: dict) -> None:
+    publication = _stage_publication(stage, context, result)
+    context.catalog.publish_modalities(
+        str(context.video["id"]),
+        [publication],
+    )
+    # Older versions remain available for an explicit retention window.  A
+    # separate maintenance job may reclaim them after deployment rollback is
+    # no longer required.
 
 
 def _run_visual(context: StageContext) -> dict:
@@ -178,7 +197,6 @@ def _run_visual(context: StageContext) -> dict:
         )
     result = build_visual_index(
         video_path=context.video_path,
-        output_path=str(context.index_dir / "visual.npz"),
         model_name=settings.clip_model,
         pretrained=settings.clip_pretrained,
         sample_fps=float(options.get("visual_sample_fps", settings.visual_sample_fps)),
@@ -200,7 +218,7 @@ def _run_visual(context: StageContext) -> dict:
         shot_detector_threshold=float(options.get("visual_shot_threshold", settings.visual_shot_threshold)),
         milvus_ctx=context.milvus_ctx,
     )
-    _write_manifest("visual", context, result)
+    _publish_stage("visual", context, result)
     return result
 
 
@@ -227,7 +245,6 @@ def _run_face(context: StageContext) -> dict:
         )
     result = build_face_index(
         video_path=context.video_path,
-        output_path=str(context.index_dir / "face.npz"),
         model_name=settings.face_model,
         sample_fps=float(options.get("face_sample_fps", settings.face_sample_fps)),
         provider=settings.face_provider,
@@ -238,9 +255,10 @@ def _run_face(context: StageContext) -> dict:
         prefer_ffmpeg=settings.frame_reader == "ffmpeg",
         ort_intra_op_threads=settings.face_ort_intra_op_threads,
         ort_inter_op_threads=settings.face_ort_inter_op_threads,
+        gallery_cosine_threshold=settings.face_gallery_cosine_threshold,
         milvus_ctx=context.milvus_ctx,
     )
-    _write_manifest("face", context, result)
+    _publish_stage("face", context, result)
     return result
 
 
@@ -254,7 +272,6 @@ def _run_asr(context: StageContext) -> dict:
         sidecar_path = str(settings.resolve_path(sidecar_path))
     result = build_asr_index(
         video_path=context.video_path,
-        output_path=str(context.index_dir / "asr.npz"),
         working_dir=str(context.working_dir),
         engine=str(options.get("asr_engine", settings.asr_engine)),
         model_name=str(options.get("asr_model", settings.asr_model)),
@@ -279,41 +296,75 @@ def _run_asr(context: StageContext) -> dict:
         semantic_local_files_only=settings.asr_semantic_local_files_only,
         debug_artifacts_enabled=bool(options.get("asr_debug_artifacts", settings.asr_debug_artifacts)),
         save_raw_transcript=bool(options.get("asr_save_raw_transcript", settings.asr_save_raw_transcript)),
+        debug_output_dir=str(context.index_dir / "debug"),
         vad_strategy=str(options.get("asr_vad_strategy", settings.asr_vad_strategy)),
         milvus_ctx=context.milvus_ctx,
     )
-    _write_manifest("asr", context, result)
+    asr_publication = _stage_publication("asr", context, result)
     if bool(options.get("asr_speaker_enabled", False)):
-        result["speaker"] = _run_speaker(context)
+        speaker_result, speaker_publication = _build_speaker_stage(
+            context,
+            asr_asset_version=str(context.milvus_ctx.asset_version),
+        )
+        # ASR chunks and their Speaker references become visible together. If
+        # either build or verification fails, this transaction is never reached
+        # and both previous Catalog pointers remain intact.
+        context.catalog.publish_modalities(
+            str(context.video["id"]),
+            [asr_publication, speaker_publication],
+        )
+        result["speaker"] = speaker_result
+    else:
+        # A Speaker generation contains ASR chunk references. Publishing a new
+        # ASR alone must therefore hide any Speaker generation built from the
+        # previous ASR, in the same transaction that switches the ASR pointer.
+        context.catalog.publish_modalities(
+            str(context.video["id"]),
+            [asr_publication],
+            disable_modalities=["speaker"],
+        )
     return result
 
 
-def _run_speaker(context: StageContext) -> dict:
+def _build_speaker_stage(
+    context: StageContext,
+    *,
+    asr_asset_version: str,
+) -> tuple[dict, dict]:
     from app.indexing.modalities.speaker.speaker import build_speaker_index
-    from app.indexing.manifest import load_index_manifest
 
     settings = context.settings
-    asr_asset_version = None
-    if context.milvus_ctx is not None:
-        manifest = load_index_manifest(context.index_dir) or {}
-        asr_channel = (manifest.get("channels") or {}).get("asr") or {}
-        asr_asset_version = asr_channel.get("milvus_asset_version")
-        if not asr_asset_version:
-            raise RuntimeError("Milvus speaker build requires a published ASR stage")
     result = build_speaker_index(
         video_path=context.video_path,
-        # The online source of truth is the ASR Milvus collection.  Keep the
-        # path only for explicit offline recovery invocations of the builder.
-        asr_path=str(context.index_dir / "asr.npz"),
-        output_path=str(context.index_dir / "speaker.npz"),
         working_dir=str(context.working_dir),
         model_repo=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_repo)),
         model_cache_dir=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_cache_dir)),
         device=settings.speaker_device,
         milvus_ctx=context.milvus_ctx,
-        asr_asset_version=str(asr_asset_version) if asr_asset_version else None,
+        asr_asset_version=asr_asset_version,
     )
-    _write_manifest("speaker", context, result)
+    result["source_asr_asset_version"] = asr_asset_version
+    publication = _stage_publication("speaker", context, result)
+    return result, publication
+
+
+def _run_speaker(context: StageContext) -> dict:
+    asr_publication = context.catalog.get_modality_publication(
+        str(context.video["id"]), "asr"
+    )
+    if not asr_publication or asr_publication.get("status") != "ready":
+        raise RuntimeError("Milvus speaker build requires a published ASR stage")
+    asr_asset_version = str(asr_publication.get("asset_version") or "").strip()
+    if not asr_asset_version:
+        raise RuntimeError("Milvus speaker build requires a published ASR asset version")
+    result, publication = _build_speaker_stage(
+        context,
+        asr_asset_version=asr_asset_version,
+    )
+    context.catalog.publish_modalities(
+        str(context.video["id"]),
+        [publication],
+    )
     return result
 
 
@@ -352,8 +403,8 @@ def _run_ocr(context: StageContext) -> dict:
         backend_pool_elapsed = time.perf_counter() - started
     result = build_ocr_index(
         video_path=context.video_path,
-        output_path=str(context.index_dir / "ocr.npz"),
         working_dir=str(context.working_dir),
+        duration_seconds=float(context.video["duration"]),
         sample_fps=float(options.get("ocr_sample_fps", settings.ocr_sample_fps)),
         decode_height=settings.ocr_decode_height,
         min_confidence=settings.ocr_min_confidence,
@@ -379,5 +430,5 @@ def _run_ocr(context: StageContext) -> dict:
     )
     if backend_pool_elapsed is not None:
         result["backend_pool_get_elapsed_seconds"] = round(backend_pool_elapsed, 3)
-    _write_manifest("ocr", context, result)
+    _publish_stage("ocr", context, result)
     return result

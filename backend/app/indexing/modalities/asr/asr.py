@@ -35,7 +35,6 @@ from app.core.model_sources import (
     resolve_modelscope_model_source,
 )
 from app.encoders.text import resolve_text_embedding_device
-from app.indexing.common import atomic_save_npz
 from app.indexing.text_semantic import build_text_semantic_arrays
 from app.media.media import extract_audio, parse_timecode
 
@@ -1078,17 +1077,19 @@ def _decode_audio(request: _AsrDecodeRequest) -> _AsrDecodeResult:
 
 
 def _no_audio_result(
-    output_path: str,
-    semantic_target: Path | None,
+    milvus_ctx: "MilvusWriteContext",
     *,
     model_name: str,
     requested_language: str,
     vad_strategy: str,
 ) -> dict:
-    _save_asr_npz(output_path, [], np.empty((0, 0), dtype=np.float16), np.empty((0,), dtype=np.int32))
-    if semantic_target is not None:
-        semantic_target.unlink(missing_ok=True)
-    return {
+    index_payload = _asr_index_payload(
+        [],
+        np.empty((0, 0), dtype=np.float16),
+        np.empty((0,), dtype=np.int32),
+    )
+    milvus_rows = _write_asr_payload(milvus_ctx, index_payload)
+    result = {
         "chunks": 0,
         "raw_chunks": 0,
         "raw_items": 0,
@@ -1110,14 +1111,15 @@ def _no_audio_result(
         "semantic_status": "empty",
         "semantic_chunks": 0,
         "warning": "no audio stream found",
+        "milvus_rows": milvus_rows,
     }
+    return result
 
 
 def _build_asr_semantic_result(
     chunks: list[dict],
     *,
     enabled: bool,
-    target: Path | None,
     model_name: str,
     model_dir: str,
     device: str,
@@ -1125,8 +1127,6 @@ def _build_asr_semantic_result(
     local_files_only: bool,
 ) -> dict:
     if not enabled:
-        if target is not None:
-            target.unlink(missing_ok=True)
         return {
             "embeddings": np.empty((0, 0), dtype=np.float16),
             "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
@@ -1143,8 +1143,6 @@ def _build_asr_semantic_result(
             local_files_only=local_files_only,
         )
     except Exception as exc:
-        if target is not None:
-            target.unlink(missing_ok=True)
         return {
             "embeddings": np.empty((0, 0), dtype=np.float16),
             "embedding_chunk_indices": np.empty((0,), dtype=np.int32),
@@ -1194,12 +1192,12 @@ def _asr_result_payload(
 
 def build_asr_index(
     video_path: str,
-    output_path: str,
     working_dir: str,
     engine: str,
     model_name: str,
     device: str,
     model_dir: str,
+    milvus_ctx: "MilvusWriteContext",
     language: str = "auto",
     sidecar_path: str | None = None,
     funasr_model: str = "paraformer-zh",
@@ -1207,7 +1205,6 @@ def build_asr_index(
     faster_whisper_model_dir: str | None = None,
     model_local_files_only: bool = True,
     semantic_enabled: bool = True,
-    semantic_output_path: str | None = None,
     semantic_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
     semantic_device: str = "cpu",
     semantic_model_dir: str | None = None,
@@ -1217,9 +1214,9 @@ def build_asr_index(
     save_raw_transcript: bool = False,
     debug_output_dir: str | None = None,
     vad_strategy: str = "funasr_fsmn",
-    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
-    semantic_target = Path(semantic_output_path) if semantic_output_path else None
+    if milvus_ctx is None:
+        raise ValueError("ASR 索引必须提供 MilvusWriteContext")
     requested_language = language or "auto"
     if sidecar_path:
         decode = _AsrDecodeResult(
@@ -1234,8 +1231,7 @@ def build_asr_index(
             audio_path = extract_audio(video_path, Path(working_dir) / "audio.wav")
         except subprocess.CalledProcessError:
             return _no_audio_result(
-                output_path,
-                semantic_target,
+                milvus_ctx,
                 model_name=model_name,
                 requested_language=requested_language,
                 vad_strategy=vad_strategy,
@@ -1263,7 +1259,6 @@ def build_asr_index(
     semantic_result = _build_asr_semantic_result(
         chunks,
         enabled=semantic_enabled,
-        target=semantic_target,
         model_name=semantic_model,
         model_dir=semantic_model_dir or str(Path(model_dir).parent / "text-embeddings"),
         device=semantic_device,
@@ -1271,7 +1266,7 @@ def build_asr_index(
         local_files_only=semantic_local_files_only,
     )
 
-    debug_dir = Path(debug_output_dir) if debug_output_dir else Path(output_path).parent / "debug"
+    debug_dir = Path(debug_output_dir) if debug_output_dir else Path(working_dir) / "debug"
     write_asr_debug_artifacts(
         debug_dir=debug_dir,
         enabled=debug_artifacts_enabled,
@@ -1286,36 +1281,27 @@ def build_asr_index(
         np.asarray(semantic_result["embeddings"], dtype=np.float16),
         np.asarray(semantic_result["embedding_chunk_indices"], dtype=np.int32),
     )
-    milvus_rows = None
-    if milvus_ctx is not None:
-        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
-
-        milvus_rows = write_modality_from_memory(
-            milvus_ctx,
-            "asr",
-            {
-                "chunk_times_ms": index_payload["chunk_times_ms"],
-                "texts": [str(value) for value in index_payload["texts"].tolist()],
-                "embeddings": index_payload["embeddings"],
-                "embedding_chunk_indices": index_payload["embedding_chunk_indices"],
-            },
-        )
-    # Retained only as an offline recovery artifact; no runtime path reads it.
-    atomic_save_npz(output_path, **index_payload)
+    milvus_rows = _write_asr_payload(milvus_ctx, index_payload)
     result = _asr_result_payload(decode, chunks, chunk_builder_stats, semantic_result)
     result["milvus_rows"] = milvus_rows
     return result
 
 
-def _save_asr_npz(
-    output_path: str | Path,
-    chunks: list[dict],
-    embeddings: np.ndarray,
-    embedding_chunk_indices: np.ndarray,
-) -> None:
-    atomic_save_npz(
-        output_path,
-        **_asr_index_payload(chunks, embeddings, embedding_chunk_indices),
+def _write_asr_payload(
+    milvus_ctx: "MilvusWriteContext",
+    index_payload: dict[str, np.ndarray],
+) -> int:
+    from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
+
+    return write_modality_from_memory(
+        milvus_ctx,
+        "asr",
+        {
+            "chunk_times_ms": index_payload["chunk_times_ms"],
+            "texts": [str(value) for value in index_payload["texts"].tolist()],
+            "embeddings": index_payload["embeddings"],
+            "embedding_chunk_indices": index_payload["embedding_chunk_indices"],
+        },
     )
 
 
@@ -1324,10 +1310,6 @@ def _asr_index_payload(
     embeddings: np.ndarray,
     embedding_chunk_indices: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    def utf8_bytes_array(values: list[str]) -> np.ndarray:
-        width = max((len(value.encode("utf-8")) for value in values), default=1)
-        return np.asarray(values, dtype=f"S{width}")
-
     def chunk_time_ms(chunk: dict, ms_key: str, seconds_key: str, legacy_key: str) -> int:
         if ms_key in chunk:
             return int(chunk[ms_key])
@@ -1341,13 +1323,9 @@ def _asr_index_payload(
         for chunk in chunks
     ], dtype=np.int32).reshape((-1, 2))
     texts = np.asarray([str(chunk.get("text", "")).strip() for chunk in chunks], dtype="U")
-    chunk_emotions = utf8_bytes_array([str(chunk.get("emotion", "")).strip() for chunk in chunks])
-    chunk_audio_events = utf8_bytes_array([str(chunk.get("audio_event", "")).strip() for chunk in chunks])
     return {
         "chunk_times_ms": chunk_times_ms,
         "texts": texts,
-        "chunk_emotions": chunk_emotions,
-        "chunk_audio_events": chunk_audio_events,
         "embeddings": np.asarray(embeddings, dtype=np.float16),
         "embedding_chunk_indices": np.asarray(embedding_chunk_indices, dtype=np.int32),
     }

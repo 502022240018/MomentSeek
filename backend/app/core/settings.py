@@ -80,12 +80,23 @@ class Settings(BaseSettings):
 
     face_model: str = "buffalo_l"
     face_sample_fps: float = 2.0
+    face_gallery_cosine_threshold: float = 0.52
+    face_gallery_max_groups: int = 24
+    face_gallery_min_duration_seconds: float = 3.0
+    face_gallery_min_occurrences: int = 3
     face_provider: str = "cpu"
     # ONNX Runtime otherwise creates one intra-op thread per physical CPU core
     # for every InsightFace session. On the shared Ascend host that means
     # hundreds of threads for the detector + recognizer alone.
     face_ort_intra_op_threads: int = 8
     face_ort_inter_op_threads: int = 1
+
+    # Face retrieval configuration (DiskANN + COSINE, no re-scoring).
+    # identity_threshold only drives the above_threshold/decision display flag;
+    # it does not gate cross-modal fusion (fusion uses score=confidence).
+    face_identity_threshold: float = 0.35   # ArcFace (buffalo_l) same-person cutoff
+    face_recall_multiplier: int = 1         # ann_limit = limit * this (re-score removed → 1)
+    face_diskann_search_list: int = 128     # DiskANN search_list (dynamically raised to >= ann_limit)
 
     asr_engine: str = "auto"
     # Used by ASR_ENGINE=whisper or ASR_ENGINE=faster-whisper. In auto mode this
@@ -163,6 +174,10 @@ class Settings(BaseSettings):
     milvus_enabled: bool = True
     milvus_host: str = "milvus"
     milvus_port: int = 19530
+    # A deployment may blue-green only the ASR collection while every other
+    # modality continues to use the shared Milvus data plane. The default
+    # preserves the canonical production collection name.
+    milvus_asr_collection: str = "asr_embeddings"
     # Bound Milvus retrieval latency. Requests fail explicitly after a failed
     # operation; retained NPZ artifacts are never queried online.
     milvus_query_timeout_seconds: float = 3.0
@@ -204,6 +219,18 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError("milvus_query_timeout_seconds 必须大于 0")
         return value
+
+    @field_validator("milvus_asr_collection")
+    @classmethod
+    def validate_milvus_collection_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or len(normalized) > 255:
+            raise ValueError("milvus_asr_collection 长度必须为 1 到 255")
+        if not (normalized[0].isalpha() or normalized[0] == "_"):
+            raise ValueError("milvus_asr_collection 必须以字母或下划线开头")
+        if not all(char.isalnum() or char == "_" for char in normalized):
+            raise ValueError("milvus_asr_collection 只能包含字母、数字和下划线")
+        return normalized
 
     @field_validator("color_grading_request_timeout_seconds")
     @classmethod
@@ -252,6 +279,41 @@ class Settings(BaseSettings):
     def validate_speaker_identity_threshold(cls, value: float) -> float:
         if not -1.0 <= value <= 1.0:
             raise ValueError("speaker_identity_threshold must be between -1.0 and 1.0")
+        return value
+
+    @field_validator("face_diskann_search_list", "face_recall_multiplier")
+    @classmethod
+    def validate_face_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Face retrieval parameters must be greater than 0")
+        return value
+
+    @field_validator("face_gallery_max_groups", "face_gallery_min_occurrences")
+    @classmethod
+    def validate_face_gallery_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Face gallery display parameters must be greater than 0")
+        return value
+
+    @field_validator("face_gallery_min_duration_seconds")
+    @classmethod
+    def validate_face_gallery_duration(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("face_gallery_min_duration_seconds must not be negative")
+        return value
+
+    @field_validator("face_gallery_cosine_threshold")
+    @classmethod
+    def validate_face_gallery_cosine_threshold(cls, value: float) -> float:
+        if not -1.0 <= value <= 1.0:
+            raise ValueError("face_gallery_cosine_threshold must be between -1.0 and 1.0")
+        return value
+
+    @field_validator("face_identity_threshold")
+    @classmethod
+    def validate_face_identity_threshold(cls, value: float) -> float:
+        if not -1.0 <= value <= 1.0:
+            raise ValueError("face_identity_threshold must be between -1.0 and 1.0")
         return value
 
     @field_validator("milvus_search_video_batch_size")
