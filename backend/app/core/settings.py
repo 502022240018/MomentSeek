@@ -91,12 +91,19 @@ class Settings(BaseSettings):
     face_ort_intra_op_threads: int = 8
     face_ort_inter_op_threads: int = 1
 
-    # Face retrieval configuration (DiskANN + COSINE, no re-scoring).
+    # Face retrieval configuration. New collections default to DiskANN/COSINE.
+    # The explicit IVF_FLAT/L2 profile keeps already-published legacy
+    # collections searchable without mutating a collection shared by another
+    # deployment. Legacy hits are re-scored with the returned embedding.
+    milvus_face_ann_profile: Literal["diskann_cosine", "ivf_flat_l2"] = (
+        "diskann_cosine"
+    )
     # identity_threshold only drives the above_threshold/decision display flag;
     # it does not gate cross-modal fusion (fusion uses score=confidence).
     face_identity_threshold: float = 0.35   # ArcFace (buffalo_l) same-person cutoff
     face_recall_multiplier: int = 1         # ann_limit = limit * this (re-score removed → 1)
     face_diskann_search_list: int = 128     # DiskANN search_list (dynamically raised to >= ann_limit)
+    face_ivf_nprobe: int = 64                # Legacy IVF_FLAT/L2 compatibility profile
 
     asr_engine: str = "auto"
     # Used by ASR_ENGINE=whisper or ASR_ENGINE=faster-whisper. In auto mode this
@@ -299,7 +306,11 @@ class Settings(BaseSettings):
             raise ValueError("Speaker preview durations must not be negative")
         return value
 
-    @field_validator("face_diskann_search_list", "face_recall_multiplier")
+    @field_validator(
+        "face_diskann_search_list",
+        "face_ivf_nprobe",
+        "face_recall_multiplier",
+    )
     @classmethod
     def validate_face_positive(cls, value: int) -> int:
         if value <= 0:

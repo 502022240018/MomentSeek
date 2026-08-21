@@ -10,7 +10,7 @@ migration is caught here rather than silently breaking search.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -101,3 +101,41 @@ def test_face_stale_l2_metric_fails_fast():
         milvus_face_candidates(
             client, _VIDEO_ID, _unit_query(512), _ASSET_VERSION, limit=10
         )
+
+
+def test_face_legacy_ivf_l2_collection_passes_only_with_explicit_profile():
+    from app.core.settings import Settings
+
+    settings = Settings(milvus_face_ann_profile="ivf_flat_l2")
+    client, collection = _make_client("IVF_FLAT", "L2")
+    _reset_index_verification()
+    try:
+        with patch(
+            "app.vector_store.milvus.milvus_search.get_settings",
+            return_value=settings,
+        ):
+            milvus_face_candidates(
+                client, _VIDEO_ID, _unit_query(512), _ASSET_VERSION, limit=10
+            )
+    finally:
+        _reset_index_verification()
+
+    collection.search.assert_called_once()
+
+
+def test_face_legacy_profile_still_rejects_metric_drift():
+    from app.core.settings import Settings
+
+    settings = Settings(milvus_face_ann_profile="ivf_flat_l2")
+    client, _ = _make_client("IVF_FLAT", "COSINE")
+    _reset_index_verification()
+    try:
+        with patch(
+            "app.vector_store.milvus.milvus_search.get_settings",
+            return_value=settings,
+        ), pytest.raises(MilvusServiceError, match="Metric type mismatch"):
+            milvus_face_candidates(
+                client, _VIDEO_ID, _unit_query(512), _ASSET_VERSION, limit=10
+            )
+    finally:
+        _reset_index_verification()

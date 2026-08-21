@@ -48,10 +48,8 @@ from .milvus_search_visual_v2 import milvus_visual_candidates_ann
 logger = logging.getLogger(__name__)
 
 
-# Milvus ANN search params. face and speaker both use DISKANN now; _HNSW_EF is
-# retained only for the currently-unreachable HNSW branch in _ann_search (kept
-# for a possible future modality that indexes with HNSW). IVF_FLAT is no longer
-# used by any modality, so its nprobe constant and branch were removed.
+# Milvus ANN search params. Face can explicitly target an already-published
+# IVF_FLAT/L2 collection; returned embeddings are then re-scored by cosine.
 _HNSW_EF    = 128
 
 # Per-modality metric config — static mapping, must stay in sync with
@@ -88,7 +86,18 @@ def get_modality_index_type(modality: str) -> str:
     if modality == "visual":
         settings = get_settings()
         return "DISKANN" if settings.visual_use_diskann else "HNSW"
+    if modality == "face":
+        profile = get_settings().milvus_face_ann_profile
+        return "IVF_FLAT" if profile == "ivf_flat_l2" else "DISKANN"
     return _STATIC_INDEX_TYPES[modality]
+
+
+def get_modality_metric_type(modality: str) -> str:
+    """Return the metric paired with the configured ANN index contract."""
+    if modality == "face":
+        profile = get_settings().milvus_face_ann_profile
+        return "L2" if profile == "ivf_flat_l2" else "COSINE"
+    return _MODALITY_METRIC[modality]
 
 
 class MilvusServiceError(RuntimeError):
@@ -140,7 +149,7 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
         if modality in _verified_index_modalities:
             return
         expected = get_modality_index_type(modality)
-        expected_metric = _MODALITY_METRIC[modality]
+        expected_metric = get_modality_metric_type(modality)
         # col.index() (the RPC) is intentionally inside the lock so that
         # concurrent searches on first startup do not fan out duplicate
         # introspection RPCs. The lock is held for one network round-trip
@@ -243,7 +252,7 @@ def _ann_search(
     """Execute a per-video ANN search; used only by face and speaker."""
     _verify_ann_index_type_once(client, modality)
     col = client.collection_for(modality)
-    metric     = _MODALITY_METRIC[modality]
+    metric     = get_modality_metric_type(modality)
     index_type = get_modality_index_type(modality)
     if index_type == "DISKANN":
         # DiskANN hard constraint: search_list >= limit. `limit` here is the
@@ -258,10 +267,15 @@ def _ann_search(
         # HNSW path lives in milvus_search_visual_v2 (not via _ann_search).
         # Retained for a possible future modality that indexes with HNSW.
         sp = {"metric_type": metric, "params": {"ef": _HNSW_EF}}
+    elif index_type == "IVF_FLAT" and modality == "face":
+        sp = {
+            "metric_type": metric,
+            "params": {"nprobe": get_settings().face_ivf_nprobe},
+        }
     else:
         raise MilvusServiceError(
             f"_ann_search does not support index_type={index_type!r} "
-            f"for modality={modality!r}; only DISKANN and HNSW are supported."
+            f"for modality={modality!r}."
         )
     try:
         span = profiler.span("milvus_rpc", modality) if profiler else nullcontext()
@@ -733,7 +747,7 @@ def milvus_face_candidates(
     threshold: float | None = None,
     profiler: RetrievalProfiler | None = None,
 ) -> list[Candidate]:
-    """Face track recall: single-phase ANN with trusted COSINE distance.
+    """Face track recall for modern and explicitly configured legacy indexes.
 
     Face embeddings are unit-normalised before write (faces.py), so under a
     COSINE metric Milvus returns ``_distance`` that IS the exact cosine
@@ -751,24 +765,43 @@ def milvus_face_candidates(
     if threshold is None:
         threshold = settings.face_identity_threshold
     query_norm = normalize(np.asarray(query, dtype=np.float32))
-    # Reranking removed → wide recall no longer needed. multiplier defaults to 1;
-    # search_list >= ann_limit is enforced in _ann_search's DISKANN branch.
-    ann_limit = min(limit * settings.face_recall_multiplier, 16_384)
+    legacy_l2 = settings.milvus_face_ann_profile == "ivf_flat_l2"
+    # IVF/L2 is approximate and its distance is not the score consumed by the
+    # platform, so recall at least 2x before exact cosine re-scoring.
+    recall_multiplier = max(2, settings.face_recall_multiplier) if legacy_l2 else (
+        settings.face_recall_multiplier
+    )
+    ann_limit = min(limit * recall_multiplier, 16_384)
+    output_fields = ["track_idx", "start_ms", "end_ms", "best_ms"]
+    if legacy_l2:
+        output_fields.append("embedding")
     hits = _ann_search(
         client, "face", video_id, asset_version, query_norm.tolist(),
         ann_limit,
-        ["track_idx", "start_ms", "end_ms", "best_ms"],
+        output_fields,
         profiler,
     )
     scoring_started = time.perf_counter()
-    # COSINE metric on unit vectors: _distance is the exact cosine similarity.
-    # Real Milvus ANN returns hits sorted by descending similarity; the explicit
-    # sort below enforces that contract regardless of mock order in tests, and is
-    # O(n) on an already-sorted production result. hits[:limit] drops any surplus
-    # when multiplier > 1; with multiplier=1 ann_limit==limit so it is a no-op.
-    scored: list[tuple[float, dict]] = [
-        (float(hit["_distance"]), hit) for hit in hits
-    ]
+    scored: list[tuple[float, dict]] = []
+    for hit in hits:
+        if not legacy_l2:
+            scored.append((float(hit["_distance"]), hit))
+            continue
+        embedding = np.asarray(hit.get("embedding"), dtype=np.float32).reshape(-1)
+        if (
+            embedding.size != query_norm.size
+            or not np.all(np.isfinite(embedding))
+            or float(np.linalg.norm(embedding)) <= 0.0
+        ):
+            logger.warning(
+                "FACE search dropped legacy IVF hit with invalid embedding "
+                "for video=%s track=%s",
+                video_id,
+                hit.get("track_idx"),
+            )
+            continue
+        cosine = float(np.dot(query_norm, normalize(embedding)))
+        scored.append((float(np.clip(cosine, -1.0, 1.0)), hit))
     scored.sort(key=lambda x: x[0], reverse=True)
     candidates: list[Candidate] = []
     invalid_time_rows = 0

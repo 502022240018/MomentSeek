@@ -55,6 +55,22 @@ def _get_visual_index_config() -> dict:
         }
 
 
+def _get_face_index_config() -> dict:
+    """Return the configured Face ANN contract.
+
+    ``ivf_flat_l2`` is an explicit compatibility profile for already-published
+    ArcFace collections. It never silently accepts index drift: search-time
+    introspection must still match both IVF_FLAT and L2.
+    """
+    if get_settings().milvus_face_ann_profile == "ivf_flat_l2":
+        return {
+            "index_type": "IVF_FLAT",
+            "metric_type": "L2",
+            "params": {"nlist": 1024},
+        }
+    return _STATIC_INDEX_CONFIGS["face_embeddings"]
+
+
 # Static index configs for non-visual modalities
 # Note: For collections with multiple indexes (like asr_embeddings / ocr_embeddings), this
 # dict only represents the primary dense vector index for informational purposes.
@@ -132,6 +148,8 @@ def get_collection_index_config(collection_name: str) -> dict:
     """
     if collection_name == "visual_embeddings":
         return _get_visual_index_config()
+    if collection_name == "face_embeddings":
+        return _get_face_index_config()
     return _STATIC_INDEX_CONFIGS[collection_name]
 
 
@@ -188,7 +206,7 @@ _COLLECTION_CONFIGS: dict[str, dict] = {
     },
     "face_embeddings": {
         "schema": create_face_schema,
-        "index": _STATIC_INDEX_CONFIGS["face_embeddings"],
+        "index": None,  # Resolved from the explicit Face ANN profile at runtime.
         "video_scoped": True,
     },
     "face_groups": {
@@ -428,7 +446,11 @@ class MilvusClient:
                         logger.info("Created index on %s.%s: %s", name, field_name, index_params["index_type"])
                 else:
                     # Single index (legacy format)
-                    index_config = get_collection_index_config(name) if name == "visual_embeddings" else config["index"]
+                    index_config = (
+                        get_collection_index_config(name)
+                        if name in {"visual_embeddings", "face_embeddings"}
+                        else config["index"]
+                    )
                     col.create_index(field_name="embedding", index_params=index_config)
 
                 col.load()

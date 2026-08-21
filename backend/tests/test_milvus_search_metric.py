@@ -14,6 +14,7 @@ from app.vector_store.milvus.milvus_client import _COLLECTION_FOR_MODALITY
 from app.vector_store.milvus.milvus_search import (
     _MODALITY_METRIC,
     get_modality_index_type,
+    get_modality_metric_type,
     milvus_asr_candidates_hybrid,
     milvus_face_candidates,
     milvus_ocr_candidates_hybrid,
@@ -47,7 +48,7 @@ def test_modality_metric_matches_collection_configs():
         # Get index config dynamically for visual, statically for others
         index_config = get_collection_index_config(collection_name)
         expected = index_config["metric_type"]
-        actual   = _MODALITY_METRIC[modality]
+        actual = get_modality_metric_type(modality)
         assert actual == expected, (
             f"modality '{modality}': _MODALITY_METRIC={actual!r} "
             f"but collection config says {expected!r}"
@@ -259,6 +260,94 @@ def test_face_candidates_trusts_cosine_distance():
     # cosine 0.72 > threshold 0.35 → above_threshold must be True
     assert candidate.above_threshold is True
     assert candidate.decision == "absolute_hit"
+
+
+def test_face_legacy_ivf_l2_profile_exactly_rescores_embeddings():
+    """Legacy IVF/L2 recall must be re-ranked with exact ArcFace cosine."""
+    from app.core.settings import Settings
+    from app.vector_store.milvus.milvus_search import _reset_index_verification
+
+    query = np.zeros(512, dtype=np.float32)
+    query[0] = 1.0
+    weaker = np.zeros(512, dtype=np.float32)
+    weaker[0] = 0.6
+    weaker[1] = 0.8
+    stronger = query.copy()
+
+    def face_hit(track_idx: int, l2: float, embedding: np.ndarray):
+        hit = MagicMock()
+        hit.distance = l2
+        hit.entity.get.side_effect = lambda field, default=None: {
+            "track_idx": track_idx,
+            "start_ms": track_idx * 1000,
+            "end_ms": (track_idx + 1) * 1000,
+            "best_ms": track_idx * 1000,
+            "embedding": embedding.tolist(),
+        }.get(field, default)
+        return hit
+
+    collection = MagicMock()
+    collection.index.return_value = MagicMock(
+        params={"index_type": "IVF_FLAT", "metric_type": "L2"}
+    )
+    # Deliberately return the weaker cosine hit first. Exact re-scoring must
+    # put track 1 first regardless of mocked ANN order/L2 values.
+    collection.search.return_value = [[
+        face_hit(0, 0.1, weaker),
+        face_hit(1, 0.2, stronger),
+    ]]
+    client = MagicMock()
+    client.collection_for.return_value = collection
+    settings = Settings(
+        milvus_face_ann_profile="ivf_flat_l2",
+        face_ivf_nprobe=37,
+        face_recall_multiplier=1,
+    )
+
+    _reset_index_verification()
+    try:
+        with patch(
+            "app.vector_store.milvus.milvus_search.get_settings",
+            return_value=settings,
+        ):
+            candidates = milvus_face_candidates(
+                client,
+                "vid-legacy",
+                query,
+                "legacy-version",
+                limit=2,
+                threshold=0.35,
+            )
+    finally:
+        _reset_index_verification()
+
+    assert [candidate.unit_id for candidate in candidates] == [1, 0]
+    assert [candidate.raw_score for candidate in candidates] == pytest.approx([1.0, 0.6])
+    search_kwargs = collection.search.call_args.kwargs
+    assert search_kwargs["param"] == {
+        "metric_type": "L2",
+        "params": {"nprobe": 37},
+    }
+    assert search_kwargs["limit"] == 4
+    assert "embedding" in search_kwargs["output_fields"]
+
+
+def test_face_collection_config_follows_explicit_legacy_profile():
+    from app.core.settings import Settings
+    from app.vector_store.milvus.milvus_client import get_collection_index_config
+
+    settings = Settings(milvus_face_ann_profile="ivf_flat_l2")
+    with patch(
+        "app.vector_store.milvus.milvus_client.get_settings",
+        return_value=settings,
+    ):
+        config = get_collection_index_config("face_embeddings")
+
+    assert config == {
+        "index_type": "IVF_FLAT",
+        "metric_type": "L2",
+        "params": {"nlist": 1024},
+    }
 
 
 def _candidate_hit(fields: dict, *, score: float = 0.8, distance: float = 0.8):
