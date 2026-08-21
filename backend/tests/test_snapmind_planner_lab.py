@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from fastapi import HTTPException
 
-from app.api.planner_lab_routes import _voice_reference
+from app.api.planner_lab_routes import _voice_exclude, _voice_reference
 from app.orchestration.retrieval_orchestration import OrchestrationError
 from app.orchestration.snapmind_lab import (
     CandidatePlan,
@@ -115,6 +115,19 @@ def test_upload_voice_reference_is_deferred_during_planning_but_required_for_exe
         _voice_reference(value, None, require_upload=True)
 
 
+def test_only_utterance_voice_reference_excludes_its_seed_from_planner_results():
+    assert _voice_exclude(
+        VoiceReference(
+            kind="utterance",
+            video_id="video-1",
+            utterance_index=7,
+            label="seed",
+        )
+    ) == ("video-1", 7)
+    assert _voice_exclude(VoiceReference(kind="entity", entity_id="person-1")) is None
+    assert _voice_exclude(VoiceReference(kind="upload", label="sample.wav")) is None
+
+
 def test_voice_reference_makes_voice_tool_available_and_primary():
     orchestrator = FakeOrchestrator(modalities=["visual", "speaker"])
     lab = SnapMindPlannerLab(orchestrator)
@@ -185,7 +198,10 @@ def test_voice_search_only_fuses_confirmed_absolute_threshold_hits(monkeypatch):
         steps=[_step("voice", "voice.search")],
     )
 
-    def fake_voice_search(*_args, **_kwargs):
+    observed = {}
+
+    def fake_voice_search(*_args, **kwargs):
+        observed.update(kwargs)
         return [
             {
                 "video_id": "video-1", "video_name": "demo.mp4",
@@ -211,8 +227,10 @@ def test_voice_search_only_fuses_confirmed_absolute_threshold_hits(monkeypatch):
         plan,
         None,
         voice_vectors=np.ones((1, 192), dtype=np.float32),
+        voice_exclude=("video-1", 7),
     )
 
+    assert observed["exclude"] == ("video-1", 7)
     assert outcome["count"] == 1
     assert outcome["results"][0]["planner_evidence"]["raw_scores"]["voice.search"] == 0.82
     assert outcome["trace"][0]["tool_trace"]["confirmed_count"] == 1

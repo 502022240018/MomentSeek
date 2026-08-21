@@ -91,6 +91,16 @@ def _voice_reference(
     return reference
 
 
+def _voice_exclude(reference: VoiceReference | None) -> tuple[str, int] | None:
+    if (
+        reference is None
+        or reference.kind != "utterance"
+        or reference.utterance_index is None
+    ):
+        return None
+    return reference.video_id or "", reference.utterance_index
+
+
 @router.get("/capabilities")
 def capabilities() -> dict:
     return planner_lab.capabilities()
@@ -193,6 +203,7 @@ async def execute_plan(
                 else None
             ),
             voice_vectors=voice_vectors,
+            voice_exclude=_voice_exclude(trusted_voice_reference),
         )
     except (OrchestrationError, SpeakerMilvusCoverageError, ValueError, IndexError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

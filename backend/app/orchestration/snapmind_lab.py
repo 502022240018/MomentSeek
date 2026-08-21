@@ -1225,6 +1225,7 @@ class SnapMindPlannerLab:
     def _voice_search_step(
         self,
         voice_vectors: np.ndarray | None,
+        voice_exclude: tuple[str, int] | None,
         step: PlanStep,
         video_ids: list[str] | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -1249,6 +1250,7 @@ class SnapMindPlannerLab:
             query_vectors=voice_vectors,
             video_ids=video_ids,
             limit=step.top_k,
+            exclude=voice_exclude,
         )
         confirmed: list[dict[str, Any]] = []
         ambiguous: list[dict[str, Any]] = []
@@ -1829,6 +1831,7 @@ class SnapMindPlannerLab:
         video_ids: list[str] | None,
         max_steps: int | None = None,
         voice_vectors: np.ndarray | None = None,
+        voice_exclude: tuple[str, int] | None = None,
     ) -> dict[str, Any]:
         self._validate_plan(plan)
         if any(step.enabled and step.tool_id == "voice.search" for step in plan.steps):
@@ -1896,6 +1899,7 @@ class SnapMindPlannerLab:
                         if step.tool_id == "voice.search":
                             raw_results, tool_trace = self._voice_search_step(
                                 voice_vectors,
+                                voice_exclude,
                                 step,
                                 video_ids,
                             )
