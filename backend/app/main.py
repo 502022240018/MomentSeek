@@ -16,6 +16,7 @@ from app.api import (
     face_gallery_routes,
     folder_routes,
     job_routes,
+    planner_lab_routes,
     search_routes,
     speaker_routes,
     system_routes,
@@ -60,6 +61,7 @@ for route_module in (
     face_gallery_routes,
     folder_routes,
     search_routes,
+    planner_lab_routes,
     color_grading_routes,
 ):
     app.include_router(route_module.router)

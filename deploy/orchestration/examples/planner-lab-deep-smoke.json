@@ -1,0 +1,45 @@
+{
+  "plan_id": "deep",
+  "label": "Deep smoke",
+  "description": "Small live plan for validating retrieval, fusion, and Qwen3.5 reranking.",
+  "estimated_cost": "high",
+  "fusion": "rrf",
+  "result_limit": 10,
+  "early_stop_threshold": 1.0,
+  "steps": [
+    {
+      "step_id": "s1",
+      "tool_id": "visual.search",
+      "operation": "search",
+      "query": "厨师在厨房做菜",
+      "weight": 1.0,
+      "top_k": 20,
+      "rationale": "Visual recall smoke test.",
+      "parameters": {}
+    },
+    {
+      "step_id": "s2",
+      "tool_id": "asr.search",
+      "operation": "search",
+      "query": "厨师一边做菜一边与其他人交谈",
+      "weight": 0.9,
+      "top_k": 20,
+      "rationale": "ASR recall and cross-modal fusion smoke test.",
+      "parameters": {}
+    },
+    {
+      "step_id": "s3",
+      "tool_id": "vlm.rerank",
+      "operation": "rerank",
+      "query": "厨师在厨房做菜并与其他人交谈",
+      "weight": 1.0,
+      "top_k": 5,
+      "rationale": "Qwen3.5 multimodal reranker smoke test.",
+      "parameters": {
+        "frame_count": 2,
+        "window_seconds": 1.0,
+        "score_weight": 0.8
+      }
+    }
+  ]
+}

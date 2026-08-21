@@ -19,6 +19,30 @@ import numpy as np
 import pytest
 
 
+def test_runtime_collection_layout_replaces_only_asr():
+    from app.core.settings import Settings
+    from app.vector_store.milvus.milvus_client import _runtime_collection_layout
+
+    names, configs = _runtime_collection_layout(
+        Settings(_env_file=None, milvus_asr_collection="asr_embeddings_planner_v2")
+    )
+
+    assert names["asr"] == "asr_embeddings_planner_v2"
+    assert names["visual"] == "visual_embeddings"
+    assert "asr_embeddings_planner_v2" in configs
+    assert "asr_embeddings" not in configs
+
+
+def test_runtime_collection_layout_rejects_reserved_name_collision():
+    from app.core.settings import Settings
+    from app.vector_store.milvus.milvus_client import _runtime_collection_layout
+
+    with pytest.raises(ValueError, match="conflicts with reserved"):
+        _runtime_collection_layout(
+            Settings(_env_file=None, milvus_asr_collection="ocr_embeddings")
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -206,10 +230,15 @@ def test_delete_video_calls_all_collections():
 
         MockCol.side_effect = col_factory
 
-        from app.vector_store.milvus.milvus_client import MilvusClient
+        from app.vector_store.milvus.milvus_client import (
+            MilvusClient,
+            _COLLECTION_FOR_MODALITY,
+        )
         # Create a minimally wired client without real Milvus.
         cli = object.__new__(MilvusClient)
         cli._ready = True
+        cli._collection_configs = dict(_COLLECTION_CONFIGS)
+        cli._collection_for_modality = dict(_COLLECTION_FOR_MODALITY)
         counts = cli.delete_video("some_video_id")
 
     expected_collections = {

@@ -1,0 +1,23 @@
+# Planner Lab release overlay for a server that already has a validated
+# MomentSeek Ascend runtime image. Runtime libraries remain inherited, while
+# the complete application tree is replaced so the image cannot mix a new
+# Planner/frontend with stale retrieval, Catalog, or Milvus modules.
+ARG BASE_IMAGE
+FROM node:20-alpine AS frontend-build
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM ${BASE_IMAGE}
+USER root
+WORKDIR /app/backend
+RUN rm -rf /app/backend/app /app/backend/scripts /app/backend/deploy/orchestration /app/deploy/models \
+    && mkdir -p /app/backend/deploy /app/deploy
+COPY backend/app/ ./app/
+COPY backend/scripts/ ./scripts/
+COPY deploy/orchestration/ ./deploy/orchestration/
+COPY deploy/models/ /app/deploy/models/
+COPY scripts/verify_models.py /app/scripts/verify_models.py
+COPY --from=frontend-build /src/frontend/dist ./app/static

@@ -153,6 +153,12 @@ class Settings(BaseSettings):
     orchestration_fail_open: bool = True
     orchestration_trace_enabled: bool = True
     orchestration_trace_path: Path = Path("runtime/orchestration-traces.jsonl")
+    # Isolated SnapMind-style experiment. It has separate routes/UI and never
+    # changes the behaviour of /api/search.
+    planner_lab_enabled: bool = True
+    planner_lab_prompt_path: Path = Path(
+        "deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt"
+    )
 
     # Query encoders live in the API process, independently from indexing
     # workers. Production can pay model load/kernel compilation during startup
@@ -168,6 +174,10 @@ class Settings(BaseSettings):
     milvus_enabled: bool = True
     milvus_host: str = "milvus"
     milvus_port: int = 19530
+    # A deployment may blue-green only the ASR collection while every other
+    # modality continues to use the shared Milvus data plane. The default
+    # preserves the canonical production collection name.
+    milvus_asr_collection: str = "asr_embeddings"
     # Bound Milvus retrieval latency. Requests fail explicitly after a failed
     # operation; retained NPZ artifacts are never queried online.
     milvus_query_timeout_seconds: float = 3.0
@@ -209,6 +219,18 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError("milvus_query_timeout_seconds 必须大于 0")
         return value
+
+    @field_validator("milvus_asr_collection")
+    @classmethod
+    def validate_milvus_collection_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or len(normalized) > 255:
+            raise ValueError("milvus_asr_collection 长度必须为 1 到 255")
+        if not (normalized[0].isalpha() or normalized[0] == "_"):
+            raise ValueError("milvus_asr_collection 必须以字母或下划线开头")
+        if not all(char.isalnum() or char == "_" for char in normalized):
+            raise ValueError("milvus_asr_collection 只能包含字母、数字和下划线")
+        return normalized
 
     @field_validator("color_grading_request_timeout_seconds")
     @classmethod

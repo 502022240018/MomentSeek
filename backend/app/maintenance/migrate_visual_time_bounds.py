@@ -254,22 +254,36 @@ def _plan_for_row(
     segment_id = _required_int(row, "segment_id")
     if frame_idx < 0:
         raise ValueError(f"visual row has negative frame_idx={frame_idx}")
-    if timestamp_ms < 0 or timestamp_ms >= duration_ms:
+    if timestamp_ms < 0 or timestamp_ms > duration_ms:
         raise ValueError(
             f"frame_idx={frame_idx}: timestamp_ms={timestamp_ms} outside "
-            f"[0,{duration_ms})"
+            f"[0,{duration_ms}]"
         )
-    expected_segment = timestamp_ms // segment_ms
-    if segment_id != expected_segment:
+    # Legacy samplers may emit one terminal frame exactly at video duration.
+    # It belongs to the final non-empty fixed window, never to a new zero-width
+    # bucket.  No timestamp beyond duration is accepted.
+    effective_timestamp_ms = min(timestamp_ms, duration_ms - 1)
+    expected_segment = effective_timestamp_ms // segment_ms
+    legacy_terminal_segment = timestamp_ms // segment_ms
+    allowed_source_segments = (
+        {expected_segment, legacy_terminal_segment}
+        if timestamp_ms == duration_ms
+        else {expected_segment}
+    )
+    if segment_id not in allowed_source_segments:
         raise ValueError(
             f"frame_idx={frame_idx}: segment_id={segment_id} does not match "
             f"timestamp_ms//segment_ms={expected_segment}"
         )
+    segment_id = expected_segment
     start_ms = segment_id * segment_ms
     end_ms = min(start_ms + segment_ms, duration_ms)
-    if not 0 <= start_ms <= timestamp_ms < end_ms <= duration_ms:
+    if not (
+        0 <= start_ms <= timestamp_ms <= end_ms <= duration_ms
+        and (timestamp_ms < end_ms or timestamp_ms == duration_ms)
+    ):
         raise ValueError(
-            f"frame_idx={frame_idx}: computed bounds [{start_ms},{end_ms}) are invalid"
+            f"frame_idx={frame_idx}: computed bounds [{start_ms},{end_ms}] are invalid"
         )
     model_version = str(row.get("model_version") or "").strip()
     if not model_version:

@@ -1,0 +1,1752 @@
+from __future__ import annotations
+
+import json
+import math
+import time
+import uuid
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+import numpy as np
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.orchestration.retrieval_orchestration import (
+    ALLOWED_MODALITIES,
+    OrchestrationError,
+    RerankPlan,
+    RetrievalPlan,
+    SearchOrchestrator,
+    _extract_json_object,
+)
+from app.retrieval.search import face_confidence
+
+
+PlanMode = Literal["guide", "assist", "auto"]
+FusionMethod = Literal["rrf", "combsum", "combmnz"]
+Operation = Literal["search", "rerank", "filter"]
+EvidenceRole = Literal["primary", "support", "constraint", "verifier", "fallback"]
+FailurePolicy = Literal["skip", "rollback", "fallback", "abort"]
+
+
+class StepQualityGate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    min_results: int = Field(default=1, ge=0, le=300)
+    min_score_spread: float = Field(default=0.01, ge=0, le=1)
+    min_match_rate: float = Field(default=0.0, ge=0, le=1)
+    min_survivors: int = Field(default=1, ge=0, le=100)
+    max_top_k_disruption: float = Field(default=1.0, ge=0, le=1)
+
+
+class PlanStep(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    step_id: str
+    tool_id: str
+    operation: Operation
+    role: EvidenceRole | None = None
+    target_id: str = "main"
+    depends_on: list[str] = Field(default_factory=list)
+    query: str = ""
+    weight: float = Field(default=1.0, ge=0, le=3)
+    top_k: int = Field(default=50, ge=1, le=300)
+    support_bonus_cap: float = Field(default=0.4, ge=0, le=1)
+    fallback_for: str | None = None
+    failure_policy: FailurePolicy = "skip"
+    quality_gate: StepQualityGate = Field(default_factory=StepQualityGate)
+    enabled: bool = True
+    rationale: str = ""
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def infer_role(self):
+        if self.role is None:
+            if self.tool_id == "vlm.rerank":
+                self.role = "verifier"
+            elif self.operation == "filter":
+                self.role = "constraint"
+            else:
+                self.role = "primary"
+        self.target_id = self.target_id.strip() or "main"
+        self.depends_on = list(dict.fromkeys(item.strip() for item in self.depends_on if item.strip()))
+        return self
+
+
+class CandidatePlan(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    plan_id: str
+    label: str
+    description: str
+    estimated_cost: Literal["low", "medium", "high"]
+    fusion: FusionMethod = "rrf"
+    result_limit: int = Field(default=24, ge=1, le=100)
+    early_stop_threshold: float = Field(default=0.9, ge=0, le=1)
+    steps: list[PlanStep] = Field(min_length=1, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_steps(self):
+        ids = [step.step_id for step in self.steps]
+        if len(set(ids)) != len(ids):
+            raise ValueError("plan step_id values must be unique")
+        known = set(ids)
+        for step in self.steps:
+            if any(item not in known for item in step.depends_on):
+                raise ValueError(f"step {step.step_id} depends on an unknown step")
+            if step.fallback_for is not None and step.fallback_for not in known:
+                raise ValueError(f"step {step.step_id} fallback_for is unknown")
+        return self
+
+
+class IdentityMention(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(min_length=1, max_length=100)
+    visual_fallback_query: str = Field(default="", max_length=500)
+    rationale: str = Field(default="", max_length=500)
+
+
+class PlanSet(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    query_intent: str
+    constraints: list[str] = Field(default_factory=list)
+    negative_constraints: list[str] = Field(default_factory=list)
+    identity_mentions: list[IdentityMention] = Field(default_factory=list, max_length=5)
+    plans: list[CandidatePlan] = Field(min_length=3, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_plan_shapes(self):
+        if {plan.plan_id for plan in self.plans} != {"fast", "balanced", "deep"}:
+            raise ValueError("plans must contain fast, balanced, and deep")
+        return self
+
+
+class PlannerLabScope(BaseModel):
+    video_ids: list[str] | None = None
+    folder_ids: list[str] | None = None
+
+    @field_validator("video_ids", "folder_ids")
+    @classmethod
+    def normalize_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        normalized = list(dict.fromkeys(item.strip() for item in value if item.strip()))
+        return normalized or None
+
+
+@dataclass(frozen=True)
+class Capability:
+    tool_id: str
+    label: str
+    modality: str
+    operations: tuple[Operation, ...]
+    score_range: tuple[float, float]
+    calibration: str
+    default_top_k: int
+    default_weight: float
+    cost: Literal["low", "medium", "high"]
+    latency: Literal["low", "medium", "high"]
+    temporal_granularity: str
+    description: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "tool_id": self.tool_id,
+            "label": self.label,
+            "modality": self.modality,
+            "operations": list(self.operations),
+            "score_range": list(self.score_range),
+            "calibration": self.calibration,
+            "default_top_k": self.default_top_k,
+            "default_weight": self.default_weight,
+            "cost": self.cost,
+            "latency": self.latency,
+            "temporal_granularity": self.temporal_granularity,
+            "description": self.description,
+        }
+
+
+CAPABILITIES: tuple[Capability, ...] = (
+    Capability(
+        "visual.search", "视觉语义检索", "visual", ("search", "rerank"),
+        (-1.0, 1.0), "per_step_minmax", 100, 1.0, "low", "medium",
+        "frame_or_segment", "搜索场景、动作、物体、外观和空间关系。",
+    ),
+    Capability(
+        "face.search", "人物检索", "face", ("search",),
+        (0.0, 1.0), "per_step_minmax", 80, 1.0, "low", "medium",
+        "face_track", "使用参考图或人物库中的身份搜索人物。",
+    ),
+    Capability(
+        "asr.search", "ASR 词法与语义检索", "asr", ("search", "rerank"),
+        (0.0, 1.0), "per_step_minmax", 100, 0.9, "low", "low",
+        "utterance", "搜索台词、讲话内容、人名、数字和主题。",
+    ),
+    Capability(
+        "ocr.search", "OCR 词法与语义检索", "ocr", ("search", "rerank"),
+        (0.0, 1.0), "per_step_minmax", 80, 0.75, "low", "low",
+        "screen_text_segment", "搜索字幕、招牌、Logo、幻灯片和画面文字。",
+    ),
+    Capability(
+        "confidence.filter", "置信度与共识过滤", "aggregate", ("filter",),
+        (0.0, 1.0), "none", 50, 1.0, "low", "low",
+        "moment", "按融合分数和独立证据来源数量过滤候选。",
+    ),
+    Capability(
+        "vlm.rerank", "Qwen3.5 多模态重排", "aggregate", ("rerank",),
+        (0.0, 1.0), "binary_probability", 20, 1.0, "high", "high",
+        "candidate_window", "读取候选片段的多帧与检索证据，判断其是否真正匹配查询。",
+    ),
+)
+CAPABILITY_BY_ID = {item.tool_id: item for item in CAPABILITIES}
+
+
+def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    folded = text.casefold()
+    return any(term.casefold() in folded for term in terms)
+
+
+def _make_step(
+    step_id: str,
+    tool_id: str,
+    query: str,
+    weight: float,
+    top_k: int,
+    rationale: str,
+    operation: Operation = "search",
+    role: EvidenceRole | None = None,
+    depends_on: list[str] | None = None,
+    fallback_for: str | None = None,
+    **parameters: Any,
+) -> PlanStep:
+    return PlanStep(
+        step_id=step_id,
+        tool_id=tool_id,
+        operation=operation,
+        role=role,
+        depends_on=depends_on or [],
+        fallback_for=fallback_for,
+        query=query,
+        weight=weight,
+        top_k=top_k,
+        rationale=rationale,
+        parameters=parameters,
+    )
+
+
+class HeuristicPlanGenerator:
+    """Deterministic fail-open plan generator for an unavailable or invalid LLM."""
+
+    OCR_TERMS = ("画面文字", "屏幕", "字幕", "招牌", "海报", "logo", "标题", "写着", "ocr")
+    ASR_TERMS = ("说", "提到", "谈到", "讲话", "台词", "语音", "听到", "讨论", "asr")
+    TEMPORAL_TERMS = ("先", "随后", "然后", "之后", "之前", "同时", "直到", "before", "after", "then")
+    FACE_TERMS = ("这个人", "同一个人", "人物", "人脸", "face")
+
+    def generate(
+        self,
+        query: str,
+        available_modalities: list[str],
+        has_query_image: bool,
+    ) -> PlanSet:
+        available = set(available_modalities)
+        wants_ocr = _contains_any(query, self.OCR_TERMS)
+        wants_asr = _contains_any(query, self.ASR_TERMS)
+        wants_face = has_query_image and _contains_any(query, self.FACE_TERMS)
+        temporal = _contains_any(query, self.TEMPORAL_TERMS)
+        preferred = "face" if wants_face else "ocr" if wants_ocr else "asr" if wants_asr else "visual"
+        primary_modality = preferred if preferred in available else next(iter(sorted(available)), "visual")
+        primary = f"{primary_modality}.search"
+        searchable = [name for name in (primary_modality, "visual", "asr", "ocr") if name in available]
+        searchable = list(dict.fromkeys(searchable))
+
+        fast = CandidatePlan(
+            plan_id="fast", label="Fast", estimated_cost="low", fusion="rrf",
+            description=f"只执行{CAPABILITY_BY_ID[primary].label}，快速获得可浏览结果。",
+            result_limit=24, early_stop_threshold=0.96,
+            steps=[_make_step("s1", primary, query, 1.0, 80, "选择最直接的召回通道。")],
+        )
+        balanced = CandidatePlan(
+            plan_id="balanced", label="Balanced", estimated_cost="medium", fusion="rrf",
+            description="使用互补模态逐步召回并以 RRF 融合。",
+            result_limit=24, early_stop_threshold=0.9,
+            steps=[
+                _make_step(
+                    f"s{index + 1}", f"{modality}.search", query,
+                    {"visual": 1.0, "face": 1.0, "asr": 0.85, "ocr": 0.7}[modality],
+                    {"visual": 100, "face": 80, "asr": 90, "ocr": 70}[modality],
+                    "补充独立模态证据并更新融合排名。",
+                    role="primary" if index == 0 else "support",
+                    depends_on=[] if index == 0 else ["s1"],
+                )
+                for index, modality in enumerate(searchable[:3])
+            ],
+        )
+        deep_steps = [
+            _make_step(
+                f"s{index + 1}", f"{modality}.search", query,
+                {"visual": 1.1, "face": 1.1, "asr": 0.9, "ocr": 0.75}[modality],
+                {"visual": 140, "face": 100, "asr": 120, "ocr": 100}[modality],
+                "扩大召回并积累可审计的跨模态证据。",
+                role="primary" if index == 0 else "support",
+                depends_on=[] if index == 0 else ["s1"],
+            )
+            for index, modality in enumerate(searchable)
+        ]
+        if temporal and "visual" in available:
+            deep_steps.append(
+                _make_step(
+                    f"s{len(deep_steps) + 1}", "visual.search", query, 1.2, 60,
+                    "时序查询在当前候选范围内再次强化视觉排序。", "rerank",
+                    role="support", depends_on=["s1"],
+                    restrict_to_current=True,
+                )
+            )
+        else:
+            deep_steps.append(
+                _make_step(
+                    f"s{len(deep_steps) + 1}", "confidence.filter", query, 1.0, 50,
+                    "过滤极低置信度候选，同时保留强单路命中。", "filter",
+                    role="constraint", depends_on=["s1"],
+                    min_score=0.01, min_sources=1,
+                )
+            )
+        deep = CandidatePlan(
+            plan_id="deep", label="Deep", estimated_cost="high", fusion="combmnz",
+            description="扩大召回并增加重排或过滤，强调多路共同命中。",
+            result_limit=30, early_stop_threshold=0.94, steps=deep_steps[:6],
+        )
+        return PlanSet(
+            query_intent="temporal" if temporal else f"{primary_modality}_retrieval",
+            constraints=["保持视频时间证据", "所有工具必须来自能力注册表"],
+            negative_constraints=[],
+            plans=[fast, balanced, deep],
+        )
+
+
+@dataclass
+class MomentNode:
+    video_id: str
+    video_name: str
+    start_time: float
+    end_time: float
+    representative: dict[str, Any]
+    primary_contributions: dict[str, float] = field(default_factory=dict)
+    support_contributions: dict[str, float] = field(default_factory=dict)
+    verifier_contributions: dict[str, float] = field(default_factory=dict)
+    support_caps: dict[str, float] = field(default_factory=dict)
+    constraint_results: dict[str, bool] = field(default_factory=dict)
+    diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
+    raw_scores: dict[str, float] = field(default_factory=dict)
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    primary_score: float = 0.0
+    support_bonus: float = 0.0
+    verifier_score: float | None = None
+    verifier_blend_weight: float = 0.0
+    aggregate_score: float = 0.0
+
+    @property
+    def key(self) -> str:
+        return f"{self.video_id}:{self.start_time:.3f}-{self.end_time:.3f}"
+
+    @property
+    def source_count(self) -> int:
+        return len(set(self.primary_contributions) | set(self.support_contributions))
+
+    @property
+    def primary_source_count(self) -> int:
+        return len(self.primary_contributions)
+
+    @property
+    def support_source_count(self) -> int:
+        return len(self.support_contributions)
+
+    @property
+    def contributions(self) -> dict[str, float]:
+        return {
+            **self.primary_contributions,
+            **self.support_contributions,
+            **self.verifier_contributions,
+        }
+
+
+def _minmax(scores: list[float]) -> list[float]:
+    if not scores:
+        return []
+    low, high = min(scores), max(scores)
+    if math.isclose(low, high):
+        # One isolated hit may be useful; a flat multi-hit distribution carries
+        # no ranking information and must not become a row of perfect scores.
+        return [1.0] if len(scores) == 1 else [0.0 for _ in scores]
+    return [(score - low) / (high - low) for score in scores]
+
+
+def _top_keys(nodes: list[MomentNode], limit: int = 10) -> list[str]:
+    return [node.key for node in sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)[:limit]]
+
+
+def _jaccard(left: list[str], right: list[str]) -> float:
+    a, b = set(left), set(right)
+    if not a and not b:
+        return 1.0
+    return len(a & b) / max(1, len(a | b))
+
+
+def _rank_stability(left: list[str], right: list[str]) -> float:
+    shared = set(left) & set(right)
+    if not shared:
+        return 0.0
+    max_displacement = max(1, max(len(left), len(right)) - 1)
+    displacement = sum(abs(left.index(key) - right.index(key)) for key in shared) / len(shared)
+    return max(0.0, 1.0 - displacement / max_displacement)
+
+
+class SnapMindPlannerLab:
+    def __init__(self, orchestrator: SearchOrchestrator):
+        self.orchestrator = orchestrator
+        self.settings = orchestrator.settings
+        self.catalog = orchestrator.catalog
+        self.search_engine = orchestrator.search_engine
+        self.fallback_generator = HeuristicPlanGenerator()
+        self.merge_gap_seconds = 3.0
+
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "enabled": getattr(self.settings, "planner_lab_enabled", True),
+            "llm_enabled": self.settings.orchestration_enabled,
+            "planner": "qwen3.5-vllm" if self.settings.orchestration_enabled else "heuristic-v1",
+            "capabilities": [item.as_dict() for item in CAPABILITIES],
+            "fusion_methods": ["rrf", "combsum", "combmnz"],
+            "modes": ["guide", "assist", "auto"],
+            "evidence_roles": ["primary", "support", "constraint", "verifier", "fallback"],
+            "step_decisions": ["accepted", "skipped", "rolled_back", "downweighted"],
+            "role_policy": {
+                "primary": "create_candidates",
+                "support": "enrich_existing_only",
+                "constraint": "filter_with_rollback",
+                "verifier": "rerank_with_rollback",
+                "fallback": "create_when_primary_fails",
+            },
+        }
+
+    def _available_modalities(self, video_ids: list[str] | None, has_query_image: bool) -> list[str]:
+        values = self.orchestrator._available_modalities(video_ids)
+        if not has_query_image:
+            # Text can still resolve a registered face entity, so face remains
+            # available when the catalog knows the name. The prompt is told not
+            # to invent identity evidence.
+            return values
+        return values
+
+    @staticmethod
+    def _identity_residual_query(
+        plan_set: PlanSet,
+        query: str,
+        entity_name: str,
+    ) -> str:
+        for mention in plan_set.identity_mentions:
+            if mention.name.strip() == entity_name and mention.visual_fallback_query.strip():
+                return mention.visual_fallback_query.strip()
+        return " ".join(query.replace(entity_name, " ").split()).strip(
+            " ,，、;；:：。.!！?？-—"
+        )
+
+    @staticmethod
+    def _identity_primary_modality(residual_query: str, available: set[str]) -> str:
+        if "asr" in available and _contains_any(residual_query, HeuristicPlanGenerator.ASR_TERMS):
+            return "asr"
+        if "ocr" in available and _contains_any(residual_query, HeuristicPlanGenerator.OCR_TERMS):
+            return "ocr"
+        if "visual" in available:
+            return "visual"
+        return next(iter(sorted(available - {"face"})), "face")
+
+    def _compound_identity_steps(
+        self,
+        plan_id: str,
+        residual_query: str,
+        entity_name: str,
+        available: set[str],
+    ) -> list[PlanStep]:
+        primary_modality = self._identity_primary_modality(residual_query, available)
+        primary_top_k = {"fast": 100, "balanced": 150, "deep": 300}[plan_id]
+        primary = _make_step(
+            "identity-primary",
+            f"{primary_modality}.search",
+            residual_query,
+            1.0,
+            primary_top_k,
+            "先用动作、场景或文本要求建立宽候选池，再在候选窗口内核验人物身份。",
+            role="primary",
+        )
+        face = _make_step(
+            "identity-face",
+            "face.search",
+            entity_name,
+            1.0,
+            100,
+            "只检查主通道候选窗口；达到阈值才作为身份 support，模糊结果仅供复核。",
+            role="support",
+            depends_on=[primary.step_id],
+            identity_threshold=0.35,
+            ambiguous_threshold=0.20,
+            window_padding_seconds=0.0,
+        )
+        if plan_id == "fast" or not self.settings.orchestration_enabled:
+            return [primary, face]
+
+        rerank_top_k = 20 if plan_id == "balanced" else 30
+        reranker = _make_step(
+            "identity-verifier",
+            "vlm.rerank",
+            residual_query,
+            1.0,
+            rerank_top_k,
+            "只复核已确认或模糊 Face 的身份候选，联合判断人物、动作与场景。",
+            "rerank",
+            role="verifier",
+            depends_on=[face.step_id],
+            candidate_pool="face_evidence",
+            identity_step_id=face.step_id,
+            include_face_statuses=["confirmed", "ambiguous"],
+            frame_count=4,
+            window_seconds=2.0,
+            score_weight=0.8,
+        )
+        return [primary, face, reranker]
+
+    def _sanitize_plan_set(
+        self,
+        plan_set: PlanSet,
+        available_modalities: list[str],
+        has_query_image: bool,
+        query: str,
+        matched_entity: dict[str, Any] | None = None,
+    ) -> PlanSet:
+        available = set(available_modalities)
+        entity_name = str((matched_entity or {}).get("name") or "").strip()
+        identity_residual = (
+            self._identity_residual_query(plan_set, query, entity_name)
+            if entity_name
+            else ""
+        )
+        compound_identity = bool(
+            entity_name
+            and identity_residual
+            and "face" in available
+            and bool(available - {"face"})
+        )
+        for plan in plan_set.plans:
+            accepted = []
+            expensive_steps = 0
+            for step in plan.steps:
+                capability = CAPABILITY_BY_ID.get(step.tool_id)
+                if capability is None or step.operation not in capability.operations:
+                    continue
+                if step.tool_id == "vlm.rerank" and not self.settings.orchestration_enabled:
+                    continue
+                if capability.modality in ALLOWED_MODALITIES and capability.modality not in available:
+                    continue
+                if capability.modality == "face" and not has_query_image:
+                    if not matched_entity:
+                        continue
+                if capability.cost == "high":
+                    expensive_steps += 1
+                    if expensive_steps > 1:
+                        continue
+                if step.operation in {"rerank", "filter"} and not any(
+                    accepted_step.operation == "search" for accepted_step in accepted
+                ):
+                    continue
+                if step.role == "verifier" and step.tool_id != "vlm.rerank":
+                    continue
+                if step.role == "constraint" and step.operation != "filter":
+                    continue
+                if step.role == "fallback" and not step.fallback_for:
+                    continue
+                step.query = step.query.strip() or query
+                step.depends_on = [item for item in step.depends_on if any(
+                    accepted_step.step_id == item for accepted_step in accepted
+                )]
+                if step.role == "fallback":
+                    primary_ids = [
+                        accepted_step.step_id
+                        for accepted_step in accepted
+                        if accepted_step.role == "primary"
+                        and accepted_step.operation == "search"
+                    ]
+                    if step.fallback_for not in primary_ids:
+                        if not primary_ids:
+                            continue
+                        original_fallback_for = step.fallback_for
+                        step.fallback_for = primary_ids[-1]
+                        step.parameters["fallback_retargeted_from"] = original_fallback_for
+                accepted.append(step)
+            if compound_identity:
+                accepted = self._compound_identity_steps(
+                    plan.plan_id,
+                    identity_residual,
+                    entity_name,
+                    available,
+                )
+                plan.fusion = "rrf"
+                plan.result_limit = 30 if plan.plan_id == "deep" else 24
+                plan.early_stop_threshold = 1.0
+                plan.estimated_cost = (
+                    "low"
+                    if plan.plan_id == "fast"
+                    else "high"
+                    if self.settings.orchestration_enabled
+                    else "medium"
+                )
+                plan.description = {
+                    "fast": "宽召回后定点检查人物身份，不调用 VLM。",
+                    "balanced": "对人物身份候选做有限的多帧语义复核。",
+                    "deep": "扩大主召回，并对更多身份候选做多帧语义复核。",
+                }[plan.plan_id]
+            if not accepted:
+                fallback = self.fallback_generator.generate(query, available_modalities, has_query_image)
+                replacement = next(item for item in fallback.plans if item.plan_id == plan.plan_id)
+                accepted = replacement.steps
+            if matched_entity and "face" in available and not any(
+                step.tool_id == "face.search" for step in accepted
+            ):
+                entity_name = str(matched_entity.get("name") or query)
+                accepted.insert(
+                    0,
+                    _make_step(
+                        "identity-face",
+                        "face.search",
+                        entity_name,
+                        1.0,
+                        80,
+                        f"实体库已匹配 {entity_name}，确定性加入人物身份证据。",
+                        role="primary",
+                    ),
+                )
+            if len(accepted) > 6:
+                verifier = next(
+                    (step for step in reversed(accepted) if step.role == "verifier"),
+                    None,
+                )
+                accepted = accepted[:6]
+                if verifier is not None and verifier not in accepted:
+                    accepted[-1] = verifier
+            kept_ids = {step.step_id for step in accepted}
+            for step in accepted:
+                step.depends_on = [item for item in step.depends_on if item in kept_ids]
+                if step.fallback_for not in kept_ids:
+                    step.fallback_for = None
+                    if step.role == "fallback":
+                        step.role = "support"
+            plan.steps = accepted
+        return plan_set
+
+    @staticmethod
+    def _public_entity(entity: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not entity:
+            return None
+        return {
+            key: entity[key]
+            for key in ("id", "name")
+            if entity.get(key) is not None
+        } or None
+
+    def _identity_clarifications(
+        self,
+        query: str,
+        plan_set: PlanSet,
+        matched_entity: dict[str, Any] | None,
+        has_query_image: bool,
+    ) -> list[dict[str, Any]]:
+        if matched_entity or has_query_image:
+            return []
+        clarifications: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for mention in plan_set.identity_mentions:
+            name = mention.name.strip()
+            if not name or name in seen or name not in query:
+                continue
+            seen.add(name)
+            if self.catalog.find_entity_in_text(name):
+                continue
+            fallback_query = mention.visual_fallback_query.strip()
+            if not fallback_query:
+                fallback_query = " ".join(query.replace(name, " ").split()).strip(
+                    " ,，、;；:："
+                )
+            clarifications.append({
+                "clarification_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"identity:{name}")),
+                "kind": "unregistered_identity",
+                "name": name,
+                "message": f"人物库中还没有“{name}”，当前无法用人脸证据确认身份。",
+                "visual_fallback_query": fallback_query or "人物",
+                "rationale": mention.rationale,
+                "options": ["upload_reference", "generic_visual", "keep_original"],
+            })
+        return clarifications
+
+    @staticmethod
+    def _normalize_llm_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Repair model-owned identifiers before strict semantic validation.
+
+        step_id is an executor bookkeeping key, not a planning decision. Small
+        models often repeat it across a plan even when every tool/parameter is
+        otherwise valid, so the deterministic boundary owns canonical IDs.
+        """
+        for plan in payload.get("plans", []):
+            if not isinstance(plan, dict):
+                continue
+            steps = plan.get("steps")
+            if not isinstance(steps, list):
+                continue
+            id_map: dict[str, str] = {}
+            for index, step in enumerate(steps, start=1):
+                if isinstance(step, dict):
+                    old_id = step.get("step_id")
+                    if isinstance(old_id, str) and old_id not in id_map:
+                        id_map[old_id] = f"s{index}"
+            for index, step in enumerate(steps, start=1):
+                if isinstance(step, dict):
+                    step["step_id"] = f"s{index}"
+                    dependencies = step.get("depends_on")
+                    if isinstance(dependencies, list):
+                        step["depends_on"] = [
+                            id_map.get(item, item) for item in dependencies if isinstance(item, str)
+                        ]
+                    fallback_for = step.get("fallback_for")
+                    if isinstance(fallback_for, str):
+                        step["fallback_for"] = id_map.get(fallback_for, fallback_for)
+                    parameters = step.get("parameters")
+                    if isinstance(parameters, dict):
+                        for field_name in ("query", "weight", "top_k"):
+                            if field_name in parameters:
+                                step[field_name] = parameters.pop(field_name)
+        return payload
+
+    def propose(
+        self,
+        query: str,
+        mode: PlanMode,
+        video_ids: list[str] | None,
+        has_query_image: bool,
+        profile_name: str | None = None,
+    ) -> dict[str, Any]:
+        available = self._available_modalities(video_ids, has_query_image)
+        if not available:
+            raise OrchestrationError("所选范围没有可用的检索索引")
+        matched_entity = self.catalog.find_entity_in_text(query) if not has_query_image else None
+        public_entity = self._public_entity(matched_entity)
+        fallback = self.fallback_generator.generate(query, available, has_query_image)
+        if self.settings.orchestration_enabled:
+            deep = next(item for item in fallback.plans if item.plan_id == "deep")
+            deep.steps = [step for step in deep.steps if step.tool_id != "confidence.filter"]
+            deep.steps.append(
+                _make_step(
+                    f"s{len(deep.steps) + 1}", "vlm.rerank", query, 1.0, 20,
+                    "用 Qwen3.5 多帧判断对高分候选做一次昂贵但精确的重排。", "rerank",
+                    role="verifier", depends_on=["s1"],
+                    frame_count=4, window_seconds=2.0, score_weight=0.8,
+                )
+            )
+        trace: dict[str, Any] = {"status": "fallback", "planner": "heuristic-v1"}
+        plan_set = fallback
+        entity_name = str((matched_entity or {}).get("name") or "").strip()
+        deterministic_identity = bool(
+            entity_name
+            and self._identity_residual_query(fallback, query, entity_name)
+            and "face" in set(available)
+            and bool(set(available) - {"face"})
+        )
+        if deterministic_identity:
+            trace = {
+                "status": "ok",
+                "planner": "registered-identity-cascade-v1",
+                "model_call_skipped": True,
+                "reason": "registered_compound_identity_has_validated_plan_skeleton",
+                "elapsed_seconds": 0.0,
+            }
+        elif self.settings.orchestration_enabled:
+            try:
+                _resolved_name, profile = self.orchestrator._profile(profile_name)
+                if profile.planner is None:
+                    raise OrchestrationError("selected profile has no planner")
+                provider = self.orchestrator._provider(profile.planner.provider)
+                prompt_path = self.settings.resolve_path(
+                    getattr(
+                        self.settings,
+                        "planner_lab_prompt_path",
+                        "deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt",
+                    )
+                )
+                prompt = prompt_path.read_text(encoding="utf-8")
+                context = {
+                    "query": query,
+                    "mode": mode,
+                    "available_modalities": available,
+                    "has_query_image": has_query_image,
+                    "matched_entity": public_entity,
+                    "capability_registry": [
+                        item.as_dict() for item in CAPABILITIES
+                        if item.tool_id != "vlm.rerank" or self.settings.orchestration_enabled
+                    ],
+                }
+                response, elapsed = provider.chat(
+                    {
+                        "messages": [
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+                        ],
+                        "temperature": 0,
+                        "max_tokens": 2200,
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": "snapmind_plan_set",
+                                "schema": PlanSet.model_json_schema(),
+                                "strict": True,
+                            },
+                        },
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    }
+                )
+                content = response["choices"][0]["message"]["content"]
+                raw_plan_set = self._normalize_llm_payload(_extract_json_object(content))
+                plan_set = PlanSet.model_validate(raw_plan_set)
+                plan_set = self._sanitize_plan_set(
+                    plan_set,
+                    available,
+                    has_query_image,
+                    query,
+                    matched_entity,
+                )
+                trace = {
+                    "status": "ok",
+                    **provider.descriptor,
+                    "prompt_version": "snapmind-planner-v2-role-aware",
+                    "elapsed_seconds": round(elapsed, 6),
+                    "raw_output": content,
+                }
+            except Exception as exc:
+                trace = {
+                    "status": "fallback",
+                    "planner": "heuristic-v1",
+                    "error": str(exc),
+                }
+                if not self.settings.orchestration_fail_open:
+                    raise
+        plan_set = self._sanitize_plan_set(
+            plan_set,
+            available,
+            has_query_image,
+            query,
+            matched_entity,
+        )
+        clarifications = self._identity_clarifications(
+            query,
+            plan_set,
+            matched_entity,
+            has_query_image,
+        )
+        return {
+            "mode": mode,
+            "available_modalities": available,
+            "matched_entity": public_entity,
+            "clarifications": clarifications,
+            "planner_trace": trace,
+            **plan_set.model_dump(),
+        }
+
+    @staticmethod
+    def _validate_plan(plan: CandidatePlan) -> None:
+        reranker_count = 0
+        has_retrieval = False
+        primary_steps: set[str] = set()
+        for step in plan.steps:
+            capability = CAPABILITY_BY_ID.get(step.tool_id)
+            if capability is None:
+                raise OrchestrationError(f"计划引用了未注册工具: {step.tool_id}")
+            if step.operation not in capability.operations:
+                raise OrchestrationError(f"{step.tool_id} 不支持 {step.operation} 操作")
+            if step.operation in {"rerank", "filter"} and not has_retrieval:
+                raise OrchestrationError("rerank/filter 必须放在至少一个检索步骤之后")
+            if step.tool_id == "vlm.rerank":
+                if step.role != "verifier":
+                    raise OrchestrationError("vlm.rerank 必须使用 verifier 证据角色")
+                reranker_count += 1
+                if reranker_count > 1:
+                    raise OrchestrationError("每个计划最多执行一次高成本 Qwen3.5 reranker")
+            if step.operation == "filter" and step.role != "constraint":
+                raise OrchestrationError("filter 步骤必须使用 constraint 证据角色")
+            if step.role == "constraint" and step.operation != "filter":
+                raise OrchestrationError("constraint 证据角色必须执行 filter")
+            if step.role == "fallback":
+                if not step.fallback_for or step.fallback_for not in primary_steps:
+                    raise OrchestrationError("fallback 必须引用此前的 primary 步骤")
+            if step.role in {"support", "constraint", "verifier"} and not has_retrieval:
+                raise OrchestrationError(f"{step.role} 必须放在至少一个检索步骤之后")
+            if step.role == "primary" and step.operation == "search":
+                primary_steps.add(step.step_id)
+            has_retrieval = has_retrieval or step.operation == "search"
+
+    def _find_node(self, nodes: list[MomentNode], result: dict[str, Any]) -> MomentNode | None:
+        planner_evidence = result.get("planner_evidence")
+        moment_id = (
+            planner_evidence.get("moment_id")
+            if isinstance(planner_evidence, dict)
+            else None
+        )
+        if moment_id:
+            exact = next((node for node in nodes if node.key == moment_id), None)
+            if exact is not None:
+                return exact
+        start = float(result.get("original_start_time", result.get("start_time", 0.0)))
+        end = max(
+            start,
+            float(result.get("original_end_time", result.get("end_time", start))),
+        )
+        center = (start + end) / 2
+        best: tuple[float, MomentNode] | None = None
+        for node in nodes:
+            if node.video_id != result.get("video_id"):
+                continue
+            node_center = (node.start_time + node.end_time) / 2
+            overlaps = start <= node.end_time and end >= node.start_time
+            distance = abs(center - node_center)
+            if overlaps or distance <= self.merge_gap_seconds:
+                if best is None or distance < best[0]:
+                    best = (distance, node)
+        return best[1] if best else None
+
+    @staticmethod
+    def _recompute(nodes: list[MomentNode], fusion: FusionMethod) -> None:
+        for node in nodes:
+            primary = sum(node.primary_contributions.values())
+            if fusion == "combmnz":
+                primary *= max(1, node.primary_source_count)
+            node.primary_score = primary
+            # Candidate admission is represented by the presence of a primary
+            # contribution, not by its normalized magnitude. Per-step MinMax
+            # legitimately assigns 0 to the weakest admitted candidate; a
+            # later verifier must still be able to rescue it.
+            if not node.primary_contributions:
+                node.support_bonus = 0.0
+                node.verifier_score = None
+                node.aggregate_score = 0.0
+                continue
+            cap_ratio = max(node.support_caps.values(), default=0.4)
+            support_bonus = min(sum(node.support_contributions.values()), primary * cap_ratio)
+            node.support_bonus = support_bonus
+            score = primary + support_bonus
+            if node.verifier_contributions:
+                verifier = max(node.verifier_contributions.values())
+                node.verifier_score = verifier
+                blend = node.verifier_blend_weight or 0.8
+                score = (1.0 - blend) * score + blend * verifier
+            else:
+                node.verifier_score = None
+            node.aggregate_score = score
+
+    def _merge_results(
+        self,
+        nodes: list[MomentNode],
+        results: list[dict[str, Any]],
+        step: PlanStep,
+        fusion: FusionMethod,
+        effective_role: EvidenceRole | None = None,
+    ) -> dict[str, Any]:
+        role = effective_role or step.role or "primary"
+        def score_for_role(item: dict[str, Any]) -> float:
+            if role == "verifier" and item.get("rerank_score") is not None:
+                try:
+                    value = float(item["rerank_score"])
+                    if math.isfinite(value):
+                        return value
+                except (TypeError, ValueError):
+                    pass
+            return float(item.get("score", 0.0))
+
+        scores = [score_for_role(item) for item in results]
+        normalized = _minmax(scores)
+        matched_count = 0
+        new_count = 0
+        unmatched_count = 0
+        for rank, (result, norm) in enumerate(zip(results, normalized), start=1):
+            node = self._find_node(nodes, result)
+            if node is None:
+                if role not in {"primary", "fallback"}:
+                    unmatched_count += 1
+                    continue
+                node = MomentNode(
+                    video_id=str(result.get("video_id", "")),
+                    video_name=str(result.get("video_name", "")),
+                    start_time=float(result.get("start_time", 0.0)),
+                    end_time=float(result.get("end_time", result.get("start_time", 0.0))),
+                    representative=dict(result),
+                )
+                nodes.append(node)
+                new_count += 1
+            else:
+                matched_count += 1
+                node.start_time = min(node.start_time, float(result.get("start_time", node.start_time)))
+                node.end_time = max(node.end_time, float(result.get("end_time", node.end_time)))
+                if (
+                    role != "verifier"
+                    and float(result.get("score", 0.0))
+                    > float(node.representative.get("score", 0.0))
+                ):
+                    node.representative = dict(result)
+            contribution = (
+                step.weight * norm
+                if role == "verifier"
+                else step.weight / (60.0 + rank)
+                if fusion == "rrf"
+                else step.weight * norm
+            )
+            # One modality/tool is one independent source even when a plan
+            # invokes it more than once. This prevents CombMNZ rewarding a
+            # repeated visual call as if it were cross-modal consensus.
+            key = step.tool_id
+            if role in {"primary", "fallback"}:
+                bucket = node.primary_contributions
+            elif role == "support":
+                bucket = node.support_contributions
+                node.support_caps[key] = step.support_bonus_cap
+            elif role == "verifier":
+                bucket = node.verifier_contributions
+                node.verifier_blend_weight = max(
+                    node.verifier_blend_weight,
+                    min(1.0, max(0.0, float(step.parameters.get("score_weight", 0.8)))),
+                )
+            else:
+                bucket = node.support_contributions
+            bucket[key] = max(bucket.get(key, 0.0), contribution)
+            node.raw_scores[key] = max(
+                node.raw_scores.get(key, float("-inf")), score_for_role(result)
+            )
+            existing = {
+                (item.get("modality"), item.get("detail"), item.get("best_time"))
+                for item in node.evidence
+            }
+            for evidence in result.get("evidence", []):
+                marker = (evidence.get("modality"), evidence.get("detail"), evidence.get("best_time"))
+                if marker not in existing:
+                    node.evidence.append(dict(evidence))
+                    existing.add(marker)
+        self._recompute(nodes, fusion)
+        spread = max(scores) - min(scores) if len(scores) > 1 else (1.0 if scores else 0.0)
+        above_count = sum(1 for item in results if item.get("above_threshold", True))
+        return {
+            "matched_existing_count": matched_count,
+            "new_candidate_count": new_count,
+            "unmatched_result_count": unmatched_count,
+            "score_spread": spread,
+            "above_threshold_ratio": above_count / len(results) if results else 0.0,
+        }
+
+    def _search_step(
+        self,
+        query: str,
+        image_path: str | None,
+        step: PlanStep,
+        video_ids: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        capability = CAPABILITY_BY_ID[step.tool_id]
+        results = self.search_engine.search(
+            step.query or query,
+            image_path,
+            [capability.modality],
+            video_ids,
+            0.5,
+            step.top_k,
+            float(step.parameters.get("merge_gap", 2.0)),
+            float(step.parameters.get("max_result_seconds", 15.0)),
+            str(step.parameters.get("visual_profile", "balanced")),
+            {capability.modality: step.top_k},
+            list(step.parameters.get("visual_subqueries", [])),
+        )
+        return [dict(item) for item in results]
+
+    def _face_support_step(
+        self,
+        query: str,
+        image_path: str | None,
+        nodes: list[MomentNode],
+        step: PlanStep,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Verify identity only inside the current candidate windows.
+
+        A support channel must not spend its budget on unrelated global face
+        tracks.  The current Top-N moments are grouped by video, each face index
+        is scored once, and the best overlapping track is attached to the exact
+        candidate moment.  Weak matches remain observable in ``tool_trace`` but
+        never enter fusion or source counts.
+        """
+        confirmed_threshold = min(
+            1.0, max(-1.0, float(step.parameters.get("identity_threshold", 0.35)))
+        )
+        ambiguous_threshold = min(
+            confirmed_threshold,
+            max(-1.0, float(step.parameters.get("ambiguous_threshold", 0.20))),
+        )
+        padding_seconds = min(
+            30.0, max(0.0, float(step.parameters.get("window_padding_seconds", 0.0)))
+        )
+        selected = sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)[: step.top_k]
+        trace: dict[str, Any] = {
+            "strategy": "candidate_window_face_verification",
+            "candidate_window_count": len(selected),
+            "video_count": 0,
+            "face_track_count": 0,
+            "confirmed_count": 0,
+            "ambiguous_count": 0,
+            "rejected_count": 0,
+            "no_face_track_count": 0,
+            "thresholds": {
+                "confirmed": confirmed_threshold,
+                "ambiguous": ambiguous_threshold,
+            },
+            "window_padding_seconds": padding_seconds,
+            "ambiguous_matches": [],
+            "errors": [],
+        }
+        resolver = getattr(self.search_engine, "_resolve_face_query", None)
+        if not callable(resolver):
+            trace.update({"status": "skipped", "reason": "face_query_resolver_unavailable"})
+            return [], trace
+        face_query = resolver(step.query or query, image_path)
+        if face_query is None:
+            trace.update({"status": "skipped", "reason": "face_query_unresolved"})
+            return [], trace
+        query_vector = np.asarray(face_query, dtype=np.float32).reshape(-1)
+        query_norm = float(np.linalg.norm(query_vector))
+        if query_norm <= 1e-12:
+            trace.update({"status": "skipped", "reason": "empty_face_query"})
+            return [], trace
+        query_vector /= query_norm
+
+        by_video: dict[str, list[MomentNode]] = {}
+        for node in selected:
+            by_video.setdefault(node.video_id, []).append(node)
+        trace["video_count"] = len(by_video)
+
+        confirmed: list[dict[str, Any]] = []
+        ambiguous: list[dict[str, Any]] = []
+        padding_ms = int(round(padding_seconds * 1000))
+        for video_id, video_nodes in by_video.items():
+            try:
+                embeddings, times = self._face_tracks_for_candidate_windows(
+                    video_id=video_id,
+                    nodes=video_nodes,
+                    padding_ms=padding_ms,
+                )
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                trace["errors"].append(
+                    {
+                        "video_id": video_id,
+                        "reason": f"face_milvus_unavailable:{type(exc).__name__}",
+                    }
+                )
+                trace["no_face_track_count"] += len(video_nodes)
+                continue
+            if not len(embeddings) or embeddings.shape[1] != len(query_vector):
+                trace["no_face_track_count"] += len(video_nodes)
+                continue
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            unit_embeddings = embeddings / np.maximum(norms, 1e-12)
+            similarities = unit_embeddings @ query_vector
+            trace["face_track_count"] += len(embeddings)
+
+            for node in video_nodes:
+                start_ms = max(0, int(round(node.start_time * 1000)) - padding_ms)
+                end_ms = int(round(node.end_time * 1000)) + padding_ms
+                matching = np.flatnonzero(
+                    (times[:, 0] < end_ms) & (times[:, 1] > start_ms)
+                )
+                if not len(matching):
+                    trace["no_face_track_count"] += 1
+                    continue
+                best_index = int(matching[int(np.argmax(similarities[matching]))])
+                cosine = float(similarities[best_index])
+                confidence = face_confidence(cosine)
+                track_start_ms, track_end_ms, best_ms = [
+                    int(value) for value in times[best_index]
+                ]
+                diagnostic = {
+                    "moment_id": node.key,
+                    "video_id": video_id,
+                    "start_time": node.start_time,
+                    "end_time": node.end_time,
+                    "track_start_time": round(track_start_ms / 1000, 3),
+                    "track_end_time": round(track_end_ms / 1000, 3),
+                    "best_time": round(best_ms / 1000, 3),
+                    "cosine": round(cosine, 6),
+                    "confidence": round(confidence, 6),
+                }
+                if cosine < confirmed_threshold:
+                    if cosine >= ambiguous_threshold:
+                        trace["ambiguous_count"] += 1
+                        node.diagnostics[f"{step.step_id}:face"] = {
+                            **diagnostic,
+                            "status": "ambiguous",
+                        }
+                        ambiguous.append(diagnostic)
+                    else:
+                        trace["rejected_count"] += 1
+                    continue
+
+                trace["confirmed_count"] += 1
+                node.diagnostics[f"{step.step_id}:face"] = {
+                    **diagnostic,
+                    "status": "confirmed",
+                }
+                detail = (
+                    f"[candidate_window] face cosine={cosine:.3f} · "
+                    f"confidence={confidence * 100:.1f}% · confirmed"
+                )
+                support_result = dict(node.representative)
+                support_result.update(
+                    {
+                        "video_id": node.video_id,
+                        "video_name": node.video_name,
+                        "start_time": node.start_time,
+                        "end_time": node.end_time,
+                        "score": confidence,
+                        "modalities": ["face"],
+                        "above_threshold": True,
+                        "decision": "absolute_hit",
+                        "evidence": [
+                            {
+                                "modality": "face",
+                                "score": confidence,
+                                "raw_score": cosine,
+                                "decision": "absolute_hit",
+                                "best_time": best_ms / 1000,
+                                "unit_type": "track",
+                                "unit_id": best_index,
+                                "best_ms": best_ms,
+                                "features": {
+                                    "face_cosine": cosine,
+                                    "source": "candidate_window_milvus",
+                                    "track_start_ms": track_start_ms,
+                                    "track_end_ms": track_end_ms,
+                                },
+                                "detail": detail,
+                            }
+                        ],
+                        "planner_evidence": {"moment_id": node.key},
+                    }
+                )
+                confirmed.append(support_result)
+
+        trace["ambiguous_matches"] = sorted(
+            ambiguous, key=lambda item: float(item["cosine"]), reverse=True
+        )[:20]
+        trace["status"] = "ok"
+        return sorted(confirmed, key=lambda item: float(item["score"]), reverse=True), trace
+
+    @staticmethod
+    def _merged_candidate_windows(
+        nodes: list[MomentNode], padding_ms: int
+    ) -> list[tuple[int, int]]:
+        windows = sorted(
+            (
+                max(0, int(round(node.start_time * 1000)) - padding_ms),
+                int(round(node.end_time * 1000)) + padding_ms,
+            )
+            for node in nodes
+        )
+        merged: list[tuple[int, int]] = []
+        for start_ms, end_ms in windows:
+            if end_ms < start_ms:
+                raise ValueError("candidate window has invalid time bounds")
+            if merged and start_ms <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end_ms))
+            else:
+                merged.append((start_ms, end_ms))
+        return merged
+
+    def _face_tracks_for_candidate_windows(
+        self,
+        *,
+        video_id: str,
+        nodes: list[MomentNode],
+        padding_ms: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Read only Face tracks overlapping current candidates from Milvus."""
+        publication_getter = getattr(self.catalog, "get_modality_publication", None)
+        if not callable(publication_getter):
+            raise RuntimeError("face publication lookup is unavailable")
+        publication = publication_getter(video_id, "face")
+        if not publication or publication.get("status") != "ready":
+            raise RuntimeError("ready Face publication is missing")
+        asset_version = str(publication.get("asset_version") or "").strip()
+        row_count = int(publication.get("row_count") or 0)
+        if not asset_version or row_count < 0:
+            raise ValueError("Face publication is invalid")
+        if row_count == 0 or not nodes:
+            return (
+                np.empty((0, 512), dtype=np.float32),
+                np.empty((0, 3), dtype=np.int64),
+            )
+
+        windows = self._merged_candidate_windows(nodes, padding_ms)
+        overlap_expr = " or ".join(
+            f"(start_ms < {end_ms} and end_ms > {start_ms})"
+            for start_ms, end_ms in windows
+        )
+        expr = " and ".join(
+            (
+                f"video_id == {json.dumps(video_id, ensure_ascii=False)}",
+                f"asset_version == {json.dumps(asset_version, ensure_ascii=False)}",
+                f"({overlap_expr})",
+            )
+        )
+        client_getter = getattr(self.search_engine, "_get_milvus_client", None)
+        if not callable(client_getter):
+            raise RuntimeError("Milvus client lookup is unavailable")
+        collection = client_getter().collection_for("face")
+        query_iterator = getattr(collection, "query_iterator", None)
+        if not callable(query_iterator):
+            raise RuntimeError("Milvus query_iterator is required")
+        iterator = query_iterator(
+            expr=expr,
+            output_fields=[
+                "track_idx", "start_ms", "end_ms", "best_ms", "embedding",
+            ],
+            batch_size=512,
+            timeout=float(
+                getattr(self.settings, "milvus_query_timeout_seconds", 3.0)
+            ),
+        )
+        vectors: list[np.ndarray] = []
+        times: list[list[int]] = []
+        seen_tracks: set[int] = set()
+        try:
+            while True:
+                page = iterator.next()
+                if not page:
+                    break
+                for row in page:
+                    if not isinstance(row, dict):
+                        raise ValueError("Milvus returned a non-object Face row")
+                    values = {
+                        field: row.get(field)
+                        for field in ("track_idx", "start_ms", "end_ms", "best_ms")
+                    }
+                    if any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, np.integer))
+                        for value in values.values()
+                    ):
+                        raise ValueError("Face row has invalid integer metadata")
+                    track_idx = int(values["track_idx"])
+                    start_ms = int(values["start_ms"])
+                    end_ms = int(values["end_ms"])
+                    best_ms = int(values["best_ms"])
+                    if (
+                        track_idx < 0
+                        or track_idx in seen_tracks
+                        or start_ms < 0
+                        or end_ms <= start_ms
+                        or not start_ms <= best_ms <= end_ms
+                    ):
+                        raise ValueError("Face row violates the track contract")
+                    vector = np.asarray(row.get("embedding"), dtype=np.float32)
+                    if vector.shape != (512,) or not np.isfinite(vector).all():
+                        raise ValueError("Face row has an invalid embedding")
+                    norm = float(np.linalg.norm(vector))
+                    if not math.isfinite(norm) or norm <= 1e-12:
+                        raise ValueError("Face row has a zero embedding")
+                    seen_tracks.add(track_idx)
+                    vectors.append(vector / norm)
+                    times.append([start_ms, end_ms, best_ms])
+        finally:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                close()
+        return (
+            np.asarray(vectors, dtype=np.float32).reshape((-1, 512)),
+            np.asarray(times, dtype=np.int64).reshape((-1, 3)),
+        )
+
+    def _restrict_to_current(
+        self, nodes: list[MomentNode], results: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return [item for item in results if self._find_node(nodes, item) is not None]
+
+    @staticmethod
+    def _select_rerank_nodes(
+        nodes: list[MomentNode], step: PlanStep
+    ) -> tuple[list[MomentNode], dict[str, Any]]:
+        ordered = sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)
+        pool = str(step.parameters.get("candidate_pool", "current_top_k"))
+        trace: dict[str, Any] = {
+            "strategy": pool,
+            "input_candidate_count": len(ordered),
+        }
+        if pool != "face_evidence":
+            selected = ordered[: step.top_k]
+            trace["selected_candidate_count"] = len(selected)
+            return selected, trace
+
+        identity_step_id = str(step.parameters.get("identity_step_id", "")).strip()
+        raw_statuses = step.parameters.get(
+            "include_face_statuses", ["confirmed", "ambiguous"]
+        )
+        if isinstance(raw_statuses, str):
+            raw_statuses = [raw_statuses]
+        statuses = {
+            str(value)
+            for value in raw_statuses
+            if str(value) in {"confirmed", "ambiguous"}
+        }
+        if not statuses:
+            statuses = {"confirmed", "ambiguous"}
+        diagnostic_key = f"{identity_step_id}:face" if identity_step_id else ""
+
+        selected: list[MomentNode] = []
+        status_counts = {"confirmed": 0, "ambiguous": 0}
+        for node in ordered:
+            if diagnostic_key:
+                diagnostic = node.diagnostics.get(diagnostic_key)
+            else:
+                diagnostic = next(
+                    (
+                        value
+                        for key, value in reversed(list(node.diagnostics.items()))
+                        if key.endswith(":face")
+                    ),
+                    None,
+                )
+            status = str((diagnostic or {}).get("status", ""))
+            if status not in statuses:
+                continue
+            status_counts[status] += 1
+            selected.append(node)
+            if len(selected) >= step.top_k:
+                break
+        trace.update(
+            {
+                "identity_step_id": identity_step_id or None,
+                "include_face_statuses": sorted(statuses),
+                "status_counts": status_counts,
+                "selected_candidate_count": len(selected),
+            }
+        )
+        return selected, trace
+
+    def _rerank_step(
+        self, query: str, nodes: list[MomentNode], step: PlanStep
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if not self.settings.orchestration_enabled:
+            raise OrchestrationError("Qwen3.5 reranker 未启用")
+        _profile_name, profile = self.orchestrator._profile(None)
+        if profile.reranker is None:
+            raise OrchestrationError("当前编排 Profile 没有 reranker")
+        selected_nodes, pool_trace = self._select_rerank_nodes(nodes, step)
+        candidates = self._serialize_results(selected_nodes, len(selected_nodes))
+        if not candidates:
+            return [], {
+                "status": "skipped",
+                "reason": "no_candidates",
+                "candidate_pool": pool_trace,
+            }
+        retrieval_plan = RetrievalPlan(
+            query_intent="planner_lab_rerank",
+            modalities=["visual"],
+            candidate_limit=max(1, len(candidates)),
+            result_limit=max(1, len(candidates)),
+            rerank=RerankPlan(
+                enabled=True,
+                top_n=min(step.top_k, len(candidates)),
+                frame_count=int(step.parameters.get("frame_count", 4)),
+                window_seconds=float(step.parameters.get("window_seconds", 2.0)),
+                score_weight=float(step.parameters.get("score_weight", 0.8)),
+            ),
+        )
+        results, tool_trace = self.orchestrator._run_reranker(
+            profile, query, retrieval_plan, candidates
+        )
+        tool_trace = dict(tool_trace or {})
+        tool_trace["candidate_pool"] = pool_trace
+        return results, tool_trace
+
+    @staticmethod
+    def _filter(nodes: list[MomentNode], step: PlanStep) -> list[MomentNode]:
+        min_score = float(step.parameters.get("min_score", 0.0))
+        min_sources = int(step.parameters.get("min_sources", 1))
+        kept = []
+        for node in nodes:
+            passed = node.aggregate_score >= min_score and node.source_count >= min_sources
+            node.constraint_results[step.step_id] = passed
+            if passed:
+                kept.append(node)
+        return sorted(kept, key=lambda item: item.aggregate_score, reverse=True)[:step.top_k]
+
+    @staticmethod
+    def _serialize_results(nodes: list[MomentNode], limit: int) -> list[dict[str, Any]]:
+        ordered = sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)[:limit]
+        maximum = max((item.aggregate_score for item in ordered), default=0.0)
+        payload = []
+        for node in ordered:
+            result = dict(node.representative)
+            result.update(
+                {
+                    "start_time": round(node.start_time, 3),
+                    "end_time": round(node.end_time, 3),
+                    "score": round(node.aggregate_score / maximum, 6) if maximum > 0 else 0.0,
+                    "modalities": sorted({
+                        item.get("modality", "") for item in node.evidence if item.get("modality")
+                    }),
+                    "evidence": node.evidence,
+                    "above_threshold": bool(node.representative.get("above_threshold", True)),
+                    "planner_evidence": {
+                        "moment_id": node.key,
+                        "raw_scores": {key: round(value, 6) for key, value in node.raw_scores.items()},
+                        "source_contrib": {
+                            key: round(value, 6) for key, value in node.contributions.items()
+                        },
+                        "source_count": node.source_count,
+                        "primary_source_count": node.primary_source_count,
+                        "support_source_count": node.support_source_count,
+                        "primary_contrib": {
+                            key: round(value, 6) for key, value in node.primary_contributions.items()
+                        },
+                        "support_contrib": {
+                            key: round(value, 6) for key, value in node.support_contributions.items()
+                        },
+                        "verifier_contrib": {
+                            key: round(value, 6) for key, value in node.verifier_contributions.items()
+                        },
+                        "constraint_results": dict(node.constraint_results),
+                        "diagnostics": dict(node.diagnostics),
+                        "primary_score": round(node.primary_score, 6),
+                        "support_bonus": round(node.support_bonus, 6),
+                        "verifier_score": (
+                            round(node.verifier_score, 6) if node.verifier_score is not None else None
+                        ),
+                        "verifier_blend_weight": round(node.verifier_blend_weight, 6),
+                    },
+                }
+            )
+            payload.append(result)
+        return payload
+
+    @staticmethod
+    def _quality_decision(
+        step: PlanStep,
+        role: EvidenceRole,
+        metrics: dict[str, Any],
+    ) -> tuple[str, str]:
+        gate = step.quality_gate
+        raw_count = int(metrics.get("raw_result_count", 0))
+        if role == "constraint" and int(metrics.get("output_candidate_count", 0)) < gate.min_survivors:
+            return "rolled_back", "constraint_too_restrictive"
+        if raw_count < gate.min_results:
+            return "skipped", "insufficient_results"
+        if (
+            role != "constraint"
+            and raw_count > 1
+            and float(metrics.get("score_spread", 0.0)) < gate.min_score_spread
+        ):
+            return "rolled_back", "flat_score_distribution"
+        if role == "support":
+            matched = int(metrics.get("matched_existing_count", 0))
+            match_rate = matched / raw_count if raw_count else 0.0
+            if matched == 0 or match_rate < gate.min_match_rate:
+                return "skipped", "support_did_not_match_primary"
+        if (
+            int(metrics.get("input_candidate_count", 0)) > 0
+            and float(metrics.get("top_k_disruption", 0.0)) > gate.max_top_k_disruption
+        ):
+            return "rolled_back", "top_k_disruption_exceeded"
+        return "accepted", "quality_gate_passed"
+
+    def execute(
+        self,
+        query: str,
+        image_path: str | None,
+        plan: CandidatePlan,
+        video_ids: list[str] | None,
+        max_steps: int | None = None,
+    ) -> dict[str, Any]:
+        self._validate_plan(plan)
+        execution_id = uuid.uuid4().hex
+        started = time.perf_counter()
+        nodes: list[MomentNode] = []
+        trace: list[dict[str, Any]] = []
+        failed_primary_steps: set[str] = set()
+        step_statuses: dict[str, str] = {}
+        stop_reason = "plan_completed"
+        planned_steps = plan.steps[:max_steps or len(plan.steps)]
+
+        for index, step in enumerate(planned_steps):
+            step_started = time.perf_counter()
+            before = _top_keys(nodes)
+            input_count = len(nodes)
+            tool_trace: dict[str, Any] | None = None
+            effective_role: EvidenceRole = step.role or "primary"
+            decision = "accepted"
+            decision_reason = "quality_gate_passed"
+            merge_metrics: dict[str, Any] = {}
+            checkpoint = deepcopy(nodes)
+
+            dependency_failed = any(
+                step_statuses.get(item) not in {"accepted", "downweighted"}
+                for item in step.depends_on
+            )
+            fallback_not_needed = (
+                effective_role == "fallback"
+                and step.fallback_for not in failed_primary_steps
+            )
+            if not step.enabled:
+                decision, decision_reason = "skipped", "disabled_by_user"
+                raw_count = 0
+            elif (
+                dependency_failed
+                and effective_role != "fallback"
+                and not (effective_role == "support" and not nodes)
+            ):
+                decision, decision_reason = "skipped", "dependency_not_accepted"
+                raw_count = 0
+            elif fallback_not_needed:
+                decision, decision_reason = "skipped", "fallback_not_needed"
+                raw_count = 0
+            else:
+                if effective_role == "support" and not nodes:
+                    effective_role = "fallback"
+                    decision_reason = "support_promoted_for_empty_primary_pool"
+                try:
+                    if step.operation == "filter":
+                        nodes = self._filter(nodes, step)
+                        raw_count = len(nodes)
+                    elif step.tool_id == "vlm.rerank":
+                        raw_results, tool_trace = self._rerank_step(query, nodes, step)
+                        raw_count = len(raw_results)
+                        merge_metrics = self._merge_results(
+                            nodes, raw_results, step, plan.fusion, "verifier"
+                        )
+                        nodes = sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)
+                    else:
+                        if step.tool_id == "face.search" and effective_role == "support" and nodes:
+                            raw_results, tool_trace = self._face_support_step(
+                                query, image_path, nodes, step
+                            )
+                        else:
+                            raw_results = self._search_step(query, image_path, step, video_ids)
+                        if step.operation == "rerank" and step.parameters.get("restrict_to_current") and nodes:
+                            raw_results = self._restrict_to_current(nodes, raw_results)
+                        raw_count = len(raw_results)
+                        merge_metrics = self._merge_results(
+                            nodes, raw_results, step, plan.fusion, effective_role
+                        )
+                        nodes = sorted(nodes, key=lambda item: item.aggregate_score, reverse=True)
+                        candidate_limit = max(step.top_k, plan.result_limit)
+                        if effective_role == "support":
+                            candidate_limit = max(candidate_limit, input_count)
+                        nodes = nodes[:candidate_limit]
+                except Exception as exc:
+                    if step.failure_policy == "abort":
+                        raise
+                    nodes = checkpoint
+                    raw_count = 0
+                    decision = "rolled_back" if step.failure_policy == "rollback" else "skipped"
+                    decision_reason = f"tool_error:{type(exc).__name__}"
+                    tool_trace = {"status": "error", "error": str(exc)}
+
+            preview_after = _top_keys(nodes)
+            preview_jaccard = _jaccard(before, preview_after) if before else 0.0
+            preview_stability = _rank_stability(before, preview_after) if before else 0.0
+            metrics = {
+                "input_candidate_count": input_count,
+                "raw_result_count": raw_count,
+                "output_candidate_count": len(nodes),
+                "top_k_jaccard": preview_jaccard,
+                "rank_stability": preview_stability,
+                "top_k_disruption": 1.0 - preview_jaccard if before else 0.0,
+                **merge_metrics,
+            }
+            if decision == "accepted":
+                decision, quality_reason = self._quality_decision(step, effective_role, metrics)
+                if decision_reason == "quality_gate_passed":
+                    decision_reason = quality_reason
+                elif decision != "accepted":
+                    decision_reason = f"{decision_reason};{quality_reason}"
+            if decision in {"skipped", "rolled_back"}:
+                nodes = checkpoint
+                if step.role == "primary":
+                    failed_primary_steps.add(step.step_id)
+
+            after = _top_keys(nodes)
+            jaccard = _jaccard(before, after) if before else 0.0
+            stability = _rank_stability(before, after) if before else 0.0
+            step_statuses[step.step_id] = decision
+            pending_required_step_ids = [
+                remaining.step_id
+                for remaining in planned_steps[index + 1 :]
+                if remaining.enabled
+                and remaining.role in {"primary", "constraint", "verifier"}
+            ]
+            trace.append(
+                {
+                    "step_index": index,
+                    "step": step.model_dump(),
+                    "input_candidate_count": input_count,
+                    "raw_result_count": raw_count,
+                    "output_candidate_count": len(nodes),
+                    "decision": decision,
+                    "decision_reason": decision_reason,
+                    "effective_role": effective_role,
+                    "quality_metrics": {
+                        key: round(value, 4) if isinstance(value, float) else value
+                        for key, value in metrics.items()
+                    },
+                    "elapsed_seconds": round(time.perf_counter() - step_started, 3),
+                    "top_k_jaccard": round(jaccard, 4),
+                    "rank_stability": round(stability, 4),
+                    "top_moments": after[:5],
+                    "added_to_top": [key for key in after if key not in before],
+                    "removed_from_top": [key for key in before if key not in after],
+                    "tool_trace": tool_trace,
+                    "early_stop_blocked_by": pending_required_step_ids,
+                }
+            )
+            if (
+                decision == "accepted"
+                and index >= 1
+                and before
+                and jaccard >= plan.early_stop_threshold
+                and stability >= plan.early_stop_threshold
+                and not pending_required_step_ids
+            ):
+                stop_reason = "ranking_stable"
+                break
+
+        if max_steps is not None and max_steps < len(plan.steps) and stop_reason == "plan_completed":
+            stop_reason = "paused_after_step"
+        results = self._serialize_results(nodes, plan.result_limit)
+        outcome = {
+            "execution_id": execution_id,
+            "plan": plan.model_dump(),
+            "executed_steps": len(trace),
+            "stop_reason": stop_reason,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "count": len(results),
+            "above_count": sum(1 for item in results if item.get("above_threshold")),
+            "accepted_steps": sum(1 for item in trace if item["decision"] == "accepted"),
+            "skipped_steps": sum(1 for item in trace if item["decision"] == "skipped"),
+            "rolled_back_steps": sum(1 for item in trace if item["decision"] == "rolled_back"),
+            "results": results,
+            "trace": trace,
+        }
+        self.orchestrator._write_trace(
+            {
+                "trace_type": "snapmind_planner_lab",
+                "query": query,
+                "video_ids": video_ids,
+                **outcome,
+            }
+        )
+        return outcome
