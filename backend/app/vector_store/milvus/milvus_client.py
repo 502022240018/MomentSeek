@@ -356,6 +356,7 @@ class MilvusClient:
 
     _instance: MilvusClient | None = None
     _instance_lock: threading.Lock = threading.Lock()
+    _init_lock: threading.Lock = threading.Lock()
 
     def __new__(cls) -> MilvusClient:
         if cls._instance is None:
@@ -368,24 +369,35 @@ class MilvusClient:
     def __init__(self) -> None:
         if self._ready:
             return
-        s = get_settings()
-        self._collection_for_modality, self._collection_configs = (
-            _runtime_collection_layout(s)
-        )
-        host = s.milvus_host
-        port = str(s.milvus_port)
-        logger.info("Connecting to Milvus at %s:%s", host, port)
-        connections.connect(
-            alias="default",
-            host=host,
-            port=port,
-            timeout=s.milvus_query_timeout_seconds,
-        )
-        self._ready = True
-        self._init_collections()
-        logger.info(
-            "MilvusClient ready — %d collections", len(self._collection_configs)
-        )
+        with self._init_lock:
+            if self._ready:
+                return
+            s = get_settings()
+            self._collection_for_modality, self._collection_configs = (
+                _runtime_collection_layout(s)
+            )
+            host = s.milvus_host
+            port = str(s.milvus_port)
+            logger.info("Connecting to Milvus at %s:%s", host, port)
+            connections.connect(
+                alias="default",
+                host=host,
+                port=port,
+                timeout=s.milvus_query_timeout_seconds,
+            )
+            try:
+                self._init_collections()
+            except Exception:
+                # A partly initialized singleton must never become usable.  In
+                # particular, schema validation failures are persistent release
+                # blockers, not one-request errors that the next call may bypass.
+                self._ready = False
+                connections.disconnect(alias="default")
+                raise
+            self._ready = True
+            logger.info(
+                "MilvusClient ready — %d collections", len(self._collection_configs)
+            )
 
     # ------------------------------------------------------------------
     # Collection init
