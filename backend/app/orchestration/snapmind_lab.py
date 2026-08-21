@@ -1162,7 +1162,7 @@ class SnapMindPlannerLab:
                 start_ms = max(0, int(round(node.start_time * 1000)) - padding_ms)
                 end_ms = int(round(node.end_time * 1000)) + padding_ms
                 matching = np.flatnonzero(
-                    (times[:, 0] <= end_ms) & (times[:, 1] >= start_ms)
+                    (times[:, 0] < end_ms) & (times[:, 1] > start_ms)
                 )
                 if not len(matching):
                     trace["no_face_track_count"] += 1
@@ -1293,7 +1293,7 @@ class SnapMindPlannerLab:
 
         windows = self._merged_candidate_windows(nodes, padding_ms)
         overlap_expr = " or ".join(
-            f"(start_ms <= {end_ms} and end_ms >= {start_ms})"
+            f"(start_ms < {end_ms} and end_ms > {start_ms})"
             for start_ms, end_ms in windows
         )
         expr = " and ".join(

@@ -188,6 +188,8 @@ def test_face_support_verifies_milvus_candidate_windows_and_keeps_weak_diagnosti
     first[:2] = [0.8, 0.6]
     second = np.zeros(512, dtype=np.float32)
     second[:2] = [0.25, np.sqrt(1.0 - 0.25**2)]
+    boundary_only = np.zeros(512, dtype=np.float32)
+    boundary_only[0] = 1.0
     rows = [
         {
             "track_idx": 0,
@@ -202,6 +204,13 @@ def test_face_support_verifies_milvus_candidate_windows_and_keeps_weak_diagnosti
             "end_ms": 33_000,
             "best_ms": 31_000,
             "embedding": second,
+        },
+        {
+            "track_idx": 2,
+            "start_ms": 7_000,
+            "end_ms": 10_000,
+            "best_ms": 9_000,
+            "embedding": boundary_only,
         },
     ]
 
@@ -255,7 +264,7 @@ def test_face_support_verifies_milvus_candidate_windows_and_keeps_weak_diagnosti
     orchestrator.catalog.get_modality_publication = lambda *_args: {
         "status": "ready",
         "asset_version": "face-v1",
-        "row_count": 2,
+        "row_count": 3,
     }
     lab = SnapMindPlannerLab(orchestrator)
     face_support = _step("s2", "face.search").model_copy(update={
@@ -292,8 +301,8 @@ def test_face_support_verifies_milvus_candidate_windows_and_keeps_weak_diagnosti
     assert tool_trace["ambiguous_count"] == 1
     assert tool_trace["ambiguous_matches"][0]["cosine"] == pytest.approx(0.25)
     assert 'asset_version == "face-v1"' in Collection.expr
-    assert "start_ms <= 13000 and end_ms >= 10000" in Collection.expr
-    assert "start_ms <= 33000 and end_ms >= 30000" in Collection.expr
+    assert "start_ms < 13000 and end_ms > 10000" in Collection.expr
+    assert "start_ms < 33000 and end_ms > 30000" in Collection.expr
     assert confirmed["evidence"][-1]["features"]["source"] == "candidate_window_milvus"
 
 
