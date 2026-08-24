@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 import pytest
 
@@ -7,6 +9,9 @@ from app.retrieval.search import (
     SearchEngine,
     _fuse_candidate_groups,
     _groups,
+    _groups_ocr_score_first,
+    _should_merge,
+    _temporal_gap,
 )
 from app.retrieval.retrieval_metrics import RetrievalProfiler
 from app.core.settings import Settings
@@ -47,6 +52,105 @@ def _publish(catalog, video_id, channels, **_unused):
             row_count=row_count,
             metadata=channel,
         )
+
+
+def _legacy_groups_global_scan(
+    candidates: list[Candidate],
+    gap: float,
+    max_duration: float = 15,
+) -> list[list[Candidate]]:
+    """Reference implementation retained to prove the partition is equivalent."""
+    ocr_candidates = [candidate for candidate in candidates if candidate.modality == "ocr"]
+    non_ocr_candidates = [candidate for candidate in candidates if candidate.modality != "ocr"]
+    groups: list[list[Candidate]] = []
+
+    if ocr_candidates:
+        if not non_ocr_candidates:
+            return _groups_ocr_score_first(ocr_candidates, max_duration)
+        groups.extend(_groups_ocr_score_first(ocr_candidates, max_duration))
+
+    for candidate in sorted(
+        non_ocr_candidates,
+        key=lambda item: (item.video_id, item.start_time, item.end_time),
+    ):
+        target_group = min(
+            (
+                group
+                for group in groups
+                if _should_merge(group, candidate, gap, max_duration)
+            ),
+            key=lambda group: _temporal_gap(group, candidate),
+            default=None,
+        )
+        if target_group is not None:
+            target_group.append(candidate)
+        else:
+            groups.append([candidate])
+
+    return sorted(
+        groups,
+        key=lambda group: (
+            group[0].video_id,
+            min(item.start_time for item in group),
+        ),
+    )
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_groups_partitioned_by_video_matches_legacy_global_scan(seed):
+    rng = random.Random(seed)
+    candidates = []
+    modalities = ("visual", "face", "asr", "ocr")
+
+    for video_index in range(6):
+        video_id = f"video-{video_index}"
+        for candidate_index in range(24):
+            start_time = round(rng.uniform(0, 90), 3)
+            duration = round(rng.uniform(0.2, 4), 3)
+            modality = rng.choice(modalities)
+            score = round(rng.uniform(0.1, 1), 4)
+            candidates.append(
+                Candidate(
+                    video_id,
+                    start_time,
+                    start_time + duration,
+                    score,
+                    modality,
+                    evidence=f"{seed}:{video_index}:{candidate_index}",
+                    raw_score=(score if modality == "face" else None),
+                )
+            )
+
+    rng.shuffle(candidates)
+
+    expected = _legacy_groups_global_scan(candidates, gap=2, max_duration=15)
+    actual = _groups(candidates, gap=2, max_duration=15)
+
+    assert [
+        [candidate.evidence for candidate in group]
+        for group in actual
+    ] == [
+        [candidate.evidence for candidate in group]
+        for group in expected
+    ]
+
+
+def test_groups_partition_preserves_same_video_stable_gap_tie_breaker():
+    other_video_ocr = Candidate("video-b", 2, 3, 0.995, "ocr", evidence="other")
+    first_ocr = Candidate("video-a", 0, 1, 0.99, "ocr", evidence="first")
+    second_ocr = Candidate("video-a", 4, 5, 0.98, "ocr", evidence="second")
+    equidistant_asr = Candidate("video-a", 2, 3, 0.8, "asr", evidence="asr")
+
+    groups = _groups(
+        [other_video_ocr, first_ocr, second_ocr, equidistant_asr],
+        gap=2,
+        max_duration=15,
+    )
+
+    first_group = next(group for group in groups if first_ocr in group)
+    second_group = next(group for group in groups if second_ocr in group)
+    assert equidistant_asr in first_group
+    assert equidistant_asr not in second_group
 
 
 def test_visual_adjacent_segments_remain_separate():

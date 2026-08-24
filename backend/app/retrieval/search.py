@@ -385,6 +385,7 @@ def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -
     non_ocr_candidates = [c for c in candidates if c.modality != "ocr"]
 
     groups: list[list[Candidate]] = []
+    groups_by_video: dict[str, list[list[Candidate]]] = {}
 
     # OCR 使用分数优先聚合
     if ocr_candidates:
@@ -395,19 +396,24 @@ def _groups(candidates: list[Candidate], gap: float, max_duration: float = 15) -
             # 混合模态，OCR 先聚合，再和其他模态合并
             ocr_groups = _groups_ocr_score_first(ocr_candidates, max_duration)
             groups.extend(ocr_groups)
+            for group in ocr_groups:
+                groups_by_video.setdefault(group[0].video_id, []).append(group)
 
-    # 非 OCR 候选遍历所有组，优先并入时间上最近的组。
+    # 非 OCR 候选只遍历同视频组，优先并入时间上最近的组。
     # 时间间隔相同时，min() 保留现有组顺序作为稳定 tie-breaker。
     for candidate in sorted(non_ocr_candidates, key=lambda item: (item.video_id, item.start_time, item.end_time)):
+        video_groups = groups_by_video.setdefault(candidate.video_id, [])
         target_group = min(
-            (g for g in groups if _should_merge(g, candidate, gap, max_duration)),
+            (g for g in video_groups if _should_merge(g, candidate, gap, max_duration)),
             key=lambda g: _temporal_gap(g, candidate),
             default=None,
         )
         if target_group is not None:
             target_group.append(candidate)
         else:
-            groups.append([candidate])
+            new_group = [candidate]
+            groups.append(new_group)
+            video_groups.append(new_group)
 
     # 按时间排序保证展示稳定（OCR 组按分数插入，非 OCR 合并后可能乱序）
     return sorted(groups, key=lambda g: (g[0].video_id, min(item.start_time for item in g)))
