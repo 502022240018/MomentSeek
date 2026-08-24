@@ -1,4 +1,6 @@
 import random
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -725,6 +727,195 @@ def test_milvus_search_scores_each_selected_video_once(tmp_path):
         engine.search("football", None, ["visual"])
 
     assert sorted(events) == sorted(("score", video_id) for video_id in video_ids)
+
+
+@pytest.mark.parametrize("workers", [4, 8])
+def test_bounded_milvus_concurrency_preserves_task_collection_order(
+    tmp_path,
+    workers,
+):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    video_count = workers // 2
+    settings.milvus_search_video_batch_size = video_count
+    settings.milvus_search_max_workers = workers
+    catalog = Catalog(settings.db_path)
+    video_ids = [f"concurrent-{index}" for index in range(video_count)]
+    for video_id in video_ids:
+        _create_video(settings, catalog, video_id=video_id)
+    engine = SearchEngine(settings, catalog)
+    selected_ids = [video["id"] for video in engine._selected_videos(video_ids)]
+    expected_order = [
+        (video_id, modality)
+        for video_id in selected_ids
+        for modality in ("ocr", "visual")
+    ]
+    barrier = threading.Barrier(len(expected_order))
+    lock = threading.Lock()
+    active = 0
+    peak_active = 0
+    completion_order = []
+    collected_order = []
+    profiler = RetrievalProfiler()
+
+    def fake_candidates(video, **kwargs):
+        nonlocal active, peak_active
+        modality = kwargs["modalities"][0]
+        task = (video["id"], modality)
+        with lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        barrier.wait(timeout=5)
+        time.sleep(0.05 if task == expected_order[0] else 0.001)
+        with lock:
+            completion_order.append(task)
+            active -= 1
+        return [Candidate(video["id"], 0.0, 1.0, 0.8, modality)]
+
+    def capture_fusion(candidates, *_args, **_kwargs):
+        collected_order.extend(
+            (candidate.video_id, candidate.modality) for candidate in candidates
+        )
+        return []
+
+    with (
+        patch.object(
+            engine,
+            "_requested_indexed_modalities",
+            return_value={"visual", "ocr"},
+        ),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_milvus_candidates_for_video",
+            side_effect=fake_candidates,
+        ),
+        patch(
+            "app.retrieval.search._fuse_candidate_groups",
+            side_effect=capture_fusion,
+        ),
+    ):
+        assert engine.search(
+            "football",
+            None,
+            ["visual", "ocr"],
+            video_ids,
+            profiler=profiler,
+        ) == []
+
+    assert peak_active == workers
+    assert completion_order[-1] == expected_order[0]
+    assert collected_order == expected_order
+    snapshot = profiler.snapshot()
+    assert (
+        snapshot["counters"]["scope"]["configured_candidate_workers"]
+        == workers
+    )
+    assert (
+        snapshot["timing_stats"]["local_processing"]["visual_scoring"]["count"]
+        == video_count
+    )
+    assert (
+        snapshot["timing_stats"]["local_processing"]["ocr_scoring"]["count"]
+        == video_count
+    )
+
+
+def test_workers_1_4_8_produce_identical_search_json(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    settings.milvus_search_video_batch_size = 4
+    catalog = Catalog(settings.db_path)
+    video_ids = [f"equivalent-{index}" for index in range(4)]
+    for video_id in video_ids:
+        _create_video(settings, catalog, video_id=video_id)
+    engine = SearchEngine(settings, catalog)
+
+    def fake_candidates(video, **kwargs):
+        index = int(video["id"].rsplit("-", 1)[1])
+        modality = kwargs["modalities"][0]
+        score = 0.8 if modality == "visual" else 0.6 + index * 0.01
+        return [Candidate(
+            video_id=video["id"],
+            start_time=float(index * 10),
+            end_time=float(index * 10 + 2),
+            score=score,
+            modality=modality,
+            evidence=f"{video['id']}:{modality}",
+            raw_score=score,
+            unit_type="segment" if modality == "visual" else "frame",
+            unit_id=index,
+        )]
+
+    outputs = {}
+    with (
+        patch.object(
+            engine,
+            "_requested_indexed_modalities",
+            return_value={"visual", "ocr"},
+        ),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_milvus_candidates_for_video",
+            side_effect=fake_candidates,
+        ),
+    ):
+        for workers in (1, 4, 8):
+            settings.milvus_search_max_workers = workers
+            outputs[workers] = engine.search(
+                "football",
+                None,
+                ["visual", "ocr"],
+                video_ids,
+            )
+
+    assert outputs[4] == outputs[1]
+    assert outputs[8] == outputs[1]
+
+
+def test_bounded_milvus_concurrency_remains_fail_closed(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    settings.milvus_search_video_batch_size = 2
+    settings.milvus_search_max_workers = 4
+    catalog = Catalog(settings.db_path)
+    video_ids = [f"failure-{index}" for index in range(2)]
+    for video_id in video_ids:
+        _create_video(settings, catalog, video_id=video_id)
+    engine = SearchEngine(settings, catalog)
+    failing_video_id = engine._selected_videos(video_ids)[0]["id"]
+
+    def fake_candidates(video, **_kwargs):
+        if video["id"] == failing_video_id:
+            raise RuntimeError("milvus task failed")
+        time.sleep(0.01)
+        return [Candidate(video["id"], 0.0, 1.0, 0.8, "visual")]
+
+    with (
+        patch.object(
+            engine,
+            "_requested_indexed_modalities",
+            return_value={"visual"},
+        ),
+        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_milvus_candidates_for_video",
+            side_effect=fake_candidates,
+        ),
+        patch("app.retrieval.search._fuse_candidate_groups") as fusion_mock,
+    ):
+        with pytest.raises(RuntimeError, match="milvus task failed"):
+            engine.search("football", None, ["visual"], video_ids)
+
+    fusion_mock.assert_not_called()
 
 
 def test_query_encoding_finishes_before_local_candidate_scoring(tmp_path):

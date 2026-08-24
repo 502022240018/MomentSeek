@@ -71,6 +71,15 @@ def test_milvus_search_video_batch_size_must_be_positive():
         Settings(_env_file=None, milvus_search_video_batch_size=0)
 
 
+def test_milvus_search_max_workers_is_safely_bounded():
+    assert Settings(_env_file=None).milvus_search_max_workers == 1
+    assert Settings(_env_file=None, milvus_search_max_workers=8).milvus_search_max_workers == 8
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, milvus_search_max_workers=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, milvus_search_max_workers=9)
+
+
 def test_visual_priority_is_enabled_by_default_and_can_be_disabled():
     assert Settings(_env_file=None).search_visual_priority_enabled is True
     assert Settings(_env_file=None, search_visual_priority_enabled=False).search_visual_priority_enabled is False
