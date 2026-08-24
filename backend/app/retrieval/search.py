@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 import logging
@@ -1049,6 +1050,11 @@ class SearchEngine:
         }
         if profiler:
             profiler.increment("scope", "selected_videos", len(videos))
+            profiler.increment(
+                "scope",
+                "configured_candidate_workers",
+                self.settings.milvus_search_max_workers,
+            )
             for requested_modalities in requested_by_video.values():
                 for modality in requested_modalities:
                     profiler.increment("planned_rpc", modality)
@@ -1077,32 +1083,70 @@ class SearchEngine:
             if profiler
             else nullcontext()
         )
+
+        def recall_task(video: dict, modality: str) -> list[Candidate]:
+            scoring_span = (
+                profiler.span("local_processing", f"{modality}_scoring")
+                if profiler and modality != "face"
+                else nullcontext()
+            )
+            with scoring_span:
+                return self._milvus_candidates_for_video(
+                    video,
+                    text=text,
+                    modalities=[modality],
+                    visual_profile=visual_profile,
+                    visual_queries=visual_queries,
+                    face_query=face_query,
+                    channel_limits=resolved_channel_limits,
+                    semantic_queries=semantic_queries,
+                    profiler=profiler,
+                    client=milvus_client,
+                )
+
+        max_workers = self.settings.milvus_search_max_workers
+        executor_context = (
+            ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="milvus-search",
+            )
+            if max_workers > 1
+            else nullcontext(None)
+        )
         with candidate_fanout_span:
-            batch_size = self.settings.milvus_search_video_batch_size
-            for batch_offset in range(0, len(videos), batch_size):
-                batch_videos = videos[batch_offset:batch_offset + batch_size]
-                for video in batch_videos:
-                    video_id = video["id"]
-                    requested_modalities = requested_by_video[video_id]
-                    for modality in sorted(requested_modalities):
-                        scoring_span = (
-                            profiler.span("local_processing", f"{modality}_scoring")
-                            if profiler and modality != "face"
-                            else nullcontext()
-                        )
-                        with scoring_span:
-                            modality_candidates = self._milvus_candidates_for_video(
-                                video,
-                                text=text,
-                                modalities=[modality],
-                                visual_profile=visual_profile,
-                                visual_queries=visual_queries,
-                                face_query=face_query,
-                                channel_limits=resolved_channel_limits,
-                                semantic_queries=semantic_queries,
-                                profiler=profiler,
-                                client=milvus_client,
-                            )
+            with executor_context as executor:
+                batch_size = self.settings.milvus_search_video_batch_size
+                for batch_offset in range(0, len(videos), batch_size):
+                    batch_videos = videos[batch_offset:batch_offset + batch_size]
+                    ordered_tasks = [
+                        (video, modality)
+                        for video in batch_videos
+                        for modality in sorted(requested_by_video[video["id"]])
+                    ]
+                    if executor is None:
+                        batch_results = [
+                            recall_task(video, modality)
+                            for video, modality in ordered_tasks
+                        ]
+                    else:
+                        futures = [
+                            executor.submit(recall_task, video, modality)
+                            for video, modality in ordered_tasks
+                        ]
+                        try:
+                            # Never collect via as_completed(): insertion order is
+                            # part of threshold and stable-sort tie semantics.
+                            batch_results = [future.result() for future in futures]
+                        except BaseException:
+                            for future in futures:
+                                future.cancel()
+                            raise
+
+                    for (_, modality), modality_candidates in zip(
+                        ordered_tasks,
+                        batch_results,
+                        strict=True,
+                    ):
                         filtered_candidates = [
                             item
                             for item in modality_candidates

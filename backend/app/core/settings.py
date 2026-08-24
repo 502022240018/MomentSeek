@@ -183,6 +183,9 @@ class Settings(BaseSettings):
     milvus_query_timeout_seconds: float = 3.0
     milvus_write_enabled: bool = True
     milvus_search_video_batch_size: int = 8
+    # Independent per-request fan-out bound. Keep 1 as the compatibility
+    # default; deployments may opt into 4 or 8 after equivalence/load tests.
+    milvus_search_max_workers: int = 1
 
     # Visual ANN search configuration
     visual_use_diskann: bool = True  # Index type: True=DiskANN (disk), False=HNSW (memory)
@@ -321,6 +324,13 @@ class Settings(BaseSettings):
     def validate_milvus_search_video_batch_size(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("milvus_search_video_batch_size 必须大于 0")
+        return value
+
+    @field_validator("milvus_search_max_workers")
+    @classmethod
+    def validate_milvus_search_max_workers(cls, value: int) -> int:
+        if not 1 <= value <= 8:
+            raise ValueError("milvus_search_max_workers 必须在 1 到 8 之间")
         return value
 
     @field_validator("visual_ann_top_k", "visual_ann_segment_top_n")
