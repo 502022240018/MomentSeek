@@ -1047,6 +1047,11 @@ class SearchEngine:
             )
             for video in videos
         }
+        if profiler:
+            profiler.increment("scope", "selected_videos", len(videos))
+            for requested_modalities in requested_by_video.values():
+                for modality in requested_modalities:
+                    profiler.increment("planned_rpc", modality)
         self._prepare_query_vectors(
             videos,
             text=text,
@@ -1067,37 +1072,68 @@ class SearchEngine:
         if milvus_video_ids:
             milvus_client = self._get_milvus_client()
 
-        batch_size = self.settings.milvus_search_video_batch_size
-        for batch_offset in range(0, len(videos), batch_size):
-            batch_videos = videos[batch_offset:batch_offset + batch_size]
-            for video in batch_videos:
-                video_id = video["id"]
-                requested_modalities = requested_by_video[video_id]
-                for modality in sorted(requested_modalities):
-                    scoring_span = (
-                        profiler.span("local_processing", f"{modality}_scoring")
-                        if profiler and modality != "face"
-                        else nullcontext()
-                    )
-                    with scoring_span:
-                        modality_candidates = self._milvus_candidates_for_video(
-                            video,
-                            text=text,
-                            modalities=[modality],
-                            visual_profile=visual_profile,
-                            visual_queries=visual_queries,
-                            face_query=face_query,
-                            channel_limits=resolved_channel_limits,
-                            semantic_queries=semantic_queries,
-                            profiler=profiler,
-                            client=milvus_client,
+        candidate_fanout_span = (
+            profiler.span("stage_wall", "candidate_fanout")
+            if profiler
+            else nullcontext()
+        )
+        with candidate_fanout_span:
+            batch_size = self.settings.milvus_search_video_batch_size
+            for batch_offset in range(0, len(videos), batch_size):
+                batch_videos = videos[batch_offset:batch_offset + batch_size]
+                for video in batch_videos:
+                    video_id = video["id"]
+                    requested_modalities = requested_by_video[video_id]
+                    for modality in sorted(requested_modalities):
+                        scoring_span = (
+                            profiler.span("local_processing", f"{modality}_scoring")
+                            if profiler and modality != "face"
+                            else nullcontext()
                         )
-                    candidates.extend(
-                        item for item in modality_candidates if item.modality == modality
-                    )
+                        with scoring_span:
+                            modality_candidates = self._milvus_candidates_for_video(
+                                video,
+                                text=text,
+                                modalities=[modality],
+                                visual_profile=visual_profile,
+                                visual_queries=visual_queries,
+                                face_query=face_query,
+                                channel_limits=resolved_channel_limits,
+                                semantic_queries=semantic_queries,
+                                profiler=profiler,
+                                client=milvus_client,
+                            )
+                        filtered_candidates = [
+                            item
+                            for item in modality_candidates
+                            if item.modality == modality
+                        ]
+                        if profiler:
+                            profiler.increment(
+                                "candidates",
+                                f"{modality}_pre_threshold",
+                                len(filtered_candidates),
+                            )
+                        candidates.extend(filtered_candidates)
         # Apply global dynamic threshold to OCR and ASR candidates
         _apply_global_threshold(candidates, "ocr")
         _apply_global_threshold(candidates, "asr")
+        if profiler:
+            for modality in ("visual", "face", "asr", "ocr"):
+                modality_candidates = [
+                    item for item in candidates if item.modality == modality
+                ]
+                profiler.increment(
+                    "candidates",
+                    f"{modality}_above_threshold",
+                    sum(item.above_threshold for item in modality_candidates),
+                )
+                profiler.increment(
+                    "candidates",
+                    f"{modality}_below_threshold",
+                    sum(not item.above_threshold for item in modality_candidates),
+                )
+            profiler.increment("candidates", "fusion_input", len(candidates))
 
         fusion_span = (
             profiler.span("local_processing", "fusion")
@@ -1117,5 +1153,10 @@ class SearchEngine:
                     else None
                 ),
             )
+        if profiler:
+            profiler.increment("candidates", "fusion_output", len(results))
         result_limit = 500 if visual_profile == "recall" else limit
-        return [item.to_dict() for item in results[:result_limit]]
+        output = [item.to_dict() for item in results[:result_limit]]
+        if profiler:
+            profiler.increment("candidates", "returned", len(output))
+        return output
