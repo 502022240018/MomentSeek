@@ -25,6 +25,15 @@ def _parse_id_list(value: str | None, field_name: str) -> list[str] | None:
     return list(dict.fromkeys(item.strip() for item in parsed)) or None
 
 
+def _speaker_publication_is_usable(publication: dict | None) -> bool:
+    if not publication or publication.get("status") != "ready":
+        return False
+    try:
+        return int(publication.get("row_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _speaker_is_indexed(video_id: str) -> bool:
     """Report online speaker availability from the published Milvus pointer.
 
@@ -33,9 +42,15 @@ def _speaker_is_indexed(video_id: str) -> bool:
     workspace dropdown as they have no usable data.
     """
     publication = context.catalog.get_modality_publication(video_id, "speaker")
-    if not publication or publication.get("status") != "ready":
-        return False
-    return int(publication.get("row_count") or 0) > 0
+    return _speaker_publication_is_usable(publication)
+
+
+def _video_list_item(video: dict) -> dict:
+    """Return the stable frontend summary without internal publication metadata."""
+    publications = video.get("index_publications") or {}
+    item = {key: value for key, value in video.items() if key != "index_publications"}
+    item["speaker_indexed"] = _speaker_publication_is_usable(publications.get("speaker"))
+    return item
 
 
 @router.post("/api/videos", status_code=201)
@@ -92,10 +107,7 @@ async def upload_video(
 @router.get("/api/videos")
 def list_videos() -> list[dict]:
 
-    videos = context.catalog.list_videos()
-    for video in videos:
-        video["speaker_indexed"] = _speaker_is_indexed(video["id"])
-    return videos
+    return [_video_list_item(video) for video in context.catalog.list_videos()]
 
 
 @router.get("/api/videos/{video_id}")

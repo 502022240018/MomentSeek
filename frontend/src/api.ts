@@ -1,3 +1,27 @@
+import {
+  normalizeColorGradingCapability,
+  normalizeColorGradingTask,
+  normalizeColorGradingTaskList,
+  normalizeEntity,
+  normalizeEntityList,
+  normalizeFaceGalleryView,
+  normalizeFolder,
+  normalizeFolderList,
+  normalizeJob,
+  normalizeJobList,
+  normalizeOrchestrationProfiles,
+  normalizePlannerCapabilities,
+  normalizePlannerExecution,
+  normalizePlanSetResponse,
+  normalizeSearchResponse,
+  normalizeSpeakerView,
+  normalizeVideo,
+  normalizeVideoList,
+  normalizeVoiceSearchResponse,
+  readJsonResponse,
+  type Normalizer,
+} from "./runtimeContracts";
+
 export type IndexModality = "visual" | "face" | "asr" | "ocr";
 export type PublishedModality = IndexModality | "speaker";
 
@@ -252,21 +276,19 @@ export type FaceGalleryView = {
   groups: VideoFaceGroup[];
 };
 
-async function json<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
+async function json<T>(input: RequestInfo, init?: RequestInit, normalize?: Normalizer<T>): Promise<T> {
   const response = await fetch(input, init);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.detail || `请求失败 (${response.status})`);
-  return payload as T;
+  return readJsonResponse(response, normalize);
 }
 
 export const api = {
-  videos: () => json<Video[]>("/api/videos"),
-  folders: () => json<Folder[]>("/api/folders"),
-  jobs: () => json<Job[]>("/api/jobs"),
+  videos: () => json<Video[]>("/api/videos", undefined, normalizeVideoList),
+  folders: () => json<Folder[]>("/api/folders", undefined, normalizeFolderList),
+  jobs: () => json<Job[]>("/api/jobs", undefined, normalizeJobList),
   colorGradingStatus: () =>
-    json<ColorGradingCapability>("/api/color-grading/status"),
+    json<ColorGradingCapability>("/api/color-grading/status", undefined, normalizeColorGradingCapability),
   colorGradingTasks: () =>
-    json<ColorGradingTask[]>("/api/color-grading/tasks"),
+    json<ColorGradingTask[]>("/api/color-grading/tasks", undefined, normalizeColorGradingTaskList),
   createColorGradingTask: (params: {
     inputVideoId: string;
     referenceType: "image" | "video";
@@ -280,15 +302,15 @@ export const api = {
     form.append("ncc", String(params.ncc ?? false));
     if (params.referenceImage) form.append("ref_image", params.referenceImage);
     if (params.referenceVideoId) form.append("ref_video_id", params.referenceVideoId);
-    return json<ColorGradingTask>("/api/color-grading/tasks", { method: "POST", body: form });
+    return json<ColorGradingTask>("/api/color-grading/tasks", { method: "POST", body: form }, normalizeColorGradingTask);
   },
   importColorGradingResult: (taskId: string) =>
-    json<Video>(`/api/color-grading/tasks/${taskId}/import`, { method: "POST" }),
+    json<Video>(`/api/color-grading/tasks/${taskId}/import`, { method: "POST" }, normalizeVideo),
   cancelJob: (jobId: string) =>
-    json<Job>(`/api/jobs/${jobId}/cancel`, { method: "POST" }),
-  entities: () => json<Entity[]>("/api/entities"),
-  orchestrationProfiles: () => json<OrchestrationProfiles>("/api/orchestration/profiles"),
-  plannerLabCapabilities: () => json<PlannerLabCapabilities>("/api/planner-lab/capabilities"),
+    json<Job>(`/api/jobs/${jobId}/cancel`, { method: "POST" }, normalizeJob),
+  entities: () => json<Entity[]>("/api/entities", undefined, normalizeEntityList),
+  orchestrationProfiles: () => json<OrchestrationProfiles>("/api/orchestration/profiles", undefined, normalizeOrchestrationProfiles),
+  plannerLabCapabilities: () => json<PlannerLabCapabilities>("/api/planner-lab/capabilities", undefined, normalizePlannerCapabilities),
   plannerLabPlans: (params: {
     queryText: string; queryImage?: File; queryAudio?: File;
     voiceReference?: VoiceReferenceInput; videoIds?: string[]; folderIds?: string[];
@@ -303,7 +325,7 @@ export const api = {
     if (params.folderIds?.length) form.append("folder_ids", JSON.stringify(params.folderIds));
     form.append("mode", params.mode);
     if (params.orchestrationProfile) form.append("orchestration_profile", params.orchestrationProfile);
-    return json<PlanSetResponse>("/api/planner-lab/plans", { method: "POST", body: form });
+    return json<PlanSetResponse>("/api/planner-lab/plans", { method: "POST", body: form }, normalizePlanSetResponse);
   },
   plannerLabExecute: (params: {
     queryText: string; queryImage?: File; queryAudio?: File;
@@ -319,37 +341,41 @@ export const api = {
     if (params.videoIds?.length) form.append("video_ids", JSON.stringify(params.videoIds));
     if (params.folderIds?.length) form.append("folder_ids", JSON.stringify(params.folderIds));
     if (params.maxSteps != null) form.append("max_steps", String(params.maxSteps));
-    return json<PlannerExecution>("/api/planner-lab/execute", { method: "POST", body: form });
+    return json<PlannerExecution>("/api/planner-lab/execute", { method: "POST", body: form }, normalizePlannerExecution);
   },
   renameEntity: (entityId: string, name: string) =>
-    json<Entity>(`/api/entities/${entityId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }),
+    json<Entity>(`/api/entities/${entityId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }, normalizeEntity),
   deleteEntity: (entityId: string) =>
     json<{ status: string; id: string }>(`/api/entities/${entityId}`, { method: "DELETE" }),
-  speakers: (videoId: string) => json<SpeakerView>(`/api/videos/${videoId}/speakers`),
-  faceGallery: (videoId: string) => json<FaceGalleryView>(`/api/videos/${videoId}/face-gallery`),
+  speakers: (videoId: string) => json<SpeakerView>(`/api/videos/${videoId}/speakers`, undefined, normalizeSpeakerView),
+  faceGallery: (videoId: string) => json<FaceGalleryView>(`/api/videos/${videoId}/face-gallery`, undefined, normalizeFaceGalleryView),
   addFaceGroupToLibrary: (videoId: string, groupIdx: number, assetVersion: string, groupVersion: string, options: { entity_id?: string; new_entity_name?: string }) =>
     json<Record<string, unknown>>(`/api/videos/${videoId}/face-gallery/${groupIdx}/library`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ asset_version: assetVersion, group_version: groupVersion, ...options }) }),
   updateSpeaker: (videoId: string, trackId: number, update: { display_name?: string; representative_utterance_index?: number; hidden?: boolean }) =>
-    json<SpeakerView>(`/api/videos/${videoId}/speakers/${trackId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) }),
+    json<SpeakerView>(`/api/videos/${videoId}/speakers/${trackId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) }, normalizeSpeakerView),
   updateUtterance: (videoId: string, utteranceIndex: number, update: { corrected_track_id: number | null; searchable: boolean }) =>
-    json<SpeakerView>(`/api/videos/${videoId}/utterances/${utteranceIndex}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) }),
+    json<SpeakerView>(`/api/videos/${videoId}/utterances/${utteranceIndex}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) }, normalizeSpeakerView),
   voiceSearch: (queryVideoId: string, queryUtteranceIndex: number, videoIds?: string[]) =>
-    json<{ count: number; results: VoiceHit[] }>("/api/voice-search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query_video_id: queryVideoId, query_utterance_index: queryUtteranceIndex, video_ids: videoIds, limit: 50 }) }),
+    json<{ count: number; results: VoiceHit[] }>("/api/voice-search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query_video_id: queryVideoId, query_utterance_index: queryUtteranceIndex, video_ids: videoIds, limit: 50 }) }, normalizeVoiceSearchResponse),
   voiceSearchUpload: (reference: File, videoIds?: string[]) => {
     const form = new FormData(); form.append("reference", reference);
     if (videoIds) form.append("video_ids", JSON.stringify(videoIds));
     form.append("limit", "50");
-    return json<{ query_samples: number; count: number; results: VoiceHit[] }>("/api/voice-search/upload", { method: "POST", body: form });
+    return json<{ query_samples: number; count: number; results: VoiceHit[] }>("/api/voice-search/upload", { method: "POST", body: form }, value => {
+      const normalized = normalizeVoiceSearchResponse(value);
+      const querySamples = typeof (value as Record<string, unknown>)?.query_samples === "number" ? (value as Record<string, number>).query_samples : 0;
+      return { ...normalized, query_samples: querySamples };
+    });
   },
   uploadVideo: (video: File, transcript?: File, folderIds: string[] = []) => {
     const form = new FormData();
     form.append("video", video);
     if (transcript) form.append("transcript", transcript);
     if (folderIds.length) form.append("folder_ids", JSON.stringify(folderIds));
-    return json<Video>("/api/videos", { method: "POST", body: form });
+    return json<Video>("/api/videos", { method: "POST", body: form }, normalizeVideo);
   },
-  createFolder: (name: string) => json<Folder>("/api/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }),
-  renameFolder: (folderId: string, name: string) => json<Folder>(`/api/folders/${folderId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }),
+  createFolder: (name: string) => json<Folder>("/api/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }, normalizeFolder),
+  renameFolder: (folderId: string, name: string) => json<Folder>(`/api/folders/${folderId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }, normalizeFolder),
   deleteFolder: (folderId: string) => json<{ status: string; id: string; released_video_count: number }>(`/api/folders/${folderId}`, { method: "DELETE" }),
   updateVideoFolders: (videoIds: string[], folderIds: string[], operation: "add" | "remove" | "replace") => json<{ status: string }>("/api/videos/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ video_ids: videoIds, folder_ids: folderIds, operation }) }),
   indexVideo: (videoId: string, modalities: IndexModality[], options: IndexOptions = {}) => {
@@ -373,23 +399,23 @@ export const api = {
         asr_language: selected.has("asr") ? options.asrLanguage : undefined,
         asr_speaker_enabled: selected.has("asr") ? options.asrSpeakerEnabled : false,
       }),
-    });
+    }, normalizeJob);
   },
   renameVideo: (videoId: string, name: string) =>
     json<Video>(`/api/videos/${videoId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
-    }),
+    }, normalizeVideo),
   deleteVideo: (videoId: string) =>
     json<{ status: string; id: string }>(`/api/videos/${videoId}`, { method: "DELETE" }),
   createEntity: (name: string, reference: File) => {
     const form = new FormData();
     form.append("name", name);
     form.append("reference", reference);
-    return json<Entity>("/api/entities", { method: "POST", body: form });
+    return json<Entity>("/api/entities", { method: "POST", body: form }, normalizeEntity);
   },
-  createVoiceEntity: (name: string) => json<Entity>("/api/entities/voice-only", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }),
+  createVoiceEntity: (name: string) => json<Entity>("/api/entities/voice-only", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }, normalizeEntity),
   addVoiceSample: (entityId: string, videoId: string, utteranceIndex: number, bindTrackId?: number) =>
     json<Record<string, unknown>>(`/api/entities/${entityId}/voice-samples`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ video_id: videoId, utterance_index: utteranceIndex, bind_track_id: bindTrackId }) }),
   search: (params: {
@@ -415,6 +441,6 @@ export const api = {
     if (params.orchestrationProfile) form.append("orchestration_profile", params.orchestrationProfile);
     form.append("planner_mode", params.plannerMode ?? "auto");
     form.append("reranker_mode", params.rerankerMode ?? "auto");
-    return json<SearchResponse>("/api/search", { method: "POST", body: form });
+    return json<SearchResponse>("/api/search", { method: "POST", body: form }, normalizeSearchResponse);
   },
 };

@@ -3,12 +3,28 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api import job_routes
 from app.platform import context
 from app.catalog.db import Catalog
 from app.core.settings import Settings
+
+
+@pytest.mark.parametrize(
+    "publication",
+    [
+        None,
+        {"status": "ready", "row_count": 0},
+        {"status": "disabled", "row_count": 2},
+        {"status": "ready", "row_count": "invalid"},
+    ],
+)
+def test_speaker_publication_requires_ready_rows(publication):
+    from app.api.video_routes import _speaker_publication_is_usable
+
+    assert _speaker_publication_is_usable(publication) is False
 
 
 def test_folder_api_deletion_keeps_asset_and_its_publication(monkeypatch, tmp_path):
@@ -27,6 +43,13 @@ def test_folder_api_deletion_keeps_asset_and_its_publication(monkeypatch, tmp_pa
         row_count=4,
         metadata={"model_key": "siglip2-test"},
     )
+    catalog.publish_modality(
+        "video-1",
+        "speaker",
+        asset_version="speaker-v1",
+        row_count=2,
+        metadata={"embedding_space": "speaker-test"},
+    )
     monkeypatch.setattr(context, "settings", settings)
     monkeypatch.setattr(context, "catalog", catalog)
 
@@ -36,7 +59,11 @@ def test_folder_api_deletion_keeps_asset_and_its_publication(monkeypatch, tmp_pa
         folder_id = folder.json()["id"]
         assert client.post("/api/videos/folders", json={"video_ids": ["video-1"], "folder_ids": [folder_id], "operation": "add"}).status_code == 200
         assert client.delete(f"/api/folders/{folder_id}").json()["released_video_count"] == 1
-        assert client.get("/api/videos").json()[0]["folder_ids"] == []
+        listed_video = client.get("/api/videos").json()[0]
+        assert listed_video["folder_ids"] == []
+        assert listed_video["indexed_modalities"] == ["speaker", "visual"]
+        assert listed_video["speaker_indexed"] is True
+        assert "index_publications" not in listed_video
 
     assert video_path.exists()
     publication = catalog.get_modality_publication("video-1", "visual")

@@ -1,8 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { api, ColorGradingCapability, ColorGradingTask, Entity, FaceGalleryView, Folder, Job, OrchestrationProfile, PlannerLabCapabilities, SearchResult, SpeakerView, Video, VoiceHit } from "./api";
+import { AppErrorBoundary } from "./AppErrorBoundary";
 import { ColorGradingPage } from "./ColorGradingPage";
 import { PlannerLabPage } from "./PlannerLabPage";
+import { startSerialPoller } from "./serialPoller";
+import { useObjectUrl } from "./useObjectUrl";
 import {
   defaultIndexConfiguration,
   IndexConfiguration,
@@ -66,40 +69,62 @@ function App() {
   const [gradingTasks, setGradingTasks] = useState<ColorGradingTask[]>([]);
   const [plannerCapability, setPlannerCapability] = useState<PlannerLabCapabilities>();
   const [notice, setNotice] = useState<string>("");
+  const refreshInFlight = useRef<Promise<void> | null>(null);
+  const refreshQueued = useRef(false);
 
-  const refresh = async () => {
-    try {
-      const [
+  const refresh = (ensureLatest = true): Promise<void> => {
+    if (refreshInFlight.current) {
+      if (!ensureLatest) return refreshInFlight.current;
+      refreshQueued.current = true;
+      return refreshInFlight.current.then(() => refreshInFlight.current ?? refresh(false));
+    }
+
+    const requests = [
+      api.videos(),
+      api.folders(),
+      api.jobs(),
+      api.entities(),
+      api.colorGradingStatus(),
+      api.colorGradingTasks(),
+    ] as const;
+    const request = Promise.allSettled(requests).then(([
         nextVideos,
         nextFolders,
         nextJobs,
         nextEntities,
         nextGradingStatus,
         nextGradingTasks,
-      ] = await Promise.all([
-        api.videos(),
-        api.folders(),
-        api.jobs(),
-        api.entities(),
-        api.colorGradingStatus(),
-        api.colorGradingTasks(),
-      ]);
-      setVideos(nextVideos);
-      setFolders(nextFolders);
-      setJobs(nextJobs);
-      setEntities(nextEntities);
-      setGradingStatus(nextGradingStatus);
-      setGradingTasks(nextGradingTasks);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "服务连接失败");
-    }
+      ]) => {
+        if (nextVideos.status === "fulfilled") setVideos(nextVideos.value);
+        if (nextFolders.status === "fulfilled") setFolders(nextFolders.value);
+        if (nextJobs.status === "fulfilled") setJobs(nextJobs.value);
+        if (nextEntities.status === "fulfilled") setEntities(nextEntities.value);
+        if (nextGradingStatus.status === "fulfilled") setGradingStatus(nextGradingStatus.value);
+        if (nextGradingTasks.status === "fulfilled") setGradingTasks(nextGradingTasks.value);
+
+        const failure = [nextVideos, nextFolders, nextJobs, nextEntities, nextGradingStatus, nextGradingTasks]
+          .find(result => result.status === "rejected");
+        if (failure?.status === "rejected") {
+          setNotice(failure.reason instanceof Error ? failure.reason.message : "部分平台数据刷新失败");
+        }
+      }).finally(() => {
+        if (refreshInFlight.current === request) {
+          refreshInFlight.current = null;
+          if (refreshQueued.current) {
+            refreshQueued.current = false;
+            void refresh(false);
+          }
+        }
+      });
+    refreshInFlight.current = request;
+    return request;
   };
 
   useEffect(() => {
     api.plannerLabCapabilities().then(setPlannerCapability).catch(() => undefined);
-    refresh();
-    const timer = window.setInterval(refresh, 3000);
-    return () => window.clearInterval(timer);
+    return startSerialPoller(() => refresh(false), 3000, error => {
+      setNotice(error instanceof Error ? error.message : "服务连接失败");
+    });
   }, []);
 
   return (
@@ -168,6 +193,7 @@ function SearchPage({ videos, folders, setNotice }: { videos: Video[]; folders: 
   const [plannerMode, setPlannerMode] = useState<"auto" | "off" | "force">("auto");
   const [rerankerMode, setRerankerMode] = useState<"auto" | "off" | "force">("auto");
   const [execution, setExecution] = useState<Record<string, any>>();
+  const imageUrl = useObjectUrl(image);
 
   useEffect(() => {
     api.orchestrationProfiles().then(value => {
@@ -226,7 +252,7 @@ function SearchPage({ videos, folders, setNotice }: { videos: Video[]; folders: 
       <label>参考图 <em>可选</em></label>
       <label className={`image-drop ${image ? "has-image" : ""}`}>
         <input type="file" accept="image/*" onChange={event => setImage(event.target.files?.[0])} />
-        {image ? <><img src={URL.createObjectURL(image)} /><span>{image.name}</span></> : <><span className="upload-glyph">↥</span><b>添加人物、物体或场景参考图</b><small>JPG / PNG / WEBP</small></>}
+        {image ? <>{imageUrl && <img src={imageUrl} />}<span>{image.name}</span></> : <><span className="upload-glyph">↥</span><b>添加人物、物体或场景参考图</b><small>JPG / PNG / WEBP</small></>}
       </label>
 
       <label>检索通道</label>
@@ -274,7 +300,7 @@ function ResultCard({ result, onPlay }: { result: SearchResult; onPlay: () => vo
   const below = result.above_threshold === false;
   return <article className={`result-card${below ? " below" : ""}`} onClick={onPlay}>
     <div className="result-thumb">{result.thumbnail_url ? <img src={result.thumbnail_url} /> : <div className="thumb-placeholder">M</div>}<button>▶</button><span>{formatTime(result.start_time)} — {formatTime(result.end_time)}</span></div>
-    <div className="result-body"><div className="result-title"><h3>{result.video_name}</h3><b>{Math.round(result.score * 100)}%</b></div><div className="chips">{result.modalities.map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}{result.rerank_score !== undefined && result.rerank_score !== null && <span className="chip reranked">VLM {Math.round(result.rerank_score * 100)}%</span>}{below && <span className="chip below-tag">低于阈值</span>}</div><p>{result.evidence.find(item => item.detail)?.detail || "视觉向量相似度命中"}</p></div>
+    <div className="result-body"><div className="result-title"><h3>{result.video_name}</h3><b>{Math.round(result.score * 100)}%</b></div><div className="chips">{(result.modalities ?? []).map(mode => <span className={`chip ${mode}`} key={mode}>{mode}</span>)}{result.rerank_score !== undefined && result.rerank_score !== null && <span className="chip reranked">VLM {Math.round(result.rerank_score * 100)}%</span>}{below && <span className="chip below-tag">低于阈值</span>}</div><p>{(result.evidence ?? []).find(item => item.detail)?.detail || "视觉向量相似度命中"}</p></div>
   </article>;
 }
 
@@ -408,11 +434,11 @@ function SpeakersPage({ videos, setNotice }: { videos: Video[]; setNotice: (valu
   };
   const utteranceByIndex = Object.fromEntries((view?.utterances || []).map(item => [item.index, item]));
   return <div className="speaker-page">
-    <div className="panel speaker-toolbar"><div><span className="panel-label">VOICE WORKSPACE</span><h2>视频内说话人</h2></div><label>视频<select value={videoId} onChange={event => setVideoId(event.target.value)}><option value="">选择已建立 Speaker 索引的视频</option>{indexed.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><span>{loading ? "处理中…" : `${view?.tracks.length || 0} speakers`}</span><label className="voice-upload">上传参考声音<input type="file" accept="audio/*,video/*" onChange={event => setVoiceFile(event.target.files?.[0])} /></label><button className="primary compact" disabled={!voiceFile || loading} onClick={searchUpload}>搜索上传声音</button></div>
+    <div className="panel speaker-toolbar"><div><span className="panel-label">VOICE WORKSPACE</span><h2>视频内说话人</h2></div><label>视频<select value={videoId} onChange={event => setVideoId(event.target.value)}><option value="">选择已建立 Speaker 索引的视频</option>{indexed.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><span>{loading ? "处理中…" : `${view?.tracks?.length || 0} speakers`}</span><label className="voice-upload">上传参考声音<input type="file" accept="audio/*,video/*" onChange={event => setVoiceFile(event.target.files?.[0])} /></label><button className="primary compact" disabled={!voiceFile || loading} onClick={searchUpload}>搜索上传声音</button></div>
     {!indexed.length && <div className="panel empty-list">请先为视频选择 ASR + Speaker 通道建立索引</div>}
-    <div className="speaker-grid">{view?.tracks.filter(track => !track.hidden).map(track => {
+    <div className="speaker-grid">{(view?.tracks ?? []).filter(track => !track.hidden).map(track => {
       const representative = utteranceByIndex[track.representative_utterance_index];
-      return <article className="panel speaker-card" key={track.track_id}><div className="speaker-card-head"><div><span>Speaker {track.track_id}</span><h3>{track.label}</h3><small>{track.utterance_count} 句 · {formatDuration(track.duration_ms / 1000)}</small></div><button className="outline" onClick={() => rename(track.track_id, track.label)}>改名</button></div>{representative && <><div className="representative"><audio controls preload="none" src={representative.clip_url} /><button className="primary compact" onClick={() => search(representative.index)}>用代表声音搜索</button></div><div className="voice-library-bind"><select value={selectedEntity[track.track_id] || track.entity_id || ""} onChange={event => setSelectedEntity(value => ({ ...value, [track.track_id]: event.target.value }))}><option value="">选择人物库身份</option>{entities.map(entity => <option key={entity.id} value={entity.id}>{entity.name}</option>)}</select><button className="outline" onClick={() => addToLibrary(track.track_id, representative.index)}>加入声音库并绑定</button></div></>}<div className="utterance-list">{track.utterance_indices.map(index => { const utterance = utteranceByIndex[index]; if (!utterance) return null; return <div className="utterance-row" key={index}><div><b>{formatTime(utterance.start_ms / 1000)}–{formatTime(utterance.end_ms / 1000)}</b><p>{utterance.text || "（无文本）"}</p></div><audio controls preload="none" src={utterance.clip_url} /><select value={utterance.track_id ?? -1} onChange={event => move(index, Number(event.target.value), utterance.searchable)}><option value={-1}>未归属</option>{view.tracks.map(option => <option key={option.track_id} value={option.track_id}>{option.label}</option>)}</select><button className="outline" onClick={() => search(index)}>搜索同声</button><label className="searchable-check"><input type="checkbox" checked={utterance.searchable} onChange={event => move(index, utterance.track_id, event.target.checked)} />可检索</label></div>})}</div></article>;
+      return <article className="panel speaker-card" key={track.track_id}><div className="speaker-card-head"><div><span>Speaker {track.track_id}</span><h3>{track.label}</h3><small>{track.utterance_count} 句 · {formatDuration(track.duration_ms / 1000)}</small></div><button className="outline" onClick={() => rename(track.track_id, track.label)}>改名</button></div>{representative && <><div className="representative"><audio controls preload="none" src={representative.clip_url} /><button className="primary compact" onClick={() => search(representative.index)}>用代表声音搜索</button></div><div className="voice-library-bind"><select value={selectedEntity[track.track_id] || track.entity_id || ""} onChange={event => setSelectedEntity(value => ({ ...value, [track.track_id]: event.target.value }))}><option value="">选择人物库身份</option>{entities.map(entity => <option key={entity.id} value={entity.id}>{entity.name}</option>)}</select><button className="outline" onClick={() => addToLibrary(track.track_id, representative.index)}>加入声音库并绑定</button></div></>}<div className="utterance-list">{track.utterance_indices.map(index => { const utterance = utteranceByIndex[index]; if (!utterance) return null; return <div className="utterance-row" key={index}><div><b>{formatTime(utterance.start_ms / 1000)}–{formatTime(utterance.end_ms / 1000)}</b><p>{utterance.text || "（无文本）"}</p></div><audio controls preload="none" src={utterance.clip_url} /><select value={utterance.track_id ?? -1} onChange={event => move(index, Number(event.target.value), utterance.searchable)}><option value={-1}>未归属</option>{(view?.tracks ?? []).map(option => <option key={option.track_id} value={option.track_id}>{option.label}</option>)}</select><button className="outline" onClick={() => search(index)}>搜索同声</button><label className="searchable-check"><input type="checkbox" checked={utterance.searchable} onChange={event => move(index, utterance.track_id, event.target.checked)} />可检索</label></div>})}</div></article>;
     })}</div>
     {!!hits.length && <div className="panel voice-results"><div className="section-head"><div><span className="panel-label">VOICE MATCHES</span><h2>同声纹片段</h2></div><span>{hits.length} results</span></div>{hits.map(hit => <div className="voice-hit" key={`${hit.video_id}:${hit.utterance_index}`}><b>{hit.video_name}</b><span>{formatTime(hit.start_ms / 1000)} · Speaker {hit.track_id ?? "?"}</span><strong>{(hit.score * 100).toFixed(1)}%</strong><p>{hit.text || "（无文本）"}</p><audio controls preload="none" src={hit.clip_url} /></div>)}</div>}
   </div>;
@@ -451,16 +477,17 @@ function FacesPage({ videos, entities, refreshEntities, setNotice }: { videos: V
     <div className="panel face-gallery-toolbar"><div><span className="panel-label">FACE WORKSPACE</span><h2>视频主要人物候选</h2><p>把同一人物的多段人脸轨迹合并，优先展示清晰、出现时间长的候选；数量是聚类候选，不等同于精确人数。</p></div><label>视频<select value={videoId} onChange={event => setVideoId(event.target.value)}><option value="">选择已建立 Face 索引的视频</option>{indexed.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><span>{loading ? "读取中…" : `${view?.displayed_group_count || 0} 个候选`}</span></div>
     {!indexed.length && <div className="panel empty-list">请先为视频建立 Face 索引</div>}
     {view && <div className="face-gallery-note">展示 {view.displayed_group_count} / {view.eligible_group_count} 个主要候选；底层共 {view.total_group_count} 个保守身份分组。低频、短暂出现的人脸不会进入主视图。</div>}
-    <div className="face-gallery-grid">{view?.groups.map((group, index) => <article className="panel face-gallery-card" key={group.group_idx}><a href={group.media_url} target="_blank" rel="noreferrer" className="face-portrait"><img loading="lazy" src={group.thumbnail_url} /><span>定位 {formatTime(group.best_ms / 1000)}</span></a><div className="face-gallery-info"><small>人物 {index + 1}</small><h3>{group.entity_name || "未命名人物"}</h3><p>{group.occurrence_count} 次检测 · 累计 {formatDuration(group.duration_ms / 1000)} · 首次 {formatTime(group.start_ms / 1000)}</p><div className="face-gallery-actions"><select value={selectedEntity[group.group_idx] || group.entity_id || ""} onChange={event => setSelectedEntity(value => ({ ...value, [group.group_idx]: event.target.value }))}><option value="">选择人物库身份</option>{entities.map(entity => <option key={entity.id} value={entity.id}>{entity.name}</option>)}</select><button className="outline" onClick={() => attach(group.group_idx)}>加入已有</button><button className="primary compact" onClick={() => create(group.group_idx)}>新建人物</button></div></div></article>)}</div>
+    <div className="face-gallery-grid">{(view?.groups ?? []).map((group, index) => <article className="panel face-gallery-card" key={group.group_idx}><a href={group.media_url} target="_blank" rel="noreferrer" className="face-portrait"><img loading="lazy" src={group.thumbnail_url} /><span>定位 {formatTime(group.best_ms / 1000)}</span></a><div className="face-gallery-info"><small>人物 {index + 1}</small><h3>{group.entity_name || "未命名人物"}</h3><p>{group.occurrence_count} 次检测 · 累计 {formatDuration(group.duration_ms / 1000)} · 首次 {formatTime(group.start_ms / 1000)}</p><div className="face-gallery-actions"><select value={selectedEntity[group.group_idx] || group.entity_id || ""} onChange={event => setSelectedEntity(value => ({ ...value, [group.group_idx]: event.target.value }))}><option value="">选择人物库身份</option>{entities.map(entity => <option key={entity.id} value={entity.id}>{entity.name}</option>)}</select><button className="outline" onClick={() => attach(group.group_idx)}>加入已有</button><button className="primary compact" onClick={() => create(group.group_idx)}>新建人物</button></div></div></article>)}</div>
   </section>;
 }
 
 function EntitiesPage({ entities, videos, refresh, setNotice }: { entities: Entity[]; videos: Video[]; refresh: () => Promise<void>; setNotice: (value: string) => void }) {
   const [name, setName] = useState(""); const [image, setImage] = useState<File>(); const [saving, setSaving] = useState(false);
+  const imageUrl = useObjectUrl(image);
   const save = async () => { if (!name.trim()) return setNotice("请输入人物名称"); setSaving(true); try { image ? await api.createEntity(name.trim(), image) : await api.createVoiceEntity(name.trim()); setName(""); setImage(undefined); await refresh(); setNotice(image ? "人物与参考脸已登记" : "已创建声音人物，可从 Speaker 页面添加声音"); } catch (error) { setNotice(error instanceof Error ? error.message : "人物登记失败"); } finally { setSaving(false); } };
   const rename = async (entity: Entity) => { const next = window.prompt("人物名称", entity.name); if (!next?.trim() || next.trim() === entity.name) return; try { await api.renameEntity(entity.id, next.trim()); await refresh(); setNotice("人物已重命名"); } catch (error) { setNotice(error instanceof Error ? error.message : "重命名失败"); } };
   const remove = async (entity: Entity) => { if (!window.confirm(`删除人物“${entity.name}”？相关人脸、声音样本和绑定也会删除。`)) return; try { await api.deleteEntity(entity.id); await refresh(); setNotice("人物已删除"); } catch (error) { setNotice(error instanceof Error ? error.message : "删除失败"); } };
-  return <div><div className="entity-layout"><div className="entity-create panel"><span className="panel-label">NEW IDENTITY</span><h2>登记人物</h2><p>参考脸可选；没有图片时可先创建人物，再从下方主要人脸或视频说话人添加样本。</p><input className="text-input" value={name} onChange={event => setName(event.target.value)} placeholder="人物或明星名称" /><label className="portrait-drop"><input type="file" accept="image/*" onChange={event => setImage(event.target.files?.[0])} />{image ? <img src={URL.createObjectURL(image)} /> : <><span>◎</span><b>可选：添加清晰正脸</b></>}</label><button className="primary compact" disabled={saving} onClick={save}>{saving ? "正在登记…" : image ? "登记人脸人物" : "创建声音人物"}</button></div><div className="entity-library"><div className="section-head"><div><span className="panel-label">IDENTITY LIBRARY</span><h2>人物库</h2></div><span>{entities.length} entities</span></div><div className="entity-grid">{entities.map(entity => <article key={entity.id}>{entity.reference_path ? <img src={`/api/entities/${entity.id}/reference`} /> : <div className="voice-only-avatar">◉</div>}<div><b>{entity.name}</b><small>{entity.reference_path ? "人脸" : "无参考脸"} · {entity.voice_sample_count || 0} 条声音</small><div className="asset-actions"><button className="outline" onClick={() => rename(entity)}>重命名</button><button className="outline danger" onClick={() => remove(entity)}>删除</button></div></div></article>)}{!entities.length && <div className="empty-list">还没有登记人物</div>}</div></div></div><FacesPage videos={videos} entities={entities} refreshEntities={refresh} setNotice={setNotice} /><SpeakersPage videos={videos} setNotice={setNotice} /></div>;
+  return <div><div className="entity-layout"><div className="entity-create panel"><span className="panel-label">NEW IDENTITY</span><h2>登记人物</h2><p>参考脸可选；没有图片时可先创建人物，再从下方主要人脸或视频说话人添加样本。</p><input className="text-input" value={name} onChange={event => setName(event.target.value)} placeholder="人物或明星名称" /><label className="portrait-drop"><input type="file" accept="image/*" onChange={event => setImage(event.target.files?.[0])} />{imageUrl ? <img src={imageUrl} /> : <><span>◎</span><b>可选：添加清晰正脸</b></>}</label><button className="primary compact" disabled={saving} onClick={save}>{saving ? "正在登记…" : image ? "登记人脸人物" : "创建声音人物"}</button></div><div className="entity-library"><div className="section-head"><div><span className="panel-label">IDENTITY LIBRARY</span><h2>人物库</h2></div><span>{entities.length} entities</span></div><div className="entity-grid">{entities.map(entity => <article key={entity.id}>{entity.reference_path ? <img src={`/api/entities/${entity.id}/reference`} /> : <div className="voice-only-avatar">◉</div>}<div><b>{entity.name}</b><small>{entity.reference_path ? "人脸" : "无参考脸"} · {entity.voice_sample_count || 0} 条声音</small><div className="asset-actions"><button className="outline" onClick={() => rename(entity)}>重命名</button><button className="outline danger" onClick={() => remove(entity)}>删除</button></div></div></article>)}{!entities.length && <div className="empty-list">还没有登记人物</div>}</div></div></div><FacesPage videos={videos} entities={entities} refreshEntities={refresh} setNotice={setNotice} /><SpeakersPage videos={videos} setNotice={setNotice} /></div>;
 }
 
 function Overview({ videos, jobs, entities, setPage }: { videos: Video[]; jobs: Job[]; entities: Entity[]; setPage: (page: Page) => void }) {
@@ -468,4 +495,6 @@ function Overview({ videos, jobs, entities, setPage }: { videos: Video[]; jobs: 
   return <div className="overview"><div className="hero panel"><div><span className="panel-label">MVP BASELINE</span><h2>让长视频变成<br />可以搜索的素材库。</h2><p>Face / Visual / ASR / OCR 四路独立索引，保留时间证据；模型只在索引阶段短暂加载。</p><button className="primary compact" onClick={() => setPage("assets")}>添加第一条视频 <span>→</span></button></div><div className="hero-visual"><div className="orbit one">Face</div><div className="orbit two">Visual</div><div className="orbit three">ASR</div><span className="core">M</span></div></div><div className="stats"><article><span>视频资产</span><b>{videos.length}</b><small>{ready} 条可检索</small></article><article><span>人物实体</span><b>{entities.length}</b><small>参考脸向量</small></article><article><span>索引任务</span><b>{jobs.length}</b><small>{jobs.filter(job => job.status === "running").length} 个正在运行</small></article><article><span>NPU 常驻</span><b>0</b><small>任务结束即释放</small></article></div></div>;
 }
 
-createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);
+const rootElement = document.getElementById("root");
+if (!rootElement) throw new Error("MomentSeek root element is missing");
+createRoot(rootElement).render(<React.StrictMode><AppErrorBoundary><App /></AppErrorBoundary></React.StrictMode>);

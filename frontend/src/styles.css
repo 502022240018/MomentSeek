@@ -686,3 +686,57 @@ textarea:focus, .text-input:focus { border-color: #a477d9; box-shadow: 0 0 0 4px
   .identity-clarification { grid-template-columns: 38px 1fr; }
   .identity-clarification-actions { grid-column: 1 / -1; justify-content: flex-start; }
 }
+.ui-crash-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: radial-gradient(circle at 30% 20%, #2f2a4a 0, transparent 38%), #111014;
+  color: #f7f5fb;
+}
+
+.ui-crash-card {
+  width: min(680px, 100%);
+  display: flex;
+  gap: 22px;
+  padding: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 24px;
+  background: rgba(29, 27, 34, 0.94);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+}
+
+.ui-crash-mark {
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  background: #f2ad4f;
+  color: #22170a;
+  font-size: 28px;
+  font-weight: 800;
+}
+
+.ui-crash-card small { color: #aaa3bc; letter-spacing: 0.12em; }
+.ui-crash-card h1 { margin: 8px 0 10px; font-size: 28px; }
+.ui-crash-card p { margin: 0; color: #c9c4d2; line-height: 1.7; }
+.ui-crash-card pre {
+  margin: 18px 0;
+  padding: 12px 14px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  border-radius: 12px;
+  background: #151419;
+  color: #f0c985;
+}
+.ui-crash-card button {
+  border: 0;
+  border-radius: 12px;
+  padding: 11px 18px;
+  background: #8b78ff;
+  color: white;
+  cursor: pointer;
+  font-weight: 700;
+}

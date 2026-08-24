@@ -88,8 +88,11 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
   const [identityChoices, setIdentityChoices] = useState<Record<string, "generic_visual" | "keep_original">>({});
   const [voiceClarificationChoices, setVoiceClarificationChoices] = useState<Record<string, boolean>>({});
 
-  const selectedPlan = planSet?.plans.find(plan => plan.plan_id === selectedPlanId);
-  const clarifications = planSet?.clarifications ?? [];
+  const capabilities = Array.isArray(capability.capabilities) ? capability.capabilities : [];
+  const plans = Array.isArray(planSet?.plans) ? planSet.plans : [];
+  const selectedPlan = plans.find(plan => plan.plan_id === selectedPlanId);
+  const clarifications = Array.isArray(planSet?.clarifications) ? planSet.clarifications : [];
+  const voiceUtterances = Array.isArray(voiceView?.utterances) ? voiceView.utterances : [];
   const voiceEntities = entities.filter(entity => (entity.voice_sample_count || 0) > 0);
   const speakerVideos = ready.filter(video => video.indexed_modalities.includes("speaker"));
   const voiceReference = useMemo<VoiceReferenceInput | undefined>(() => {
@@ -146,8 +149,8 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
     group.videos.length > 0 && group.videos.every(video => selectedVideoIds.includes(video.id))
   ).length;
   const toolMap = useMemo(
-    () => Object.fromEntries(capability.capabilities.map(item => [item.tool_id, item])),
-    [capability],
+    () => Object.fromEntries(capabilities.map(item => [item.tool_id, item])),
+    [capabilities],
   );
 
   const generate = async () => {
@@ -358,7 +361,7 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
       <div className="lab-runtime-card">
         <div className="runtime-head"><span className="runtime-pulse" /><b>系统就绪</b><em>LIVE</em></div>
         <div className="runtime-model"><span>Q</span><div><b>{capability.llm_enabled ? "Qwen3.5 vLLM" : "Heuristic Planner"}</b><small>{capability.llm_enabled ? "规划与多模态重排在线" : "当前使用备用规划器"}</small></div></div>
-        <div className="runtime-stats"><div><strong>{capability.capabilities.length}</strong><small>可用工具</small></div><div><strong>3</strong><small>候选策略</small></div><div><strong>∞</strong><small>可回放</small></div></div>
+        <div className="runtime-stats"><div><strong>{capabilities.length}</strong><small>可用工具</small></div><div><strong>3</strong><small>候选策略</small></div><div><strong>∞</strong><small>可回放</small></div></div>
       </div>
     </section>
 
@@ -377,7 +380,7 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
             <div className="voice-reference-tabs">{(["upload", "entity", "utterance"] as const).map(item => <button type="button" key={item} className={voiceMode === item ? "selected" : ""} onClick={() => setVoiceMode(item)}>{item === "upload" ? "上传音频" : item === "entity" ? "人物库" : "视频片段"}</button>)}</div>
             {voiceMode === "upload" && <label className={`voice-upload ${voiceFile ? "selected" : ""}`}><input type="file" accept="audio/*,video/*" onChange={event => attachVoiceFile(event.target.files?.[0])} /><span>◖</span><div><b>{voiceFile?.name || "选择一段清晰的人声"}</b><small>支持音频或视频；执行时转为 16 kHz 单声道并提取声纹</small></div></label>}
             {voiceMode === "entity" && <div className="voice-reference-fields"><label><span>已注册人物</span><select value={voiceEntityId} onChange={event => chooseVoiceEntity(event.target.value)}><option value="">选择含声音样本的人物</option>{voiceEntities.map(entity => <option key={entity.id} value={entity.id}>{entity.name} · {entity.voice_sample_count} 条样本</option>)}</select></label>{!voiceEntities.length && <p>人物库还没有声音样本，可先从视频说话人页面加入。</p>}</div>}
-            {voiceMode === "utterance" && <div className="voice-reference-fields"><label><span>来源视频</span><select value={voiceVideoId} onChange={event => chooseVoiceVideo(event.target.value)}><option value="">选择已建立说话人索引的视频</option>{speakerVideos.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><label><span>声音片段</span><select disabled={!voiceView || voiceLoading} value={voiceUtteranceIndex ?? ""} onChange={event => chooseVoiceUtterance(event.target.value)}><option value="">{voiceLoading ? "正在加载…" : "选择有声片段"}</option>{voiceView?.utterances.filter(item => item.searchable).map(item => <option key={item.index} value={item.index}>{clock(item.start_ms / 1000)}–{clock(item.end_ms / 1000)} · {item.text || "无文本"}</option>)}</select></label>{voiceView && voiceUtteranceIndex != null && <audio controls preload="metadata" src={voiceView.utterances.find(item => item.index === voiceUtteranceIndex)?.clip_url} />}</div>}
+            {voiceMode === "utterance" && <div className="voice-reference-fields"><label><span>来源视频</span><select value={voiceVideoId} onChange={event => chooseVoiceVideo(event.target.value)}><option value="">选择已建立说话人索引的视频</option>{speakerVideos.map(video => <option key={video.id} value={video.id}>{video.name}</option>)}</select></label><label><span>声音片段</span><select disabled={!voiceView || voiceLoading} value={voiceUtteranceIndex ?? ""} onChange={event => chooseVoiceUtterance(event.target.value)}><option value="">{voiceLoading ? "正在加载…" : "选择有声片段"}</option>{voiceUtterances.filter(item => item.searchable).map(item => <option key={item.index} value={item.index}>{clock(item.start_ms / 1000)}–{clock(item.end_ms / 1000)} · {item.text || "无文本"}</option>)}</select></label>{voiceView && voiceUtteranceIndex != null && <audio controls preload="metadata" src={voiceUtterances.find(item => item.index === voiceUtteranceIndex)?.clip_url} />}</div>}
           </div>}
           {scopeOpen && <div className="scope-popover">
             <div className="scope-search"><span>⌕</span><input value={scopeSearch} onChange={event => setScopeSearch(event.target.value)} placeholder="搜索文件夹或视频名称" /><button type="button" onClick={() => setSelectedVideoIds([])}>检索全部</button></div>
@@ -404,8 +407,8 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
       <aside className="composer-side">
         <div className="section-title compact"><span>02</span><div><h3>选择协作方式</h3><p>你希望对计划掌控到什么程度？</p></div></div>
         <div className="mode-selector">{(Object.keys(modeMeta) as PlannerMode[]).map(item => <button type="button" key={item} className={mode === item ? "selected" : ""} onClick={() => { setMode(item); setExecution(undefined); }}><span>{modeMeta[item].icon}</span><div><b>{modeMeta[item].name}</b><small>{modeMeta[item].description}</small></div><i /></button>)}</div>
-        <button type="button" className="capability-toggle" onClick={() => setCapabilitiesOpen(value => !value)}><span>能力注册表</span><b>{capability.capabilities.length} 个工具可用</b><em>{capabilitiesOpen ? "−" : "+"}</em></button>
-        {capabilitiesOpen && <div className="capability-drawer">{capability.capabilities.map(tool => <div key={tool.tool_id}><span>{toolGlyph[tool.tool_id] || "◇"}</span><div><b>{tool.label}</b><small>{tool.description}</small></div><em className={`latency-${tool.latency}`}>{tool.latency}</em></div>)}</div>}
+        <button type="button" className="capability-toggle" onClick={() => setCapabilitiesOpen(value => !value)}><span>能力注册表</span><b>{capabilities.length} 个工具可用</b><em>{capabilitiesOpen ? "−" : "+"}</em></button>
+        {capabilitiesOpen && <div className="capability-drawer">{capabilities.map(tool => <div key={tool.tool_id}><span>{toolGlyph[tool.tool_id] || "◇"}</span><div><b>{tool.label}</b><small>{tool.description}</small></div><em className={`latency-${tool.latency}`}>{tool.latency}</em></div>)}</div>}
         <button type="button" className="generate-button" disabled={planning} onClick={generate}><span>{planning ? "" : "✦"}</span><div><b>{planning ? "Qwen 正在设计策略" : "生成检索策略"}</b><small>{planning ? "理解意图 · 选择工具 · 估算成本" : "获得 Fast / Balanced / Deep 三套方案"}</small></div><em>{planning ? <i className="button-loader" /> : "→"}</em></button>
       </aside>
     </section>
@@ -413,7 +416,7 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
     {planning && <section className="planning-state"><div className="thinking-orbit"><i /><i /><i /><span>Q</span></div><div><b>正在把你的目标拆成可执行步骤</b><p>分析查询意图、检索范围与可用模态，通常需要 30–80 秒</p></div><div className="thinking-steps"><span className="done">理解意图</span><span className="active">组合工具</span><span>生成策略</span></div></section>}
 
     {planSet && !planning && <section id="strategy-section" className="strategy-section">
-      <div className="strategy-heading"><div className="section-title"><span>03</span><div><h3>选择一条检索路线</h3><p>三套方案使用不同的速度、覆盖度与精度取舍</p></div></div><div className="generated-by"><span className={planSet.planner_trace.status === "ok" ? "ok" : "fallback"}>✦</span><div><b>{planSet.planner_trace.status === "ok" ? "Qwen3.5 已生成" : "已使用备用计划"}</b><small>{planSet.query_intent}</small></div></div></div>
+      <div className="strategy-heading"><div className="section-title"><span>03</span><div><h3>选择一条检索路线</h3><p>三套方案使用不同的速度、覆盖度与精度取舍</p></div></div><div className="generated-by"><span className={planSet.planner_trace?.status === "ok" ? "ok" : "fallback"}>✦</span><div><b>{planSet.planner_trace?.status === "ok" ? "Qwen3.5 已生成" : "已使用备用计划"}</b><small>{planSet.query_intent}</small></div></div></div>
       {!!clarifications.length && <div className="identity-clarifications">{clarifications.map(item => {
         if (item.kind === "voice_reference_required") {
           const skipped = voiceClarificationChoices[item.clarification_id];
@@ -439,7 +442,7 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
           {choice && <strong>✓ {choice === "generic_visual" ? "已改用普通人物解释" : "已确认保留原文"}</strong>}
         </article>;
       })}</div>}
-      <div className="strategy-cards">{planSet.plans.map(plan => {
+      <div className="strategy-cards">{plans.map(plan => {
         const meta = planMeta[plan.plan_id] || planMeta.balanced;
         const tools = [...new Set(plan.steps.map(step => step.tool_id))];
         const hasRerank = plan.steps.some(step => step.tool_id === "vlm.rerank");
@@ -484,7 +487,7 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
     </section>}
 
     {execution && <Output execution={execution} toolMap={toolMap} expandedResult={expandedResult} setExpandedResult={setExpandedResult} setPlaying={setPlaying} canRollback={executionHistory.length > 0} onRollback={rollbackExecution} onRevise={reviseLastStep} running={running} />}
-    {playing && <div className="clip-modal" onClick={() => setPlaying(undefined)}><div className="clip-dialog" onClick={event => event.stopPropagation()}><div className="clip-dialog-head"><div><span>VIDEO MOMENT</span><b>{playing.video_name}</b><small>{clock(playing.start_time)} – {clock(playing.end_time)}</small></div><button type="button" onClick={() => setPlaying(undefined)}>×</button></div><video src={playing.clip_url || playing.media_url} controls autoPlay /><div className="clip-dialog-foot"><div>{playing.modalities.map(item => <span key={item}>{item}</span>)}</div><b>融合分 {playing.score.toFixed(3)}</b></div></div></div>}
+    {playing && <div className="clip-modal" onClick={() => setPlaying(undefined)}><div className="clip-dialog" onClick={event => event.stopPropagation()}><div className="clip-dialog-head"><div><span>VIDEO MOMENT</span><b>{playing.video_name}</b><small>{clock(playing.start_time)} – {clock(playing.end_time)}</small></div><button type="button" onClick={() => setPlaying(undefined)}>×</button></div><video src={playing.clip_url || playing.media_url} controls autoPlay /><div className="clip-dialog-foot"><div>{(playing.modalities ?? []).map(item => <span key={item}>{item}</span>)}</div><b>融合分 {Number(playing.score || 0).toFixed(3)}</b></div></div></div>}
   </div>;
 }
 
@@ -499,26 +502,30 @@ function Output({ execution, toolMap, expandedResult, setExpandedResult, setPlay
   onRevise: (action: "skip" | "downweight") => void;
   running: boolean;
 }) {
+  const trace = Array.isArray(execution.trace) ? execution.trace : [];
+  const results = Array.isArray(execution.results) ? execution.results : [];
+  const executionId = typeof execution.execution_id === "string" ? execution.execution_id : "unknown";
+  const elapsedSeconds = Number.isFinite(execution.elapsed_seconds) ? execution.elapsed_seconds : 0;
   return <section id="planner-output" className="lab-output">
-    <div className="output-heading"><div className="section-title"><span>04</span><div><h3>检索完成，看看为什么是这些结果</h3><p>每一个片段都能追溯到具体工具、分数和执行步骤</p></div></div><span className="execution-id">ID · {execution.execution_id.slice(0, 10)}</span></div>
-    <div className="output-kpis"><div><span>⌕</span><p><strong>{execution.count}</strong><small>候选片段</small></p></div><div><span>✓</span><p><strong>{execution.above_count}</strong><small>超过阈值</small></p></div><div><span>◷</span><p><strong>{execution.elapsed_seconds.toFixed(1)}s</strong><small>端到端耗时</small></p></div><div><span>↳</span><p><strong>{execution.executed_steps}</strong><small>已执行步骤</small></p></div><div className="stop-kpi"><span>✦</span><p><strong>{execution.stop_reason === "ranking_stable" ? "排名已稳定" : execution.stop_reason === "paused_after_step" ? "等待下一步" : "计划已完成"}</strong><small>停止原因</small></p></div></div>
-    <div className="execution-decisions"><div><b>{execution.accepted_steps ?? 0}</b><span>接受</span></div><div><b>{execution.skipped_steps ?? 0}</b><span>跳过</span></div><div><b>{execution.rolled_back_steps ?? 0}</b><span>自动回退</span></div><div className="decision-actions"><button type="button" disabled={running || !execution.trace.length} onClick={() => onRevise("downweight")}>降低最后一步权重</button><button type="button" disabled={running || !execution.trace.length} onClick={() => onRevise("skip")}>忽略最后一步</button><button type="button" disabled={running || !canRollback} onClick={onRollback}>回到上次结果</button></div></div>
+    <div className="output-heading"><div className="section-title"><span>04</span><div><h3>检索完成，看看为什么是这些结果</h3><p>每一个片段都能追溯到具体工具、分数和执行步骤</p></div></div><span className="execution-id">ID · {executionId.slice(0, 10)}</span></div>
+    <div className="output-kpis"><div><span>⌕</span><p><strong>{execution.count}</strong><small>候选片段</small></p></div><div><span>✓</span><p><strong>{execution.above_count}</strong><small>超过阈值</small></p></div><div><span>◷</span><p><strong>{elapsedSeconds.toFixed(1)}s</strong><small>端到端耗时</small></p></div><div><span>↳</span><p><strong>{execution.executed_steps}</strong><small>已执行步骤</small></p></div><div className="stop-kpi"><span>✦</span><p><strong>{execution.stop_reason === "ranking_stable" ? "排名已稳定" : execution.stop_reason === "paused_after_step" ? "等待下一步" : "计划已完成"}</strong><small>停止原因</small></p></div></div>
+    <div className="execution-decisions"><div><b>{execution.accepted_steps ?? 0}</b><span>接受</span></div><div><b>{execution.skipped_steps ?? 0}</b><span>跳过</span></div><div><b>{execution.rolled_back_steps ?? 0}</b><span>自动回退</span></div><div className="decision-actions"><button type="button" disabled={running || !trace.length} onClick={() => onRevise("downweight")}>降低最后一步权重</button><button type="button" disabled={running || !trace.length} onClick={() => onRevise("skip")}>忽略最后一步</button><button type="button" disabled={running || !canRollback} onClick={onRollback}>回到上次结果</button></div></div>
     <div className="trace-panel">
       <div className="trace-panel-head"><div><b>执行轨迹</b><small>观察候选集如何随每个工具变化</small></div><span>TOP-K CONVERGENCE</span></div>
-      <div className="trace-flow">{execution.trace.map((item, index) => <React.Fragment key={index}><article>
+      <div className="trace-flow">{trace.map((item, index) => <React.Fragment key={index}><article>
         <div className="trace-icon">{toolGlyph[item.step.tool_id] || "◇"}<i>{index + 1}</i></div>
         <div className="trace-copy"><span>{item.step.operation} · {roleMeta[(item.effective_role || item.step.role || "primary") as EvidenceRole]?.label}</span><b>{toolMap[item.step.tool_id]?.label || item.step.tool_id}</b><small>{item.raw_result_count} 召回 → {item.output_candidate_count} 候选 · {item.elapsed_seconds}s</small><em className={`decision-${item.decision}`}>{decisionMeta[item.decision] || item.decision} · {item.decision_reason}</em></div>
         <div className="trace-scores"><label><span>集合重合度 <b>{Math.round(item.top_k_jaccard * 100)}%</b></span><i><em style={{ width: `${item.top_k_jaccard * 100}%` }} /></i></label><label><span>顺序稳定度 <b>{Math.round(item.rank_stability * 100)}%</b></span><i><em style={{ width: `${item.rank_stability * 100}%` }} /></i></label></div>
-      </article>{index < execution.trace.length - 1 && <div className="trace-arrow">→</div>}</React.Fragment>)}</div>
+      </article>{index < trace.length - 1 && <div className="trace-arrow">→</div>}</React.Fragment>)}</div>
     </div>
     <div className="results-heading"><div><b>高相关片段</b><small>按融合得分排序 · 点击卡片查看证据</small></div><div className="result-legend"><span><i className="visual" />视觉</span><span><i className="asr" />ASR</span><span><i className="speaker" />声纹</span><span><i className="rerank" />VLM 重排</span></div></div>
-    <div className="evidence-results">{execution.results.map((result, index) => {
+    <div className="evidence-results">{results.map((result, index) => {
       const key = `${result.video_id}-${result.start_time}`;
       const sources = Object.entries(result.planner_evidence?.source_contrib || {});
       const expanded = expandedResult === key;
       return <article className={`evidence-card ${expanded ? "expanded" : ""}`} key={key}>
         <button type="button" className="evidence-media" onClick={() => setPlaying(result)}>{result.thumbnail_url ? <img src={result.thumbnail_url} /> : <span>NO PREVIEW</span>}<i className="media-shade" /><span className="result-rank">#{index + 1}</span><span className="result-time">{clock(result.start_time)} – {clock(result.end_time)}</span><span className="play-button">▶</span><b className="score-pill">{Math.round(result.score * 100)}</b></button>
-        <div className="evidence-body" onClick={() => setExpandedResult(expanded ? "" : key)}><div className="evidence-title"><div><h4>{result.video_name}</h4><p>{result.planner_evidence?.source_count || sources.length} 个独立证据源</p></div><span>{expanded ? "⌃" : "⌄"}</span></div><div className="source-pills">{sources.map(([name, score]) => <span key={name} className={`source-${name.split(".")[0]}`}><i>{toolGlyph[name] || "◇"}</i>{toolMap[name]?.label || name}<b>{Number(score).toFixed(3)}</b></span>)}</div>{expanded && <div className="evidence-details"><div><span>原始工具分数</span>{Object.entries(result.planner_evidence?.raw_scores || {}).map(([name, score]) => <label key={name}><b>{name}</b><em>{Number(score).toFixed(4)}</em></label>)}</div><div><span>命中证据</span>{result.evidence.slice(0, 3).map((item, evidenceIndex) => <p key={evidenceIndex}>{item.detail || item.text || `${item.modality} evidence`}</p>)}</div></div>}</div>
+        <div className="evidence-body" onClick={() => setExpandedResult(expanded ? "" : key)}><div className="evidence-title"><div><h4>{result.video_name}</h4><p>{result.planner_evidence?.source_count || sources.length} 个独立证据源</p></div><span>{expanded ? "⌃" : "⌄"}</span></div><div className="source-pills">{sources.map(([name, score]) => <span key={name} className={`source-${name.split(".")[0]}`}><i>{toolGlyph[name] || "◇"}</i>{toolMap[name]?.label || name}<b>{Number(score).toFixed(3)}</b></span>)}</div>{expanded && <div className="evidence-details"><div><span>原始工具分数</span>{Object.entries(result.planner_evidence?.raw_scores || {}).map(([name, score]) => <label key={name}><b>{name}</b><em>{Number(score).toFixed(4)}</em></label>)}</div><div><span>命中证据</span>{(result.evidence ?? []).slice(0, 3).map((item, evidenceIndex) => <p key={evidenceIndex}>{item.detail || item.text || `${item.modality} evidence`}</p>)}</div></div>}</div>
       </article>;
     })}</div>
   </section>;
