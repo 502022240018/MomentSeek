@@ -97,9 +97,15 @@ def milvus_visual_candidates_ann(
         return []
 
     # Aggregate by segment with multi-query semantics
-    candidates = _aggregate_by_segment(
-        ann_results, video_id, limit, profile, len(query_texts), segment_top_n
+    aggregate_span = (
+        profiler.span("local_processing", "visual_candidate_build")
+        if profiler
+        else nullcontext()
     )
+    with aggregate_span:
+        candidates = _aggregate_by_segment(
+            ann_results, video_id, limit, profile, len(query_texts), segment_top_n
+        )
 
     logger.info(
         f"Visual ANN: video={video_id}, profile={profile}, "
@@ -257,6 +263,7 @@ def _ann_recall_multi_query(
                 timeout=get_settings().milvus_query_timeout_seconds,
             )
 
+        raw_hit_count = sum(len(query_hits) for query_hits in hits)
         results = []
         malformed_hits = 0
         for query_idx, query_hits in enumerate(hits):
@@ -296,6 +303,9 @@ def _ann_recall_multi_query(
             profiler.increment("milvus", "visual_rows", len(valid_results))
             if dropped_hits:
                 profiler.increment("milvus", "visual_invalid_rows", dropped_hits)
+            profiler.increment("milvus_rows", "visual_raw", raw_hit_count)
+            profiler.increment("milvus_rows", "visual_valid", len(valid_results))
+            profiler.increment("milvus_rows", "visual_invalid", dropped_hits)
         return valid_results
 
     except Exception as e:

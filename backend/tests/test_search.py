@@ -412,9 +412,21 @@ def test_retrieval_profiler_accumulates_timings_and_counters():
         pass
     profiler.increment("milvus", "visual_rows", 12)
     profiler.increment("milvus", "visual_rows", 3)
+    profiler.add_seconds("milvus_rpc", "visual", 0.1)
+    profiler.add_seconds("milvus_rpc", "visual", 0.3)
 
     snapshot = profiler.snapshot()
     assert snapshot["timing"]["query_encode"]["visual"] >= 0
+    assert snapshot["timing"]["milvus_rpc"]["visual"] == 0.4
+    assert snapshot["timing_stats"]["milvus_rpc"]["visual"] == {
+        "count": 2,
+        "total": 0.4,
+        "mean": 0.2,
+        "min": 0.1,
+        "p50": 0.2,
+        "p95": 0.29,
+        "max": 0.3,
+    }
     assert snapshot["counters"]["milvus"]["visual_rows"] == 15
 
 
@@ -759,9 +771,17 @@ def test_query_encoding_finishes_before_local_candidate_scoring(tmp_path):
         )
 
     assert events == ["encode", "score"]
-    timing = profiler.snapshot()["timing"]
+    snapshot = profiler.snapshot()
+    timing = snapshot["timing"]
     assert "visual" in timing["query_encode"]
     assert "visual_scoring" in timing["local_processing"]
+    assert "candidate_fanout" in timing["stage_wall"]
+    assert snapshot["timing_stats"]["stage_wall"]["candidate_fanout"]["count"] == 1
+    assert snapshot["counters"]["scope"]["selected_videos"] == 1
+    assert snapshot["counters"]["planned_rpc"]["visual"] == 1
+    assert snapshot["counters"]["candidates"]["visual_pre_threshold"] == 1
+    assert snapshot["counters"]["candidates"]["fusion_input"] == 1
+    assert snapshot["counters"]["candidates"]["returned"] == 1
 
 
 def test_milvus_publication_is_the_online_retrieval_source(tmp_path):
