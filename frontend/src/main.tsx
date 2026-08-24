@@ -4,7 +4,7 @@ import { api, ColorGradingCapability, ColorGradingTask, Entity, FaceGalleryView,
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { ColorGradingPage } from "./ColorGradingPage";
 import { PlannerLabPage } from "./PlannerLabPage";
-import { startSerialPoller } from "./serialPoller";
+import { startRetryUntilSuccess, startSerialPoller } from "./serialPoller";
 import { useObjectUrl } from "./useObjectUrl";
 import {
   defaultIndexConfiguration,
@@ -121,10 +121,22 @@ function App() {
   };
 
   useEffect(() => {
-    api.plannerLabCapabilities().then(setPlannerCapability).catch(() => undefined);
-    return startSerialPoller(() => refresh(false), 3000, error => {
+    let active = true;
+    const stopRefresh = startSerialPoller(() => refresh(false), 3000, error => {
       setNotice(error instanceof Error ? error.message : "服务连接失败");
     });
+    const stopPlannerCapability = startRetryUntilSuccess(
+      async () => {
+        const capability = await api.plannerLabCapabilities();
+        if (active) setPlannerCapability(capability);
+      },
+      3000,
+    );
+    return () => {
+      active = false;
+      stopRefresh();
+      stopPlannerCapability();
+    };
   }, []);
 
   return (

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { startSerialPoller } from "../src/serialPoller.ts";
+import { startRetryUntilSuccess, startSerialPoller } from "../src/serialPoller.ts";
 
 const flushMicrotasks = async () => {
   await Promise.resolve();
@@ -59,4 +59,57 @@ test("serial poller reports a failure and continues scheduling", async () => {
   assert.deepEqual(errors, [expected]);
   assert.equal(scheduled.length, 1);
   stop();
+});
+
+test("retry-until-success stops polling after the first successful attempt", async () => {
+  const scheduled = [];
+  const errors = [];
+  let attempts = 0;
+  const expected = new Error("capabilities temporarily unavailable");
+  const stop = startRetryUntilSuccess(
+    async () => {
+      attempts += 1;
+      if (attempts === 1) throw expected;
+    },
+    3000,
+    error => errors.push(error),
+    callback => {
+      scheduled.push(callback);
+      return callback;
+    },
+    () => undefined,
+  );
+
+  await flushMicrotasks();
+  assert.equal(attempts, 1);
+  assert.deepEqual(errors, [expected]);
+  assert.equal(scheduled.length, 1);
+
+  scheduled.shift()();
+  await flushMicrotasks();
+  assert.equal(attempts, 2);
+  assert.equal(scheduled.length, 0, "success must not schedule another retry");
+  stop();
+});
+
+test("retry-until-success does not schedule after it is stopped while pending", async () => {
+  const scheduled = [];
+  let resolveAttempt;
+  const stop = startRetryUntilSuccess(
+    () => new Promise(resolve => {
+      resolveAttempt = resolve;
+    }),
+    3000,
+    undefined,
+    callback => {
+      scheduled.push(callback);
+      return callback;
+    },
+    () => undefined,
+  );
+
+  stop();
+  resolveAttempt();
+  await flushMicrotasks();
+  assert.equal(scheduled.length, 0, "a stopped pending attempt must not schedule a retry");
 });

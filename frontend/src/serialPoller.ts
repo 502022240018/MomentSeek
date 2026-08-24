@@ -27,3 +27,24 @@ export function startSerialPoller(
     if (timer !== undefined) cancel(timer);
   };
 }
+
+export function startRetryUntilSuccess(
+  task: () => Promise<unknown>,
+  delayMs: number,
+  onError?: (error: unknown) => void,
+  schedule?: Schedule,
+  cancel?: Cancel,
+) {
+  let stop: () => void = () => undefined;
+  stop = startSerialPoller(
+    async () => {
+      await task();
+      stop();
+    },
+    delayMs,
+    onError,
+    schedule,
+    cancel,
+  );
+  return stop;
+}
