@@ -11,7 +11,7 @@ from app.encoders.visual import (
     ClipEncoder,
     resolve_device,
 )
-from app.indexing.common import atomic_save_npz, normalize
+from app.indexing.common import normalize
 from app.media.media import probe_video, read_frames
 
 if TYPE_CHECKING:
@@ -344,11 +344,14 @@ def _visual_index_payload(
     if duration_ms <= 0:
         duration_ms = int(frame_times.max()) + max(1, int(round(1000 / sample_fps)))
     max_bucket = int(segment_ids.max()) if len(segment_ids) else 0
-    segments_total = (
-        int(len(explicit_segment_times))
-        if explicit_segment_times is not None
-        else len(_fixed_segments(duration_ms, segment_ms, max_bucket))
-    )
+    if explicit_segment_times is None:
+        explicit_segment_times = np.asarray(
+            _fixed_segments(duration_ms, segment_ms, max_bucket),
+            dtype=np.int32,
+        )
+    else:
+        explicit_segment_times = np.asarray(explicit_segment_times, dtype=np.int32)
+    segments_total = int(len(explicit_segment_times))
     offsets = np.searchsorted(
         segment_ids, np.arange(segments_total + 1, dtype=np.int32), side="left"
     ).astype(np.int32)
@@ -358,15 +361,14 @@ def _visual_index_payload(
         "frame_embeddings": embeddings.astype(np.float16),
         "frame_times_ms": frame_times.astype(np.int32),
         "segment_frame_offsets": offsets,
+        "segment_times_ms": explicit_segment_times,
+        "duration_ms": int(duration_ms),
     }
-    if explicit_segment_times is not None:
-        payload["segment_times_ms"] = explicit_segment_times.astype(np.int32)
     return payload, segments_total, segments_with_frames, empty_segments
 
 
 def build_visual_index(
     video_path: str,
-    output_path: str,
     model_name: str,
     pretrained: str,
     sample_fps: float,
@@ -388,6 +390,8 @@ def build_visual_index(
     shot_detector_threshold: float = 0.20,
     milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
+    if milvus_ctx is None:
+        raise RuntimeError("Visual indexing requires a Milvus write context")
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
     if encoder is None:
@@ -434,22 +438,19 @@ def build_visual_index(
         sample_fps=sample_fps,
         explicit_segment_times=explicit_segment_times,
     )
-    milvus_rows = None
-    if milvus_ctx is not None:
-        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
+    from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
 
-        milvus_rows = write_modality_from_memory(
-            milvus_ctx,
-            "visual",
-            {
-                "embeddings": payload["frame_embeddings"],
-                "frame_times_ms": payload["frame_times_ms"],
-                "segment_frame_offsets": payload["segment_frame_offsets"],
-                "segment_times_ms": payload.get("segment_times_ms"),
-            },
-        )
-    # Retained only as an offline recovery artifact; no runtime path reads it.
-    atomic_save_npz(output_path, **payload)
+    milvus_rows = write_modality_from_memory(
+        milvus_ctx,
+        "visual",
+        {
+            "embeddings": payload["frame_embeddings"],
+            "frame_times_ms": payload["frame_times_ms"],
+            "segment_frame_offsets": payload["segment_frame_offsets"],
+            "segment_times_ms": payload["segment_times_ms"],
+            "duration_ms": payload["duration_ms"],
+        },
+    )
     return {
         "segments_total": segments_total,
         "segments_with_frames": segments_with_frames,
@@ -461,7 +462,7 @@ def build_visual_index(
         "model": encoder.model_label,
         "decode_status": "complete" if empty_segments == 0 else "partial",
         "segment_strategy": active_strategy,
-        "segment_times": segment_time_source,
+        "segment_times": "explicit",
         "shot_detector": active_detector,
         "milvus_rows": milvus_rows,
     }

@@ -83,7 +83,6 @@ def execute_job(job_id: str) -> None:
         job_start = time.perf_counter()
         catalog.update_job(job_id, metrics=metrics)
         catalog.update_video(video["id"], status="indexing")
-        completed = set(video.get("indexed_modalities", []))
         stages = job["modalities"]
         try:
             for index, stage in enumerate(stages):
@@ -116,10 +115,6 @@ def execute_job(job_id: str) -> None:
                     "status": "completed",
                     **stage_result,
                 }
-                completed.add(stage)
-                if stage == "asr" and isinstance(stage_result.get("speaker"), dict):
-                    completed.add("speaker")
-                catalog.update_video(video["id"], indexed_modalities=sorted(completed))
                 catalog.update_job(
                     job_id,
                     progress=round((index + 1) / max(1, len(stages)), 3),

@@ -31,12 +31,15 @@ def ocr_collection():
     settings = get_settings()
     alias = f"ocr-hybrid-test-{uuid4().hex}"
     collection_name = f"ocr_hybrid_test_{uuid4().hex}"
-    connections.connect(
-        alias=alias,
-        host=settings.milvus_host,
-        port=settings.milvus_port,
-        timeout=settings.milvus_query_timeout_seconds,
-    )
+    try:
+        connections.connect(
+            alias=alias,
+            host=settings.milvus_host,
+            port=settings.milvus_port,
+            timeout=settings.milvus_query_timeout_seconds,
+        )
+    except Exception as exc:
+        pytest.skip(f"Cannot connect to Milvus: {exc}")
     try:
         col = Collection(
             name=collection_name,

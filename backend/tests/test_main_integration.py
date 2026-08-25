@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -10,7 +11,7 @@ from app.catalog.db import Catalog
 from app.core.settings import Settings
 
 
-def test_folder_api_deletion_keeps_asset_and_its_index(monkeypatch, tmp_path):
+def test_folder_api_deletion_keeps_asset_and_its_publication(monkeypatch, tmp_path):
     import app.main as main
 
     settings = Settings(_env_file=None, app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models", indexer_mode="process_exit")
@@ -18,10 +19,14 @@ def test_folder_api_deletion_keeps_asset_and_its_index(monkeypatch, tmp_path):
     catalog = Catalog(settings.db_path)
     video_path = settings.upload_dir / "video-1.mp4"
     video_path.write_bytes(b"video")
-    index_path = settings.index_dir / "video-1" / "visual.npz"
-    index_path.parent.mkdir(parents=True)
-    index_path.write_bytes(b"index")
     catalog.create_video({"id": "video-1", "name": "demo.mp4", "file_path": str(video_path), "duration": 1, "fps": 25, "width": 640, "height": 480, "status": "ready"})
+    catalog.publish_modality(
+        "video-1",
+        "visual",
+        asset_version="visual-v1",
+        row_count=4,
+        metadata={"model_key": "siglip2-test"},
+    )
     monkeypatch.setattr(context, "settings", settings)
     monkeypatch.setattr(context, "catalog", catalog)
 
@@ -34,7 +39,9 @@ def test_folder_api_deletion_keeps_asset_and_its_index(monkeypatch, tmp_path):
         assert client.get("/api/videos").json()[0]["folder_ids"] == []
 
     assert video_path.exists()
-    assert index_path.exists()
+    publication = catalog.get_modality_publication("video-1", "visual")
+    assert publication["asset_version"] == "visual-v1"
+    assert publication["row_count"] == 4
 
 
 def test_spawn_indexer_daemon_passes_profile_environment(monkeypatch, tmp_path):
@@ -203,7 +210,12 @@ def test_create_index_job_queues_only_requested_modalities(monkeypatch, tmp_path
         "height": 1080,
         "status": "ready",
     })
-    catalog.update_video("video-1", indexed_modalities=["face", "visual"])
+    catalog.publish_modality(
+        "video-1", "face", asset_version="face-v1", row_count=2
+    )
+    catalog.publish_modality(
+        "video-1", "visual", asset_version="visual-v1", row_count=3
+    )
     launched: list[str] = []
     monkeypatch.setattr(context, "settings", settings)
     monkeypatch.setattr(context, "catalog", catalog)
@@ -371,12 +383,24 @@ def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
             "text_profile": {},
             "decode_status": "empty",
             "semantic_status": "disabled",
+            "milvus_rows": 0,
         }
 
     monkeypatch.setattr(stage_runner, "get_settings", lambda: settings)
     monkeypatch.setattr(asr, "build_asr_index", fake_build_asr_index)
     import app.indexing.stage_executor as stage_executor
-    monkeypatch.setattr(stage_executor, "_setup_milvus_context", lambda *args: None)
+    milvus_ctx = SimpleNamespace(
+        video_id="video-1",
+        asset_version="test-asr-version",
+        client=SimpleNamespace(
+            count_video_modality_version=lambda video_id, modality, version: 0
+        ),
+    )
+    monkeypatch.setattr(
+        stage_executor,
+        "_setup_milvus_context",
+        lambda *args: milvus_ctx,
+    )
 
     result = stage_runner.run("asr", job["id"])
 
@@ -384,3 +408,7 @@ def test_stage_runner_uses_asr_engine_job_option(monkeypatch, tmp_path):
     assert captured["engine"] == "faster-whisper"
     assert captured["model_name"] == "turbo"
     assert captured["language"] == "auto"
+    assert "output_path" not in captured
+    publication = catalog.get_modality_publication("video-1", "asr")
+    assert publication["asset_version"] == "test-asr-version"
+    assert publication["row_count"] == 0

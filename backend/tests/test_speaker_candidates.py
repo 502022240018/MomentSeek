@@ -20,13 +20,19 @@ from app.core.settings import get_settings
 from app.vector_store.milvus.milvus_search import (
     _reset_index_verification,
     milvus_speaker_candidates,
+    milvus_speaker_candidates_scoped,
 )
 
 _VIDEO_ID = "spk-video"
 _ASSET_VERSION = "7"
 
 
-def _hit(distance: float, utterance_idx: int, track_id: int = 0) -> MagicMock:
+def _hit(
+    distance: float,
+    utterance_idx: int,
+    track_id: int = 0,
+    **overrides,
+) -> MagicMock:
     hit = MagicMock()
     hit.distance = distance
     entity = {
@@ -36,6 +42,7 @@ def _hit(distance: float, utterance_idx: int, track_id: int = 0) -> MagicMock:
         "track_id": track_id,
         "asr_chunk_idx": utterance_idx,
     }
+    entity.update(overrides)
     hit.entity.get.side_effect = entity.get
     return hit
 
@@ -43,8 +50,12 @@ def _hit(distance: float, utterance_idx: int, track_id: int = 0) -> MagicMock:
 def _make_client(hits: list[MagicMock]) -> tuple[MagicMock, MagicMock]:
     collection = MagicMock()
     collection.search.return_value = [hits]
-    # _verify_ann_index_type_once introspects col.index() — present DISKANN.
-    collection.index.return_value.params = {"index_type": "DISKANN"}
+    # _verify_ann_index_type_once introspects col.index() — present the expected
+    # Speaker index type and metric.
+    collection.index.return_value.params = {
+        "index_type": "DISKANN",
+        "metric_type": "COSINE",
+    }
     client = MagicMock()
     client.collection_for.return_value = collection
     return client, collection
@@ -141,3 +152,64 @@ def test_threshold_negative_keeps_all_above():
 
     assert all(c.above_threshold for c in candidates)
     assert all(c.decision == "absolute_hit" for c in candidates)
+
+
+def test_invalid_speaker_metadata_is_dropped_instead_of_fabricating_zero_time():
+    _reset_index_verification()
+    client, _ = _make_client([
+        _hit(0.95, 0, start_ms=None),
+        _hit(0.90, 1, end_ms=1000),
+        _hit(0.85, 2, asr_chunk_idx=-1),
+        _hit(0.80, 3, track_id=-1),
+        _hit(float("nan"), 4),
+    ])
+
+    candidates = milvus_speaker_candidates(
+        client, _VIDEO_ID, _unit_query(), _ASSET_VERSION, limit=10,
+        threshold=-1.0,
+    )
+
+    assert candidates == []
+
+
+def test_zero_start_is_valid_when_end_is_positive():
+    _reset_index_verification()
+    client, _ = _make_client([_hit(0.9, 0, start_ms=0, end_ms=500)])
+
+    candidates = milvus_speaker_candidates(
+        client, _VIDEO_ID, _unit_query(), _ASSET_VERSION, limit=10,
+        threshold=-1.0,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].start_time == 0.0
+    assert candidates[0].end_time == 0.5
+
+
+def test_scoped_speaker_search_batches_videos_and_reference_vectors_once():
+    _reset_index_verification()
+    client, collection = _make_client([])
+    first = _hit(0.7, 0, video_id="a", asset_version="1")
+    stronger = _hit(0.9, 0, video_id="a", asset_version="1")
+    other = _hit(0.8, 1, video_id="b", asset_version="2")
+    stale = _hit(0.99, 2, video_id="b", asset_version="old")
+    collection.search.return_value = [[first, other], [stronger, stale]]
+
+    queries = np.vstack([_unit_query(), _unit_query()])
+    candidates = milvus_speaker_candidates_scoped(
+        client,
+        queries,
+        {"a": "1", "b": "2"},
+        limit=3,
+        threshold=-1.0,
+    )
+
+    collection.search.assert_called_once()
+    call = collection.search.call_args.kwargs
+    assert len(call["data"]) == 2
+    assert 'video_id == "a"' in call["expr"] and 'asset_version == "1"' in call["expr"]
+    assert 'video_id == "b"' in call["expr"] and 'asset_version == "2"' in call["expr"]
+    assert [(item.video_id, item.unit_id, item.score) for item in candidates] == [
+        ("a", 0, 0.9),
+        ("b", 1, 0.8),
+    ]

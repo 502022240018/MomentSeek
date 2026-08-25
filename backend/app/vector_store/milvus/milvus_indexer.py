@@ -1,29 +1,16 @@
-"""Milvus indexers for all five modalities.
+"""Milvus-only index writers for all five online modalities.
 
-Each indexer exposes two write methods:
-
-  upsert_from_memory(**arrays) — P2 direct path: accepts in-memory numpy arrays
-      and upserts directly to Milvus without writing an intermediate NPZ file.
-      This is the hot path used by build_* functions when milvus_ctx is available.
-
-  upsert_from_npz(npz_path) — legacy / recovery path: loads a previously-written
-      NPZ from disk and delegates to upsert_from_memory.  Used by reindex_from_file()
-      for manual recovery and backfill scripts.
-
-Public write hooks:
-  write_modality_from_memory() — P2 hook; build_* functions call this instead of
-      saving an NPZ first.  On failure it invokes recovery_save_fn (if supplied)
-      so the NPZ is only written when actually needed.
-  write_modality_to_milvus()   — legacy hook; reads from an NPZ path.  Kept for
-      reindex_from_file() and any caller that already has a NPZ on disk.
+Every indexer accepts in-memory arrays and writes them directly to Milvus.  The
+write layer deliberately has no file import, NPZ recovery, or fallback API: a
+failed write aborts the indexing attempt and its unpublished ``asset_version``
+remains invisible to readers.
 """
 from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -32,6 +19,7 @@ from .milvus_schema import (
     MODEL_VERSIONS,
     asr_pk,
     face_pk,
+    face_group_pk,
     ocr_pk,
     speaker_pk,
     truncate_text_for_milvus,
@@ -192,25 +180,83 @@ class VisualMilvusIndexer:
         embeddings: np.ndarray,
         frame_times_ms: np.ndarray,
         segment_frame_offsets: np.ndarray,
-        segment_times_ms: "np.ndarray | None" = None,
+        segment_times_ms: np.ndarray,
+        duration_ms: int,
     ) -> int:
         """P2 direct path: build rows from in-memory arrays and upsert."""
         embeddings = np.asarray(embeddings, dtype=np.float32)
-        times_ms   = np.asarray(frame_times_ms, dtype=np.int32)
-        offsets    = np.asarray(segment_frame_offsets, dtype=np.int32)
-        if not len(embeddings):
-            return 0
+        times_ms = np.asarray(frame_times_ms, dtype=np.int64)
+        offsets = np.asarray(segment_frame_offsets, dtype=np.int64)
+        segment_times = np.asarray(segment_times_ms, dtype=np.int64)
+        duration_ms = int(duration_ms)
 
-        frame_segment_ids  = np.full(len(embeddings), -1, dtype=np.int32)
-        frame_seg_start_ms = np.full(len(embeddings), -1, dtype=np.int64)
-        frame_seg_end_ms   = np.full(len(embeddings), -1, dtype=np.int64)
-        for seg_idx in range(len(offsets) - 1):
+        if embeddings.ndim != 2:
+            raise ValueError("visual embeddings must be a 2-D array")
+        if embeddings.shape[1] != EMBEDDING_DIMS["visual"]:
+            raise ValueError(
+                "visual embedding dimension mismatch: "
+                f"expected {EMBEDDING_DIMS['visual']}, got {embeddings.shape[1]}"
+            )
+        frame_count = int(embeddings.shape[0])
+        if times_ms.ndim != 1 or len(times_ms) != frame_count:
+            raise ValueError("visual frame_times_ms must be a 1-D array matching embeddings")
+        if offsets.ndim != 1 or len(offsets) < 2:
+            raise ValueError("visual segment_frame_offsets must contain at least start and end")
+        segment_count = len(offsets) - 1
+        if segment_times.shape != (segment_count, 2):
+            raise ValueError(
+                "visual segment_times_ms must have shape "
+                f"({segment_count}, 2), got {segment_times.shape}"
+            )
+        if duration_ms <= 0:
+            raise ValueError("visual duration_ms must be positive")
+        if int(offsets[0]) != 0 or int(offsets[-1]) != frame_count:
+            raise ValueError(
+                "visual segment_frame_offsets must cover every frame exactly "
+                f"(expected 0..{frame_count})"
+            )
+        if np.any(np.diff(offsets) < 0):
+            raise ValueError("visual segment_frame_offsets must be non-decreasing")
+        starts = segment_times[:, 0]
+        ends = segment_times[:, 1]
+        if np.any(starts < 0) or np.any(ends <= starts) or np.any(ends > duration_ms):
+            raise ValueError(
+                "visual segment bounds must satisfy 0 <= start < end <= duration_ms"
+            )
+        if len(segment_times) > 1 and np.any(starts[1:] < ends[:-1]):
+            raise ValueError("visual segment bounds must be ordered and non-overlapping")
+        if np.any(times_ms < 0) or np.any(times_ms > duration_ms):
+            raise ValueError("visual frame timestamps must be within video duration")
+
+        frame_segment_ids = np.full(frame_count, -1, dtype=np.int32)
+        frame_seg_start_ms = np.full(frame_count, -1, dtype=np.int64)
+        frame_seg_end_ms = np.full(frame_count, -1, dtype=np.int64)
+        for seg_idx in range(segment_count):
             start_f = int(offsets[seg_idx])
-            end_f   = int(offsets[seg_idx + 1])
+            end_f = int(offsets[seg_idx + 1])
+            segment_start_ms = int(segment_times[seg_idx, 0])
+            segment_end_ms = int(segment_times[seg_idx, 1])
+            segment_frame_times = times_ms[start_f:end_f]
+            if np.any(segment_frame_times < segment_start_ms):
+                raise ValueError(
+                    f"visual segment {seg_idx} contains a frame before its start boundary"
+                )
+            if segment_end_ms < duration_ms:
+                outside_end = segment_frame_times >= segment_end_ms
+            else:
+                outside_end = segment_frame_times > segment_end_ms
+            if np.any(outside_end):
+                raise ValueError(
+                    f"visual segment {seg_idx} contains a frame outside its end boundary"
+                )
             frame_segment_ids[start_f:end_f] = seg_idx
-            if segment_times_ms is not None and seg_idx < len(segment_times_ms):
-                frame_seg_start_ms[start_f:end_f] = int(segment_times_ms[seg_idx, 0])
-                frame_seg_end_ms[start_f:end_f]   = int(segment_times_ms[seg_idx, 1])
+            frame_seg_start_ms[start_f:end_f] = segment_start_ms
+            frame_seg_end_ms[start_f:end_f] = segment_end_ms
+
+        if frame_count and np.any(frame_segment_ids < 0):
+            raise ValueError("visual segment offsets left one or more frames unassigned")
+        if frame_count == 0:
+            return 0
 
         model_ver = ctx.model_ver("visual")
         col = ctx.client.collection_for("visual")
@@ -230,25 +276,6 @@ class VisualMilvusIndexer:
             for idx in range(len(embeddings))
         ]
         return _upsert_batched(col, rows, "visual")
-
-    def upsert_from_npz(self, ctx: MilvusWriteContext, npz_path: str | Path) -> int:
-        """Legacy / recovery path: load NPZ and delegate to upsert_from_memory."""
-        with np.load(npz_path, allow_pickle=False) as data:
-            required = {"frame_embeddings", "frame_times_ms", "segment_frame_offsets"}
-            if not required.issubset(set(data.files)):
-                raise ValueError(
-                    "visual.npz missing frame_embeddings, frame_times_ms, or segment_frame_offsets"
-                )
-            return self.upsert_from_memory(
-                ctx,
-                embeddings=np.asarray(data["frame_embeddings"], dtype=np.float32),
-                frame_times_ms=np.asarray(data["frame_times_ms"], dtype=np.int32),
-                segment_frame_offsets=np.asarray(data["segment_frame_offsets"], dtype=np.int32),
-                segment_times_ms=(
-                    np.asarray(data["segment_times_ms"], dtype=np.int32)
-                    if "segment_times_ms" in data.files else None
-                ),
-            )
 
 
 class AsrMilvusIndexer:
@@ -310,30 +337,6 @@ class AsrMilvusIndexer:
                 row["has_embedding"] = has_emb
             rows.append(row)
         return _upsert_batched(col, rows, "asr")
-
-    def upsert_from_npz(self, ctx: MilvusWriteContext, npz_path: str | Path) -> int:
-        """Legacy / recovery path: load NPZ and delegate to upsert_from_memory."""
-        with np.load(npz_path, allow_pickle=False) as data:
-            if "chunk_times_ms" not in data.files or "texts" not in data.files:
-                return 0
-            texts = [str(t) for t in data["texts"].tolist()]
-            has_semantic = (
-                "embeddings" in data.files
-                and "embedding_chunk_indices" in data.files
-            )
-            return self.upsert_from_memory(
-                ctx,
-                chunk_times_ms=np.asarray(data["chunk_times_ms"], dtype=np.int32),
-                texts=texts,
-                embeddings=(
-                    np.asarray(data["embeddings"], dtype=np.float32)
-                    if has_semantic else None
-                ),
-                embedding_chunk_indices=(
-                    np.asarray(data["embedding_chunk_indices"], dtype=np.int32)
-                    if has_semantic else None
-                ),
-            )
 
 
 class OcrMilvusIndexer:
@@ -418,46 +421,6 @@ class OcrMilvusIndexer:
             rows.append(row)
         return _upsert_batched(col, rows, "ocr")
 
-    def upsert_from_npz(self, ctx: MilvusWriteContext, npz_path: str | Path) -> int:
-        """Legacy / recovery path: load NPZ and delegate to upsert_from_memory."""
-        with np.load(npz_path, allow_pickle=False) as data:
-            required = {"frame_times_ms", "frame_windows_ms"}
-            if not required.issubset(set(data.files)):
-                return 0
-            has_semantic = (
-                "embeddings" in data.files
-                and "embedding_frame_indices" in data.files
-            )
-            has_boxes = (
-                "box_frame_indices" in data.files
-                and "box_texts" in data.files
-            )
-            return self.upsert_from_memory(
-                ctx,
-                frame_times_ms=np.asarray(data["frame_times_ms"], dtype=np.int32),
-                frame_windows_ms=np.asarray(data["frame_windows_ms"], dtype=np.int32),
-                embeddings=(
-                    np.asarray(data["embeddings"], dtype=np.float32)
-                    if has_semantic else None
-                ),
-                embedding_frame_indices=(
-                    np.asarray(data["embedding_frame_indices"], dtype=np.int32)
-                    if has_semantic else None
-                ),
-                box_frame_indices=(
-                    np.asarray(data["box_frame_indices"], dtype=np.int32)
-                    if has_boxes else None
-                ),
-                box_texts=(
-                    [str(t) for t in data["box_texts"].tolist()]
-                    if has_boxes else None
-                ),
-                box_scores=(
-                    np.asarray(data["box_scores"], dtype=np.float32)
-                    if has_boxes and "box_scores" in data.files else None
-                ),
-            )
-
 
 class FaceMilvusIndexer:
     def upsert_from_memory(
@@ -466,8 +429,20 @@ class FaceMilvusIndexer:
         *,
         embeddings: np.ndarray,
         track_times_ms: np.ndarray,
+        group_model_version: str,
+        group_embeddings: np.ndarray | None = None,
+        group_track_indices: np.ndarray | None = None,
+        group_times_ms: np.ndarray | None = None,
+        group_bboxes: np.ndarray | None = None,
+        group_qualities: np.ndarray | None = None,
+        group_durations_ms: np.ndarray | None = None,
+        group_occurrence_counts: np.ndarray | None = None,
+        group_importance_scores: np.ndarray | None = None,
     ) -> int:
         """P2 direct path: build rows from in-memory arrays and upsert."""
+        group_model_version = str(group_model_version).strip()
+        if not group_model_version:
+            raise ValueError("face group_model_version is required")
         emb_arr   = np.asarray(embeddings, dtype=np.float32)
         times_arr = np.asarray(track_times_ms, dtype=np.int32)
         if not len(emb_arr):
@@ -489,18 +464,135 @@ class FaceMilvusIndexer:
             }
             for idx in range(len(emb_arr))
         ]
-        return _upsert_batched(col, rows, "face")
+        track_count = _upsert_batched(col, rows, "face")
 
-    def upsert_from_npz(self, ctx: MilvusWriteContext, npz_path: str | Path) -> int:
-        """Legacy / recovery path: load NPZ and delegate to upsert_from_memory."""
-        with np.load(npz_path, allow_pickle=False) as data:
-            if "embeddings" not in data.files or "track_times_ms" not in data.files:
-                raise ValueError("face.npz missing embeddings or track_times_ms")
-            return self.upsert_from_memory(
-                ctx,
-                embeddings=np.asarray(data["embeddings"], dtype=np.float32),
-                track_times_ms=np.asarray(data["track_times_ms"], dtype=np.int32),
+        upsert_face_group_rows(
+            ctx,
+            group_model_version=group_model_version,
+            group_embeddings=group_embeddings,
+            group_track_indices=group_track_indices,
+            group_times_ms=group_times_ms,
+            group_bboxes=group_bboxes,
+            group_qualities=group_qualities,
+            group_durations_ms=group_durations_ms,
+            group_occurrence_counts=group_occurrence_counts,
+            group_importance_scores=group_importance_scores,
+        )
+        return track_count
+
+
+def upsert_face_group_rows(
+    ctx: MilvusWriteContext,
+    *,
+    group_model_version: str,
+    group_embeddings: np.ndarray | None,
+    group_track_indices: np.ndarray | None,
+    group_times_ms: np.ndarray | None,
+    group_bboxes: np.ndarray | None,
+    group_qualities: np.ndarray | None,
+    group_durations_ms: np.ndarray | None,
+    group_occurrence_counts: np.ndarray | None,
+    group_importance_scores: np.ndarray | None,
+) -> int:
+    """Write one immutable derived Face group generation without touching tracks."""
+    model_version = str(group_model_version).strip()
+    if not model_version:
+        raise ValueError("face group_model_version is required")
+    vectors = (
+        np.asarray(group_embeddings, dtype=np.float32)
+        if group_embeddings is not None
+        else np.empty((0, 512), dtype=np.float32)
+    )
+    count = len(vectors)
+    if vectors.ndim != 2 or (count and vectors.shape[1] != 512):
+        raise ValueError("face group embeddings must have shape (N, 512)")
+    if not count:
+        return 0
+    arrays = {
+        "track_indices": np.asarray(group_track_indices, dtype=np.int64),
+        "times": np.asarray(group_times_ms, dtype=np.int64),
+        "bboxes": np.asarray(group_bboxes, dtype=np.float32),
+        "qualities": np.asarray(group_qualities, dtype=np.float32),
+        "durations": np.asarray(group_durations_ms, dtype=np.int64),
+        "occurrences": np.asarray(group_occurrence_counts, dtype=np.int64),
+        "importance": np.asarray(group_importance_scores, dtype=np.float32),
+    }
+    expected_shapes = {
+        "track_indices": (count,),
+        "times": (count, 3),
+        "bboxes": (count, 4),
+        "qualities": (count,),
+        "durations": (count,),
+        "occurrences": (count,),
+        "importance": (count,),
+    }
+    for name, expected in expected_shapes.items():
+        if arrays[name].shape != expected:
+            raise ValueError(
+                f"face group {name} must have shape {expected}, "
+                f"got {arrays[name].shape}"
             )
+    if (
+        not np.isfinite(vectors).all()
+        or not np.isfinite(arrays["bboxes"]).all()
+        or not np.isfinite(arrays["qualities"]).all()
+        or not np.isfinite(arrays["importance"]).all()
+    ):
+        raise ValueError("face group arrays must be finite")
+    if np.any(np.linalg.norm(vectors, axis=1) <= 1e-12):
+        raise ValueError("face group embeddings must be non-zero")
+    if np.any(arrays["track_indices"] < 0):
+        raise ValueError("face group representative track indices must be non-negative")
+    if np.any(arrays["durations"] <= 0):
+        raise ValueError("face group durations must be positive")
+    if np.any(arrays["occurrences"] <= 0):
+        raise ValueError("face group occurrence counts must be positive")
+    if np.any((arrays["qualities"] < 0) | (arrays["qualities"] > 1)):
+        raise ValueError("face group qualities must be between 0 and 1")
+
+    rows = []
+    for idx in range(count):
+        start_ms, end_ms, best_ms = (int(value) for value in arrays["times"][idx])
+        if start_ms < 0 or end_ms <= start_ms or not start_ms <= best_ms <= end_ms:
+            raise ValueError(f"face group {idx} has invalid time bounds")
+        bbox = arrays["bboxes"][idx]
+        missing_bbox = bool(np.all(bbox == -1.0))
+        valid_bbox = bool(
+            np.all((bbox >= 0.0) & (bbox <= 1.0))
+            and bbox[2] > bbox[0]
+            and bbox[3] > bbox[1]
+        )
+        if not missing_bbox and not valid_bbox:
+            raise ValueError(f"face group {idx} has invalid representative bbox")
+        rows.append({
+            "pk": face_group_pk(
+                ctx.video_id,
+                ctx.asset_version,
+                idx,
+                model_version,
+            ),
+            "video_id": ctx.video_id,
+            "asset_version": ctx.asset_version,
+            "model_version": model_version,
+            "group_idx": idx,
+            "representative_track_idx": int(arrays["track_indices"][idx]),
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "best_ms": best_ms,
+            "bbox_x1": float(bbox[0]),
+            "bbox_y1": float(bbox[1]),
+            "bbox_x2": float(bbox[2]),
+            "bbox_y2": float(bbox[3]),
+            "representative_quality": float(arrays["qualities"][idx]),
+            "duration_ms": int(arrays["durations"][idx]),
+            "occurrence_count": int(arrays["occurrences"][idx]),
+            "importance_score": float(arrays["importance"][idx]),
+            "embedding": vectors[idx].tolist(),
+        })
+    collection = ctx.client.collection("face_groups")
+    written = _upsert_batched(collection, rows, "face")
+    collection.flush()
+    return written
 
 
 class SpeakerMilvusIndexer:
@@ -538,19 +630,6 @@ class SpeakerMilvusIndexer:
         ]
         return _upsert_batched(col, rows, "speaker")
 
-    def upsert_from_npz(self, ctx: MilvusWriteContext, npz_path: str | Path) -> int:
-        """Legacy / recovery path: load NPZ and delegate to upsert_from_memory."""
-        with np.load(npz_path, allow_pickle=False) as data:
-            required = {"utterance_embeddings", "utterance_times_ms", "utterance_refs"}
-            if not required.issubset(set(data.files)):
-                raise ValueError(f"speaker.npz missing: {required - set(data.files)}")
-            return self.upsert_from_memory(
-                ctx,
-                utterance_embeddings=np.asarray(data["utterance_embeddings"], dtype=np.float32),
-                utterance_times_ms=np.asarray(data["utterance_times_ms"], dtype=np.int32),
-                utterance_refs=np.asarray(data["utterance_refs"], dtype=np.int32),
-            )
-
 
 # ---------------------------------------------------------------------------
 # Dispatch table
@@ -573,86 +652,25 @@ def write_modality_from_memory(
     ctx: MilvusWriteContext,
     modality: str,
     arrays: dict[str, Any],
-    *,
-    recovery_save_fn: "Callable[[], None] | None" = None,
 ) -> int:
-    """P2 direct-write hook: upsert in-memory arrays to Milvus; save NPZ on failure.
+    """Write one in-memory modality payload and fail closed on any error.
 
     Args:
-        ctx:              MilvusWriteContext with video_id, asset_version, client.
-        modality:         "visual" / "asr" / "ocr" / "face" / "speaker".
-        arrays:           kwargs dict to pass to the indexer's upsert_from_memory().
-        recovery_save_fn: Optional callable that saves the NPZ to disk before
-                          the failure is raised, preserving an offline recovery
-                          source without enabling runtime fallback.
+        ctx:      MilvusWriteContext with video_id, asset_version, and client.
+        modality: ``visual`` / ``asr`` / ``ocr`` / ``face`` / ``speaker``.
+        arrays:   Keyword arguments for the modality indexer's in-memory writer.
 
-    On success: data is flushed and immediately queryable.
-    On failure: invokes recovery_save_fn (if supplied) before handling the failure.
+    The caller publishes ``asset_version`` only after this function returns and
+    the persisted row count is verified.  No recovery artifact is written.
     """
     indexer = _INDEXERS[modality]
     try:
         count = indexer.upsert_from_memory(ctx, **arrays)
-        # Flush to ensure buffered records are queryable by downstream stages.
-        try:
-            ctx.client.collection_for(modality).flush()
-        except Exception as flush_exc:
-            logger.warning(
-                "Milvus flush failed modality=%s video=%s@%s: %s — "
-                "downstream readers may not see these records immediately",
-                modality, ctx.video_id, ctx.asset_version, flush_exc,
-            )
+        # A failed flush is a failed write attempt: readers must never publish a
+        # generation that has not been made queryable and verified.
+        ctx.client.collection_for(modality).flush()
         logger.info(
             "Milvus direct-write OK modality=%s video=%s@%s count=%d",
-            modality, ctx.video_id, ctx.asset_version, count,
-        )
-        return int(count)
-    except Exception as exc:
-        # Save NPZ before handling failure so it's available for recovery.
-        if recovery_save_fn is not None:
-            try:
-                recovery_save_fn()
-                logger.info(
-                    "Milvus write failed but NPZ saved for recovery modality=%s video=%s@%s",
-                    modality, ctx.video_id, ctx.asset_version,
-                )
-            except Exception as save_exc:
-                logger.error(
-                    "Recovery NPZ save also failed modality=%s video=%s@%s: %s",
-                    modality, ctx.video_id, ctx.asset_version, save_exc,
-                    exc_info=True,
-                )
-        _handle_write_failure(ctx, modality, exc)
-
-
-def write_modality_to_milvus(
-    ctx: MilvusWriteContext,
-    modality: str,
-    npz_path: str | Path,
-) -> int:
-    """Legacy write hook: upsert from an already-written NPZ file.
-
-    Used by:
-      - reindex_from_file() for manual recovery
-      - any caller that already has a NPZ on disk (offline backfill, etc.)
-
-    After a successful upsert the collection is flushed so the written data is
-    immediately visible to subsequent queries in the same indexing job.
-    """
-    indexer = _INDEXERS[modality]
-    try:
-        count = indexer.upsert_from_npz(ctx, npz_path)
-        # Flush ensures buffered records are sealed and queryable before any
-        # downstream stage reads from the same collection.
-        try:
-            ctx.client.collection_for(modality).flush()
-        except Exception as flush_exc:
-            logger.warning(
-                "Milvus flush failed modality=%s video=%s@%s: %s — "
-                "downstream readers may not see these records immediately",
-                modality, ctx.video_id, ctx.asset_version, flush_exc,
-            )
-        logger.info(
-            "Milvus upsert OK modality=%s video=%s@%s count=%d",
             modality, ctx.video_id, ctx.asset_version, count,
         )
         return int(count)
@@ -674,30 +692,3 @@ def _handle_write_failure(
         f"Milvus write failed (fail-closed) modality={modality} "
         f"video={ctx.video_id}: {exc}"
     ) from exc
-
-
-# ---------------------------------------------------------------------------
-# Re-index entry point kept for manual recovery; not used by the write queue
-# (which has been removed).  Call directly when a modality's NPZ is available.
-# ---------------------------------------------------------------------------
-
-def reindex_from_file(
-    *,
-    client: "MilvusClient",
-    modality: str,
-    video_id: str,
-    asset_version: str,
-    model_version: str,
-    npz_path: str,
-) -> int:
-    """Manual recovery helper: re-upsert one modality from a temporary NPZ."""
-    ctx = MilvusWriteContext(
-        video_id=video_id,
-        asset_version=asset_version,
-        client=client,
-        model_versions={modality: model_version},
-    )
-    indexer = _INDEXERS[modality]
-    count = indexer.upsert_from_npz(ctx, npz_path)
-    ctx.client.collection_for(modality).flush()
-    return int(count)

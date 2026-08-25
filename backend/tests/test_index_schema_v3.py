@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from app.core.settings import Settings
 
@@ -11,21 +12,80 @@ def _frame(width: int = 20, height: int = 10) -> np.ndarray:
     return np.zeros((height, width, 3), dtype=np.uint8)
 
 
-def _decode_np_strings(values: np.ndarray) -> list[str]:
-    decoded: list[str] = []
-    for value in values.tolist():
-        if isinstance(value, bytes):
-            decoded.append(value.decode("utf-8"))
-        else:
-            decoded.append(str(value))
-    return decoded
+def _capture_visual_milvus_write(monkeypatch):
+    from app.vector_store.milvus import milvus_indexer
+
+    captured: dict = {}
+
+    def fake_write(ctx, modality, arrays, **_kwargs):
+        captured["ctx"] = ctx
+        captured["modality"] = modality
+        captured["arrays"] = arrays
+        return len(arrays["embeddings"])
+
+    monkeypatch.setattr(milvus_indexer, "write_modality_from_memory", fake_write)
+    return captured, object()
 
 
-def test_visual_index_writes_frame_offsets_and_no_per_segment_payload(tmp_path, monkeypatch):
+def _capture_milvus_write(monkeypatch):
+    from app.vector_store.milvus import milvus_indexer
+
+    captured: dict = {}
+
+    def fake_write(ctx, modality, arrays, **_kwargs):
+        captured["ctx"] = ctx
+        captured["modality"] = modality
+        captured["arrays"] = arrays
+        row_key = {
+            "asr": "chunk_times_ms",
+            "ocr": "frame_times_ms",
+            "face": "embeddings",
+        }[modality]
+        return len(arrays[row_key])
+
+    monkeypatch.setattr(milvus_indexer, "write_modality_from_memory", fake_write)
+    return captured, object()
+
+
+def test_non_visual_modality_builders_require_milvus_context(tmp_path):
+    from app.indexing.modalities.asr import asr
+    from app.indexing.modalities.face import faces
+    from app.indexing.modalities.ocr import ocr
+
+    with pytest.raises(ValueError, match="MilvusWriteContext"):
+        asr.build_asr_index(
+            video_path="video.mp4",
+            working_dir=str(tmp_path / "asr-work"),
+            engine="sidecar",
+            model_name="small",
+            device="cpu",
+            model_dir=str(tmp_path / "models"),
+            milvus_ctx=None,
+        )
+    with pytest.raises(ValueError, match="MilvusWriteContext"):
+        faces.build_face_index(
+            video_path="video.mp4",
+            model_name="buffalo_l",
+            sample_fps=1.0,
+            provider="cpu",
+            device_id=0,
+            milvus_ctx=None,
+        )
+    with pytest.raises(ValueError, match="MilvusWriteContext"):
+        ocr.build_ocr_index(
+            video_path="video.mp4",
+            working_dir=str(tmp_path / "ocr-work"),
+            milvus_ctx=None,
+            duration_seconds=10.0,
+        )
+
+
+def test_visual_index_writes_explicit_fixed_bounds_to_milvus_without_npz(tmp_path, monkeypatch):
     from app.indexing.modalities.visual import visual
 
     frames = [(1.0, _frame()), (6.0, _frame()), (16.0, _frame())]
     monkeypatch.setattr(visual, "read_frames", lambda *_args, **_kwargs: iter(frames))
+    captured, milvus_ctx = _capture_visual_milvus_write(monkeypatch)
 
     class FakeEncoder:
         device = "cpu"
@@ -43,7 +103,6 @@ def test_visual_index_writes_frame_offsets_and_no_per_segment_payload(tmp_path, 
 
     result = visual.build_visual_index(
         video_path="video.mp4",
-        output_path=str(tmp_path / "visual.npz"),
         model_name="ViT-B-32",
         pretrained="openai",
         sample_fps=1.0,
@@ -52,22 +111,33 @@ def test_visual_index_writes_frame_offsets_and_no_per_segment_payload(tmp_path, 
         npu_enabled=False,
         npu_device_id=0,
         encoder=FakeEncoder(),
-        duration_seconds=20.0,
+        duration_seconds=18.5,
+        milvus_ctx=milvus_ctx,
     )
 
-    with np.load(tmp_path / "visual.npz", allow_pickle=False) as data:
-        assert set(data.files) == {"frame_embeddings", "frame_times_ms", "segment_frame_offsets"}
-        assert data["frame_embeddings"].dtype == np.float16
-        assert data["frame_times_ms"].tolist() == [1000, 6000, 16000]
-        assert data["segment_frame_offsets"].tolist() == [0, 1, 2, 2, 3]
+    arrays = captured["arrays"]
+    assert captured["modality"] == "visual"
+    assert arrays["embeddings"].dtype == np.float16
+    assert arrays["frame_times_ms"].tolist() == [1000, 6000, 16000]
+    assert arrays["segment_frame_offsets"].tolist() == [0, 1, 2, 2, 3]
+    assert arrays["segment_times_ms"].tolist() == [
+        [0, 5000],
+        [5000, 10000],
+        [10000, 15000],
+        [15000, 18500],
+    ]
+    assert arrays["duration_ms"] == 18500
+    assert not (tmp_path / "visual.npz").exists()
     assert result["schema_version"] == 3
     assert result["segments_total"] == 4
     assert result["segments_with_frames"] == 3
     assert result["empty_segments"] == 1
     assert result["decode_status"] == "partial"
+    assert result["segment_times"] == "explicit"
+    assert result["milvus_rows"] == 3
 
 
-def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatch):
+def test_visual_index_writes_shot_segment_times_to_milvus_without_npz(tmp_path, monkeypatch):
     from app.indexing.modalities.visual import visual
 
     frames = [(1.0, _frame()), (3.0, _frame()), (8.0, _frame()), (12.0, _frame())]
@@ -78,6 +148,7 @@ def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatc
         lambda *_args, **_kwargs: [(0, 4000), (4000, 10000), (10000, 14000)],
         raising=False,
     )
+    captured, milvus_ctx = _capture_visual_milvus_write(monkeypatch)
 
     class FakeEncoder:
         device = "cpu"
@@ -91,7 +162,6 @@ def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatc
 
     result = visual.build_visual_index(
         video_path="video.mp4",
-        output_path=str(tmp_path / "visual.npz"),
         model_name="ViT-B-32",
         pretrained="openai",
         sample_fps=1.0,
@@ -104,18 +174,15 @@ def test_visual_index_can_write_optional_shot_segment_times(tmp_path, monkeypatc
         segment_strategy="shot",
         min_segment_seconds=0.8,
         max_segment_seconds=8.0,
+        milvus_ctx=milvus_ctx,
     )
 
-    with np.load(tmp_path / "visual.npz", allow_pickle=False) as data:
-        assert set(data.files) == {
-            "frame_embeddings",
-            "frame_times_ms",
-            "segment_frame_offsets",
-            "segment_times_ms",
-        }
-        assert data["frame_times_ms"].tolist() == [1000, 3000, 8000, 12000]
-        assert data["segment_frame_offsets"].tolist() == [0, 2, 3, 4]
-        assert data["segment_times_ms"].tolist() == [[0, 4000], [4000, 10000], [10000, 14000]]
+    arrays = captured["arrays"]
+    assert arrays["frame_times_ms"].tolist() == [1000, 3000, 8000, 12000]
+    assert arrays["segment_frame_offsets"].tolist() == [0, 2, 3, 4]
+    assert arrays["segment_times_ms"].tolist() == [[0, 4000], [4000, 10000], [10000, 14000]]
+    assert arrays["duration_ms"] == 14000
+    assert not (tmp_path / "visual.npz").exists()
     assert result["segment_strategy"] == "shot"
     assert result["segments_total"] == 3
     assert result["segments_with_frames"] == 3
@@ -140,6 +207,7 @@ def test_visual_index_can_use_pyscenedetect_shot_detector(tmp_path, monkeypatch)
         return [(0, 4000), (4000, 10000), (10000, 14000)]
 
     monkeypatch.setattr(visual, "detect_pyscenedetect_segments", fake_pyscenedetect_segments, raising=False)
+    captured, milvus_ctx = _capture_visual_milvus_write(monkeypatch)
 
     class FakeEncoder:
         device = "cpu"
@@ -153,7 +221,6 @@ def test_visual_index_can_use_pyscenedetect_shot_detector(tmp_path, monkeypatch)
 
     result = visual.build_visual_index(
         video_path="video.mp4",
-        output_path=str(tmp_path / "visual.npz"),
         model_name="ViT-B-32",
         pretrained="openai",
         sample_fps=1.0,
@@ -167,10 +234,15 @@ def test_visual_index_can_use_pyscenedetect_shot_detector(tmp_path, monkeypatch)
         min_segment_seconds=0.8,
         max_segment_seconds=8.0,
         shot_detector="pyscenedetect_adaptive",
+        milvus_ctx=milvus_ctx,
     )
 
-    with np.load(tmp_path / "visual.npz", allow_pickle=False) as data:
-        assert data["segment_times_ms"].tolist() == [[0, 4000], [4000, 10000], [10000, 14000]]
+    assert captured["arrays"]["segment_times_ms"].tolist() == [
+        [0, 4000],
+        [4000, 10000],
+        [10000, 14000],
+    ]
+    assert not (tmp_path / "visual.npz").exists()
     assert calls == ["pyscenedetect_adaptive"]
     assert result["segment_strategy"] == "shot"
     assert result["shot_detector"] == "pyscenedetect_adaptive"
@@ -199,38 +271,32 @@ def test_asr_index_writes_chunks_and_sparse_semantic_arrays(tmp_path, monkeypatc
         }
 
     monkeypatch.setattr(asr, "build_text_semantic_arrays", fake_semantic_arrays, raising=False)
+    captured, milvus_ctx = _capture_milvus_write(monkeypatch)
 
     result = asr.build_asr_index(
         video_path="video.mp4",
-        output_path=str(tmp_path / "asr.npz"),
         working_dir=str(tmp_path / "work"),
         engine="whisper",
         model_name="small",
         device="cpu",
         model_dir=str(tmp_path / "models"),
+        milvus_ctx=milvus_ctx,
         sidecar_path=str(sidecar),
         semantic_enabled=True,
         semantic_model="fake-semantic",
     )
 
-    with np.load(tmp_path / "asr.npz", allow_pickle=False) as data:
-        assert set(data.files) == {
-            "chunk_times_ms",
-            "texts",
-            "chunk_emotions",
-            "chunk_audio_events",
-            "embeddings",
-            "embedding_chunk_indices",
-        }
-        assert data["chunk_times_ms"].tolist() == [[1000, 2500], [5000, 7000]]
-        assert data["texts"].tolist() == ["hello world", "green field"]
-        assert _decode_np_strings(data["chunk_emotions"]) == ["", ""]
-        assert _decode_np_strings(data["chunk_audio_events"]) == ["", ""]
-        assert data["embeddings"].dtype == np.float16
-        assert data["embedding_chunk_indices"].tolist() == [1]
+    arrays = captured["arrays"]
+    assert captured["modality"] == "asr"
+    assert arrays["chunk_times_ms"].tolist() == [[1000, 2500], [5000, 7000]]
+    assert arrays["texts"] == ["hello world", "green field"]
+    assert arrays["embeddings"].dtype == np.float16
+    assert arrays["embedding_chunk_indices"].tolist() == [1]
+    assert not (tmp_path / "asr.npz").exists()
     assert result["chunks"] == 2
     assert result["semantic_chunks"] == 1
     assert result["decode_status"] == "complete"
+    assert result["milvus_rows"] == 2
 
 
 def test_ocr_index_writes_box_level_arrays_and_chunk_semantics(tmp_path, monkeypatch):
@@ -245,6 +311,10 @@ def test_ocr_index_writes_box_level_arrays_and_chunk_semantics(tmp_path, monkeyp
         ], dtype=np.float32)
 
     class FakeOcr:
+        engine = "fake"
+        device = "cpu"
+        providers = {"rec": ["CPUExecutionProvider"]}
+
         def __call__(self, _frame):
             return Output()
 
@@ -261,44 +331,88 @@ def test_ocr_index_writes_box_level_arrays_and_chunk_semantics(tmp_path, monkeyp
     monkeypatch.setattr(ocr, "_load_ocr", lambda *_args, **_kwargs: (FakeOcr(), {"rec": ["CPUExecutionProvider"]}))
     monkeypatch.setattr(ocr, "read_frames", lambda *_args, **_kwargs: iter([(5.0, _frame())]))
     monkeypatch.setattr(ocr, "build_text_semantic_arrays", fake_semantic_arrays, raising=False)
+    captured, milvus_ctx = _capture_milvus_write(monkeypatch)
 
     result = ocr.build_ocr_index(
         video_path="video.mp4",
-        output_path=str(tmp_path / "ocr.npz"),
         working_dir=str(tmp_path / "work"),
+        milvus_ctx=milvus_ctx,
+        duration_seconds=10.0,
         sample_fps=1.0,
         semantic_enabled=True,
         semantic_model="fake-semantic",
     )
 
-    with np.load(tmp_path / "ocr.npz", allow_pickle=False) as data:
-        assert set(data.files) == {
-            "frame_times_ms",
-            "frame_windows_ms",
-            "embeddings",
-            "embedding_frame_indices",
-            "box_frame_indices",
-            "box_texts",
-            "box_scores",
-            "boxes",
-        }
-        assert data["frame_times_ms"].tolist() == [5000]
-        assert data["frame_windows_ms"].tolist() == [[5000, 6000]]
-        assert data["box_frame_indices"].tolist() == [0, 0]
-        assert data["box_texts"].tolist() == ["FIFA", "WORLD CUP"]
-        assert np.allclose(data["boxes"][1], [[0.5, 0.5], [1.0, 0.5], [1.0, 1.0], [0.5, 1.0]])
-        assert data["embedding_frame_indices"].tolist() == [0]
+    arrays = captured["arrays"]
+    assert captured["modality"] == "ocr"
+    assert arrays["frame_times_ms"].tolist() == [5000]
+    assert arrays["frame_windows_ms"].tolist() == [[5000, 6000]]
+    assert arrays["box_frame_indices"].tolist() == [0, 0]
+    assert arrays["box_texts"] == ["FIFA", "WORLD CUP"]
+    assert arrays["embedding_frame_indices"].tolist() == [0]
+    assert not (tmp_path / "ocr.npz").exists()
     assert result["schema_version"] == 3
     assert result["chunks"] == 1
     assert result["semantic_chunks"] == 1
+    assert result["milvus_rows"] == 1
     assert result["ocr_rec_resized_inputs"] == 0
     assert result["ocr_rec_max_input_width"] == 0
     assert result["backend_init_elapsed_seconds"] >= 0
     assert result["frame_loop_elapsed_seconds"] >= result["ocr_elapsed_seconds"]
     assert result["decode_postprocess_elapsed_seconds"] >= 0
     assert result["semantic_elapsed_seconds"] >= 0
-    assert result["index_save_elapsed_seconds"] >= 0
+    assert result["milvus_write_elapsed_seconds"] >= 0
     assert result["total_elapsed_seconds"] >= result["frame_loop_elapsed_seconds"]
+
+
+def test_ocr_index_clamps_last_window_to_video_duration(tmp_path, monkeypatch):
+    from app.indexing.modalities.ocr import ocr
+
+    class Output:
+        txts = ["END"]
+        scores = [0.99]
+        boxes = np.asarray(
+            [[[0, 0], [30, 0], [30, 12], [0, 12]]],
+            dtype=np.float32,
+        )
+
+    class FakeOcr:
+        engine = "fake"
+        device = "cpu"
+        providers = {"rec": ["CPUExecutionProvider"]}
+
+        def __call__(self, _frame):
+            return Output()
+
+    monkeypatch.setattr(ocr, "read_frames", lambda *_args, **_kwargs: iter([(16.0, _frame())]))
+    monkeypatch.setattr(
+        ocr,
+        "build_text_semantic_arrays",
+        lambda **_kwargs: {
+            "embeddings": np.asarray([[1.0, 0.0]], dtype=np.float16),
+            "embedding_chunk_indices": np.asarray([0], dtype=np.int32),
+            "semantic_chunks": 1,
+            "semantic_model": "fake-semantic",
+            "semantic_device": "cpu",
+            "semantic_status": "complete",
+        },
+        raising=False,
+    )
+    captured, milvus_ctx = _capture_milvus_write(monkeypatch)
+
+    ocr.build_ocr_index(
+        video_path="video.mp4",
+        working_dir=str(tmp_path / "work"),
+        milvus_ctx=milvus_ctx,
+        duration_seconds=17.0,
+        sample_fps=0.5,
+        semantic_enabled=True,
+        semantic_model="fake-semantic",
+        backend=FakeOcr(),
+    )
+
+    assert captured["arrays"]["frame_times_ms"].tolist() == [16000]
+    assert captured["arrays"]["frame_windows_ms"].tolist() == [[16000, 17000]]
 
 
 def test_face_index_writes_track_times_without_precomputed_thumbnails(tmp_path, monkeypatch):
@@ -317,45 +431,41 @@ def test_face_index_writes_track_times_without_precomputed_thumbnails(tmp_path, 
             return [Face(0.9, [2, 1, 8, 7])]
 
     monkeypatch.setattr(faces, "read_frames", lambda *_args, **_kwargs: iter([(0.0, _frame()), (1.0, _frame())]))
+    captured, milvus_ctx = _capture_milvus_write(monkeypatch)
 
     result = faces.build_face_index(
         video_path="video.mp4",
-        output_path=str(tmp_path / "face.npz"),
         model_name="buffalo_l",
         sample_fps=1.0,
         provider="cpu",
         device_id=0,
+        milvus_ctx=milvus_ctx,
         encoder=FakeEncoder(),
     )
 
-    with np.load(tmp_path / "face.npz", allow_pickle=False) as data:
-        assert set(data.files) == {"embeddings", "track_times_ms"}
-        assert data["embeddings"].shape == (1, 2)
-        assert data["track_times_ms"].tolist() == [[0, 2000, 0]]
+    arrays = captured["arrays"]
+    assert captured["modality"] == "face"
+    assert arrays["embeddings"].shape == (1, 2)
+    assert arrays["track_times_ms"].tolist() == [[0, 2000, 0]]
+    assert not (tmp_path / "face.npz").exists()
     assert result["schema_version"] == 3
     assert result["tracks"] == 1
     assert result["decode_status"] == "complete"
+    assert result["milvus_rows"] == 1
 
 
-def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_path):
-    from app.indexing.pipeline_manifest import write_stage_manifest
+def test_channel_metadata_records_compact_online_publication_metadata(tmp_path):
+    from app.indexing.publication import channel_metadata
 
     settings = Settings(app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models")
-    video = {"id": "video-1", "name": "video.mp4", "duration": 12.0}
-    index_dir = tmp_path / "runtime" / "indexes" / "video-1"
-
-    write_stage_manifest(
+    visual = channel_metadata(
         "visual",
-        index_dir=index_dir,
-        video=video,
+        result={"visual_model": "siglip2-so400m-384", "decode_status": "partial"},
         options={"visual_sample_fps": 5.0, "visual_segment_seconds": 5.0},
         settings=settings,
-        result={"visual_model": "siglip2-so400m-384", "decode_status": "partial"},
     )
-    write_stage_manifest(
+    asr = channel_metadata(
         "asr",
-        index_dir=index_dir,
-        video=video,
         options={},
         settings=settings,
         result={
@@ -371,54 +481,43 @@ def test_write_stage_manifest_preserves_channels_and_records_small_metadata(tmp_
             "tag_source": "sensevoice",
         },
     )
-    write_stage_manifest(
+    ocr = channel_metadata(
         "ocr",
-        index_dir=index_dir,
-        video=video,
         options={"ocr_sample_fps": 1.0},
         settings=settings,
         result={"ocr_version": "PP-OCRv6", "schema_version": 3, "decode_status": "complete"},
     )
 
-    payload = json.loads((index_dir / "index_manifest.json").read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 3
-    assert payload["video_id"] == "video-1"
-    assert payload["duration_ms"] == 12000
-    assert payload["segment_ms"] == 5000
-    assert payload["channels"]["visual"] == {
-        "file": "visual.npz",
+    assert visual == {
         "model_key": "siglip2-so400m-384",
         "embedding_space": "siglip2-image-text",
         "sample_fps": 5.0,
         "decode_status": "partial",
+        "segment_strategy": "fixed",
+        "segment_times": "explicit",
     }
-    assert payload["channels"]["ocr"]["schema_version"] == 3
-    assert payload["channels"]["ocr"]["model_key"] == "PP-OCRv6"
-    assert payload["channels"]["asr"]["file"] == "asr.npz"
-    assert payload["channels"]["asr"]["task"] == "transcribe"
-    assert payload["channels"]["asr"]["requested_language"] == "auto"
-    assert payload["channels"]["asr"]["detected_language"] == "zh"
-    assert payload["channels"]["asr"]["language"] == "zh"
-    assert payload["channels"]["asr"]["semantic_model_key"] == settings.asr_semantic_model
-    assert payload["channels"]["asr"]["semantic_status"] == "complete"
-    assert payload["channels"]["asr"]["chunk_builder_stats"]["retrieval_chunks"] == 2
-    assert "postprocess_strategy" not in payload["channels"]["asr"]
-    assert "postprocess_stats" not in payload["channels"]["asr"]
-    assert payload["channels"]["asr"]["text_profile"]["cjk_chars"] == 8
-    assert payload["channels"]["asr"]["tag_source"] == "sensevoice"
+    assert ocr["schema_version"] == 3
+    assert ocr["model_key"] == "PP-OCRv6"
+    assert asr["task"] == "transcribe"
+    assert asr["requested_language"] == "auto"
+    assert asr["detected_language"] == "zh"
+    assert asr["language"] == "zh"
+    assert asr["semantic_model_key"] == settings.asr_semantic_model
+    assert asr["semantic_status"] == "complete"
+    assert asr["chunk_builder_stats"]["retrieval_chunks"] == 2
+    assert "postprocess_strategy" not in asr
+    assert "postprocess_stats" not in asr
+    assert asr["text_profile"]["cjk_chars"] == 8
+    assert asr["tag_source"] == "sensevoice"
 
 
-def test_write_stage_manifest_records_optional_visual_shot_metadata(tmp_path):
-    from app.indexing.pipeline_manifest import write_stage_manifest
+def test_channel_metadata_records_optional_visual_shot_metadata(tmp_path):
+    from app.indexing.publication import channel_metadata
 
     settings = Settings(app_data_dir=tmp_path / "runtime", app_model_dir=tmp_path / "models")
-    video = {"id": "video-1", "name": "video.mp4", "duration": 12.0}
-    index_dir = tmp_path / "runtime" / "indexes" / "video-1"
 
-    write_stage_manifest(
+    payload = channel_metadata(
         "visual",
-        index_dir=index_dir,
-        video=video,
         options={
             "visual_sample_fps": 5.0,
             "visual_segment_seconds": 5.0,
@@ -438,14 +537,12 @@ def test_write_stage_manifest_records_optional_visual_shot_metadata(tmp_path):
         },
     )
 
-    payload = json.loads((index_dir / "index_manifest.json").read_text(encoding="utf-8"))
-    assert payload["segment_ms"] == 5000
-    assert payload["channels"]["visual"]["segment_strategy"] == "shot"
-    assert payload["channels"]["visual"]["segment_times"] == "explicit"
-    assert payload["channels"]["visual"]["min_segment_ms"] == 800
-    assert payload["channels"]["visual"]["max_segment_ms"] == 8000
-    assert payload["channels"]["visual"]["shot_detector"] == "pyscenedetect_adaptive"
-    assert payload["channels"]["visual"]["shot_threshold"] == 0.18
+    assert payload["segment_strategy"] == "shot"
+    assert payload["segment_times"] == "explicit"
+    assert payload["min_segment_ms"] == 800
+    assert payload["max_segment_ms"] == 8000
+    assert payload["shot_detector"] == "pyscenedetect_adaptive"
+    assert payload["shot_threshold"] == 0.18
 
 
 def test_index_request_accepts_visual_shot_segment_options():

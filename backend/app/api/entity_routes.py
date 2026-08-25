@@ -9,7 +9,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from app.api.schemas import EntityUpdateRequest, VoiceOnlyEntityRequest, VoiceSampleRequest
-from app.identity.speaker_service import video_speakers
+from app.identity.speaker_service import SpeakerMilvusCoverageError, video_speakers
+from app.identity.face_gallery_service import delete_entity_face_samples
+from app.vector_store.milvus.milvus_client import get_milvus_client
+from app.vector_store.milvus.milvus_schema import entity_face_sample_pk
 from app.platform import context
 
 
@@ -32,19 +35,31 @@ async def create_entity(name: str = Form(...), reference: UploadFile = File(...)
     except Exception as exc:
         reference_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    embedding_path = reference_path.with_suffix(".npz")
-    np.savez_compressed(embedding_path, embedding=vector.astype(np.float32))
+    sample_id = uuid.uuid4().hex
     try:
-        return context.catalog.create_entity({
+        entity = context.catalog.create_entity({
             "id": entity_id,
             "name": name,
             "reference_path": str(reference_path),
-            "embedding_path": str(embedding_path),
+            "embedding_path": None,
         })
+        collection = get_milvus_client().collection("entity_face_samples")
+        collection.upsert([{
+            "pk": entity_face_sample_pk(entity_id, sample_id),
+            "entity_id": entity_id, "sample_id": sample_id,
+            "source_video_id": "", "source_asset_version": "",
+            "source_group_idx": -1, "quality": 1.0,
+            "embedding": vector.astype(np.float32).tolist(),
+        }])
+        collection.flush()
+        return entity
     except sqlite3.IntegrityError as exc:
         reference_path.unlink(missing_ok=True)
-        embedding_path.unlink(missing_ok=True)
         raise HTTPException(status_code=409, detail="该人物名称已存在") from exc
+    except Exception:
+        context.catalog.delete_entity(entity_id)
+        reference_path.unlink(missing_ok=True)
+        raise
 
 
 @router.get("/api/entities")
@@ -82,6 +97,10 @@ def delete_entity(entity_id: str) -> dict:
         raise HTTPException(status_code=404, detail="人物不存在")
     paths = [entity.get("reference_path"), entity.get("embedding_path")]
     paths.extend(sample.get("embedding_path") for sample in context.catalog.list_voice_samples(entity_id))
+    try:
+        delete_entity_face_samples(entity_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Milvus 人脸样本删除失败: {exc}") from exc
     if not context.catalog.delete_entity(entity_id):
         raise HTTPException(status_code=404, detail="人物不存在")
     for value in paths:
@@ -119,10 +138,8 @@ def list_entity_voice_samples(entity_id: str) -> list[dict]:
         video_id = sample["source_video_id"]
         if video_id not in panels:
             try:
-                panels[video_id] = video_speakers(
-                    context.settings.index_dir, context.catalog, video_id
-                )
-            except (FileNotFoundError, IndexError, ValueError):
+                panels[video_id] = video_speakers(context.catalog, video_id)
+            except (SpeakerMilvusCoverageError, FileNotFoundError, IndexError, ValueError):
                 panels[video_id] = None
         view = panels[video_id]
         if view is None:
@@ -145,20 +162,20 @@ def add_entity_voice_sample(entity_id: str, request: VoiceSampleRequest) -> dict
         raise HTTPException(status_code=404, detail="人物不存在")
     try:
         vector = speaker_utterance_embedding(
-            context.settings.index_dir,
+            context.catalog,
             request.video_id,
             request.utterance_index,
         )
+    except SpeakerMilvusCoverageError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (FileNotFoundError, IndexError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="声音片段不存在") from exc
     sample_id = uuid.uuid4().hex
-    embedding_path = context.settings.app_data_dir / "entities" / entity_id / "voice" / f"{sample_id}.npz"
-    embedding_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(embedding_path, embedding=vector)
+    voice_embedding = np.asarray(vector, dtype=np.float32).tobytes(order="C")
     sample = context.catalog.create_voice_sample({
         "id": sample_id, "entity_id": entity_id, "source_type": "video_utterance",
         "source_video_id": request.video_id, "source_utterance_index": request.utterance_index,
-        "audio_path": None, "embedding_path": str(embedding_path),
+        "audio_path": None, "embedding_path": "", "voice_embedding": voice_embedding,
         "embedding_space": "3dspeaker-campplus-zh-en-192-v1",
     })
     if request.bind_track_id is not None:

@@ -297,16 +297,13 @@ class TestModalityBatchSizes:
 class TestSetupMilvusContext:
     """P0-A: connection failure must stop indexing, never silently continue."""
 
-    def _call(self, video_id: str, fail_client: bool, tmp_path):
+    def _call(self, video_id: str, fail_client: bool):
         """Helper to invoke _setup_milvus_context with controlled stubs.
 
         _setup_milvus_context uses lazy (in-function) imports, so the correct
         patch targets are the original definition sites, not app.stage_runner.*
         """
         import app.indexing.stage_executor as sr
-
-        fake_dir = tmp_path / video_id
-        fake_dir.mkdir()
 
         def _fake_get_client():
             if fail_client:
@@ -316,52 +313,50 @@ class TestSetupMilvusContext:
         with (
             patch("app.vector_store.milvus.milvus_client.get_milvus_client", _fake_get_client),
             patch(
-                "app.vector_store.milvus.milvus_asset_version.reserve_next_attempt_version",
-                return_value="2",
-            ) as mock_reserve,
-            patch(
                 "app.vector_store.milvus.milvus_indexer.MilvusWriteContext", autospec=True
             ) as ctx_cls,
         ):
-            result = sr._setup_milvus_context(video_id, fake_dir)
-        return result, ctx_cls, mock_reserve
+            result = sr._setup_milvus_context(video_id)
+        return result, ctx_cls
 
-    def test_success_returns_context(self, tmp_path):
-        ctx, ctx_cls, _ = self._call("vid1", fail_client=False, tmp_path=tmp_path)
+    def test_success_returns_context(self):
+        ctx, ctx_cls = self._call("vid1", fail_client=False)
         assert ctx is not None
         ctx_cls.assert_called_once()
 
-    def test_connection_failure_raise_policy_raises(self, tmp_path):
-        """Connection failure is propagated, not converted to an NPZ-only run."""
+    def test_connection_failure_raise_policy_raises(self):
+        """Connection failure is propagated, not converted to a file-only run."""
         with pytest.raises(RuntimeError, match="Milvus connection failed"):
-            self._call("vid2", fail_client=True, tmp_path=tmp_path)
+            self._call("vid2", fail_client=True)
 
-    def test_asset_version_not_reserved_on_failure(self, tmp_path):
-        """A pending version is not allocated when connection fails."""
-        # Patch at original definition sites (lazy imports inside _setup_milvus_context).
+    def test_context_not_created_on_connection_failure(self):
         with (
             patch("app.vector_store.milvus.milvus_client.get_milvus_client",
-                  side_effect=ConnectionRefusedError("Milvus not available")),
-            patch("app.vector_store.milvus.milvus_asset_version.reserve_next_attempt_version") as mock_reserve,
+                   side_effect=ConnectionRefusedError("Milvus not available")),
+            patch(
+                "app.vector_store.milvus.milvus_indexer.MilvusWriteContext",
+                autospec=True,
+            ) as ctx_cls,
         ):
             import app.indexing.stage_executor as sr
-            fake_dir = tmp_path / "vid4"
-            fake_dir.mkdir()
             with pytest.raises(RuntimeError):
-                sr._setup_milvus_context("vid4", fake_dir)
-            mock_reserve.assert_not_called()
+                sr._setup_milvus_context("vid4")
+            ctx_cls.assert_not_called()
 
-    def test_asset_version_is_reserved_only_after_connection_success(self, tmp_path):
-        """The pending version is allocated only after connection succeeds."""
+    def test_uuid_asset_version_is_allocated_after_connection_success(self):
+        """Each successful setup receives a fresh non-local attempt id."""
+        version = "a" * 32
+        uuid_value = MagicMock(hex=version)
         with (
             patch("app.vector_store.milvus.milvus_client.get_milvus_client",
-                  return_value=MagicMock()),
-            patch("app.vector_store.milvus.milvus_asset_version.reserve_next_attempt_version",
-                  return_value="3") as mock_reserve,
-            patch("app.vector_store.milvus.milvus_indexer.MilvusWriteContext", autospec=True),
+                   return_value=MagicMock()),
+            patch("app.indexing.stage_executor.uuid.uuid4", return_value=uuid_value) as uuid4,
+            patch(
+                "app.vector_store.milvus.milvus_indexer.MilvusWriteContext",
+                autospec=True,
+            ) as ctx_cls,
         ):
             import app.indexing.stage_executor as sr
-            fake_dir = tmp_path / "vid5"
-            fake_dir.mkdir()
-            sr._setup_milvus_context("vid5", fake_dir)
-            mock_reserve.assert_called_once()
+            sr._setup_milvus_context("vid5")
+            uuid4.assert_called_once_with()
+            assert ctx_cls.call_args.kwargs["asset_version"] == version

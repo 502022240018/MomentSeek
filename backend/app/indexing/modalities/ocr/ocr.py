@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 
 from app.encoders.text import resolve_text_embedding_device
-from app.indexing.common import atomic_save_npz
 from app.indexing.text_semantic import build_text_semantic_arrays
 from app.media.media import read_frames
 
@@ -520,6 +519,7 @@ def _run_ocr_frame_loop(
     video_path: str | Path,
     backend: OCRBackend,
     *,
+    duration_seconds: float,
     sample_fps: float,
     decode_height: int,
     min_confidence: float,
@@ -527,6 +527,9 @@ def _run_ocr_frame_loop(
 ) -> tuple[list[dict], dict]:
     chunks: list[dict] = []
     interval = 1.0 / sample_fps
+    duration_ms = int(round(float(duration_seconds) * 1000))
+    if duration_ms <= 0:
+        raise ValueError("OCR 索引要求视频时长大于 0")
     stats = {
         "ocr_elapsed": 0.0,
         "decoded_frames": 0,
@@ -539,6 +542,10 @@ def _run_ocr_frame_loop(
     frames = read_frames(video_path, sample_fps, out_height=decode_height, prefer_ffmpeg=prefer_ffmpeg)
     for frame_index, (timestamp, frame) in enumerate(frames):
         stats["decoded_frames"] += 1
+        frame_time_ms = int(round(float(timestamp) * 1000))
+        frame_end_ms = min(duration_ms, frame_time_ms + int(round(interval * 1000)))
+        if frame_time_ms < 0 or frame_time_ms >= duration_ms or frame_end_ms <= frame_time_ms:
+            continue
         frame_start = time.perf_counter()
         try:
             output = backend(frame)
@@ -559,9 +566,9 @@ def _run_ocr_frame_loop(
             continue
         stats["hit_frames"] += 1
         chunks.append({
-            "start_time": round(float(timestamp), 3),
-            "end_time": round(float(timestamp + interval), 3),
-            "frame_time": round(float(timestamp), 3),
+            "start_time": frame_time_ms / 1000.0,
+            "end_time": frame_end_ms / 1000.0,
+            "frame_time": frame_time_ms / 1000.0,
             "text": " ".join(item["text"] for item in items),
             "items": items,
             "score": round(max(item["score"] for item in items), 4),
@@ -575,7 +582,6 @@ def _build_ocr_semantic_result(
     chunks: list[dict],
     *,
     enabled: bool,
-    output_path: str | Path | None,
     model_name: str,
     model_dir: str | Path,
     device: str,
@@ -583,8 +589,6 @@ def _build_ocr_semantic_result(
     local_files_only: bool,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     if not enabled:
-        if output_path is not None:
-            Path(output_path).unlink(missing_ok=True)
         return (
             np.empty((0, 0), dtype=np.float16),
             np.empty((0,), dtype=np.int32),
@@ -605,8 +609,6 @@ def _build_ocr_semantic_result(
         result["semantic_chunks"] = int(embeddings.shape[0])
         return embeddings, indices, result
     except Exception as exc:
-        if output_path is not None:
-            Path(output_path).unlink(missing_ok=True)
         return (
             np.empty((0, 0), dtype=np.float16),
             np.empty((0,), dtype=np.int32),
@@ -660,8 +662,9 @@ def _ocr_index_result(
 
 def build_ocr_index(
     video_path: str | Path,
-    output_path: str | Path,
     working_dir: str | Path,
+    milvus_ctx: "MilvusWriteContext",
+    duration_seconds: float,
     sample_fps: float = 1.0,
     decode_height: int = 720,
     min_confidence: float = 0.5,
@@ -675,7 +678,6 @@ def build_ocr_index(
     npu_self_test: bool = True,
     prefer_ffmpeg: bool = True,
     semantic_enabled: bool = True,
-    semantic_output_path: str | Path | None = None,
     semantic_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
     semantic_device: str = "cpu",
     semantic_model_dir: str | Path = "models/text-embeddings",
@@ -684,8 +686,9 @@ def build_ocr_index(
     engine: str = "rapidocr",
     acl_model_dir: str | Path | None = None,
     backend: OCRBackend | None = None,
-    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
+    if milvus_ctx is None:
+        raise ValueError("OCR 索引必须提供 MilvusWriteContext")
     if sample_fps <= 0:
         raise ValueError("ocr_sample_fps 必须大于 0")
     started = time.perf_counter()
@@ -709,6 +712,7 @@ def build_ocr_index(
     chunks, frame_stats = _run_ocr_frame_loop(
         video_path,
         backend,
+        duration_seconds=duration_seconds,
         sample_fps=sample_fps,
         decode_height=decode_height,
         min_confidence=min_confidence,
@@ -728,7 +732,6 @@ def build_ocr_index(
     embeddings, embedding_frame_indices, semantic_result = _build_ocr_semantic_result(
         chunks,
         enabled=semantic_enabled,
-        output_path=semantic_output_path,
         model_name=semantic_model,
         model_dir=semantic_model_dir,
         device=semantic_device,
@@ -736,58 +739,33 @@ def build_ocr_index(
         local_files_only=semantic_local_files_only,
     )
     semantic_elapsed = time.perf_counter() - semantic_started
-    save_started = time.perf_counter()
+    write_started = time.perf_counter()
     index_payload = _ocr_index_payload(chunks, embeddings, embedding_frame_indices)
-    milvus_rows = None
-    if milvus_ctx is not None:
-        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
+    from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
 
-        milvus_rows = write_modality_from_memory(
-            milvus_ctx,
-            "ocr",
-            {
-                "frame_times_ms": index_payload["frame_times_ms"],
-                "frame_windows_ms": index_payload["frame_windows_ms"],
-                "embeddings": index_payload["embeddings"],
-                "embedding_frame_indices": index_payload["embedding_frame_indices"],
-                "box_frame_indices": index_payload["box_frame_indices"],
-                "box_texts": [str(value) for value in index_payload["box_texts"].tolist()],
-                "box_scores": index_payload["box_scores"],
-            },
-        )
-    # Retained only as an offline recovery artifact; no runtime path reads it.
-    atomic_save_npz(output_path, **index_payload)
-    save_elapsed = time.perf_counter() - save_started
+    milvus_rows = write_modality_from_memory(
+        milvus_ctx,
+        "ocr",
+        {
+            "frame_times_ms": index_payload["frame_times_ms"],
+            "frame_windows_ms": index_payload["frame_windows_ms"],
+            "embeddings": index_payload["embeddings"],
+            "embedding_frame_indices": index_payload["embedding_frame_indices"],
+            "box_frame_indices": index_payload["box_frame_indices"],
+            "box_texts": [str(value) for value in index_payload["box_texts"].tolist()],
+            "box_scores": index_payload["box_scores"],
+        },
+    )
+    write_elapsed = time.perf_counter() - write_started
 
     result.update(semantic_result)
     result.update({
         "semantic_elapsed_seconds": round(semantic_elapsed, 3),
-        "index_save_elapsed_seconds": round(save_elapsed, 3),
+        "milvus_write_elapsed_seconds": round(write_elapsed, 3),
         "total_elapsed_seconds": round(time.perf_counter() - started, 3),
         "milvus_rows": milvus_rows,
     })
     return result
-
-
-def _normalized_box(box, frame_shape: tuple[int, int]) -> np.ndarray:
-    height, width = frame_shape
-    values = np.asarray(box if box is not None else np.zeros((4, 2)), dtype=np.float32)
-    if values.shape != (4, 2):
-        values = np.zeros((4, 2), dtype=np.float32)
-    scale = np.asarray([max(width, 1), max(height, 1)], dtype=np.float32)
-    return np.clip(values / scale, 0.0, 1.0)
-
-
-def _save_ocr_npz(
-    output_path: str | Path,
-    chunks: list[dict],
-    embeddings: np.ndarray,
-    embedding_frame_indices: np.ndarray,
-) -> None:
-    atomic_save_npz(
-        output_path,
-        **_ocr_index_payload(chunks, embeddings, embedding_frame_indices),
-    )
 
 
 def _ocr_index_payload(
@@ -798,12 +776,10 @@ def _ocr_index_payload(
     box_frame_indices: list[int] = []
     box_texts: list[str] = []
     box_scores: list[float] = []
-    boxes: list[np.ndarray] = []
 
     frame_times_ms: list[int] = []
     frame_windows_ms: list[list[int]] = []
     for frame_index, chunk in enumerate(chunks):
-        frame_shape = tuple(chunk.get("frame_shape") or (1, 1))
         frame_time_ms = int(round(float(chunk.get("frame_time", chunk.get("start_time", 0))) * 1000))
         frame_times_ms.append(frame_time_ms)
         frame_windows_ms.append([
@@ -815,7 +791,6 @@ def _ocr_index_payload(
             box_frame_indices.append(frame_index)
             box_texts.append(str(item.get("text", "")).strip())
             box_scores.append(float(item.get("score", 0.0)))
-            boxes.append(_normalized_box(item.get("box"), frame_shape))
     return {
         "frame_times_ms": np.asarray(frame_times_ms, dtype=np.int32),
         "frame_windows_ms": np.asarray(frame_windows_ms, dtype=np.int32).reshape((-1, 2)),
@@ -824,5 +799,4 @@ def _ocr_index_payload(
         "box_frame_indices": np.asarray(box_frame_indices, dtype=np.int32),
         "box_texts": np.asarray(box_texts, dtype="U"),
         "box_scores": np.asarray(box_scores, dtype=np.float32),
-        "boxes": np.stack(boxes).astype(np.float32) if boxes else np.empty((0, 4, 2), dtype=np.float32),
     }

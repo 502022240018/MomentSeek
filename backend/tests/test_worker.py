@@ -108,7 +108,13 @@ def test_selective_rebuild_preserves_existing_modalities(monkeypatch, tmp_path):
         "height": 1080,
         "status": "ready",
     })
-    catalog.update_video("video-1", indexed_modalities=["face", "visual"])
+    for modality in ("face", "visual"):
+        catalog.publish_modality(
+            "video-1",
+            modality,
+            asset_version=f"existing-{modality}",
+            row_count=1,
+        )
     job = catalog.create_job({
         "id": "job-1",
         "video_id": "video-1",
@@ -119,15 +125,17 @@ def test_selective_rebuild_preserves_existing_modalities(monkeypatch, tmp_path):
         "options": {"asr_language": "auto"},
     })
     monkeypatch.setattr(worker, "get_settings", lambda: settings)
-    monkeypatch.setattr(
-        worker.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(
+    def fake_run(*args, **kwargs):
+        catalog.publish_modality(
+            "video-1", "asr", asset_version="new-asr", row_count=3
+        )
+        return SimpleNamespace(
             returncode=0,
             stdout='{"chunks": 3}\n',
             stderr="",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
 
     worker.execute_job(job["id"])
 
@@ -152,8 +160,20 @@ def test_asr_stage_marks_nested_speaker_as_indexed(monkeypatch, tmp_path):
     job = catalog.create_job({"id": "job-1", "video_id": "video-1", "status": "queued",
                               "stage": "queued", "progress": 0, "modalities": ["asr"], "options": {}})
     monkeypatch.setattr(worker, "get_settings", lambda: settings)
-    monkeypatch.setattr(worker.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
-        returncode=0, stdout='{"chunks": 3, "speaker": {"utterances": 0}}\n', stderr=""))
+    def fake_run(*args, **kwargs):
+        catalog.publish_modality(
+            "video-1", "asr", asset_version="new-asr", row_count=3
+        )
+        catalog.publish_modality(
+            "video-1", "speaker", asset_version="new-speaker", row_count=0
+        )
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"chunks": 3, "speaker": {"utterances": 0}}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
 
     worker.execute_job(job["id"])
 

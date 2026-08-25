@@ -31,6 +31,31 @@ def test_invalid_worker_modes_fail_during_settings_load(field, value):
         Settings(_env_file=None, **{field: value})
 
 
+@pytest.mark.parametrize("field", ("milvus_asr_collection", "milvus_speaker_collection"))
+@pytest.mark.parametrize("name", ("", "9asr", "asr-v2", "asr/v2", "a" * 256))
+def test_invalid_milvus_collection_names_fail(field, name):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: name})
+
+
+def test_milvus_asr_collection_name_is_normalized():
+    settings = Settings(
+        _env_file=None,
+        milvus_asr_collection="  asr_embeddings_planner_v2  ",
+    )
+
+    assert settings.milvus_asr_collection == "asr_embeddings_planner_v2"
+
+
+def test_milvus_speaker_collection_name_is_normalized():
+    settings = Settings(
+        _env_file=None,
+        milvus_speaker_collection="  speaker_embeddings_diskann_v2  ",
+    )
+
+    assert settings.milvus_speaker_collection == "speaker_embeddings_diskann_v2"
+
+
 def test_milvus_query_timeout_must_be_positive():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, milvus_query_timeout_seconds=0)

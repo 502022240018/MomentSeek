@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
 
+from app.api.planner_lab_routes import _voice_exclude, _voice_reference
 from app.orchestration.retrieval_orchestration import OrchestrationError
 from app.orchestration.snapmind_lab import (
     CandidatePlan,
@@ -15,6 +17,7 @@ from app.orchestration.snapmind_lab import (
     MomentNode,
     PlanStep,
     SnapMindPlannerLab,
+    VoiceReference,
 )
 
 
@@ -49,6 +52,9 @@ class FakeCatalog:
 
     def find_entity_in_text(self, _query):
         return self.entity
+
+    def get_modality_publication(self, _video_id, _modality):
+        return None
 
 
 class FakeOrchestrator:
@@ -97,6 +103,194 @@ def test_fallback_always_returns_three_distinct_plans():
     assert [plan.plan_id for plan in plan_set.plans] == ["fast", "balanced", "deep"]
     assert len({tuple(step.tool_id for step in plan.steps) for plan in plan_set.plans}) == 3
     assert all(1 <= len(plan.steps) <= 6 for plan in plan_set.plans)
+
+
+def test_upload_voice_reference_is_deferred_during_planning_but_required_for_execution():
+    value = '{"kind":"upload","label":"reference.wav"}'
+
+    reference = _voice_reference(value, None, require_upload=False)
+
+    assert reference is not None
+    assert reference.kind == "upload"
+    with pytest.raises(HTTPException, match="upload 声音引用必须附带音频文件"):
+        _voice_reference(value, None, require_upload=True)
+
+
+def test_only_utterance_voice_reference_excludes_its_seed_from_planner_results():
+    assert _voice_exclude(
+        VoiceReference(
+            kind="utterance",
+            video_id="video-1",
+            utterance_index=7,
+            label="seed",
+        )
+    ) == ("video-1", 7)
+    assert _voice_exclude(VoiceReference(kind="entity", entity_id="person-1")) is None
+    assert _voice_exclude(VoiceReference(kind="upload", label="sample.wav")) is None
+
+
+def test_voice_reference_makes_voice_tool_available_and_primary():
+    orchestrator = FakeOrchestrator(modalities=["visual", "speaker"])
+    lab = SnapMindPlannerLab(orchestrator)
+
+    proposal = lab.propose(
+        "找到和这个声音相同的说话人",
+        "assist",
+        None,
+        False,
+        voice_reference=VoiceReference(kind="upload", label="reference.wav"),
+    )
+
+    assert "speaker" in proposal["available_modalities"]
+    assert proposal["voice_reference"] == {
+        "kind": "upload",
+        "label": "reference.wav",
+        "trusted_slot": True,
+    }
+    fast = next(plan for plan in proposal["plans"] if plan["plan_id"] == "fast")
+    assert fast["steps"][0]["tool_id"] == "voice.search"
+
+
+def test_registered_entity_voice_query_keeps_trusted_voice_as_primary():
+    orchestrator = FakeOrchestrator(
+        entity={"id": "person-1", "name": "王俊凯", "embedding_path": "entity.npz"},
+        modalities=["visual", "face", "speaker"],
+    )
+
+    proposal = SnapMindPlannerLab(orchestrator).propose(
+        "王俊凯声音出现的片段",
+        "assist",
+        None,
+        False,
+        voice_reference=VoiceReference(kind="entity", entity_id="person-1", label="王俊凯"),
+    )
+
+    for plan in proposal["plans"]:
+        voice = next(step for step in plan["steps"] if step["tool_id"] == "voice.search")
+        assert voice["role"] == "primary"
+
+
+def test_trusted_voice_is_support_for_non_voice_visual_query():
+    orchestrator = FakeOrchestrator(
+        entity={"id": "person-1", "name": "王俊凯", "embedding_path": "entity.npz"},
+        modalities=["visual", "face", "speaker"],
+    )
+
+    proposal = SnapMindPlannerLab(orchestrator).propose(
+        "王俊凯吃包子近景",
+        "assist",
+        None,
+        False,
+        voice_reference=VoiceReference(kind="entity", entity_id="person-1", label="王俊凯"),
+    )
+
+    for plan in proposal["plans"]:
+        steps = plan["steps"]
+        assert steps[0]["tool_id"] == "visual.search"
+        voice = next(step for step in steps if step["tool_id"] == "voice.search")
+        assert voice["role"] == "support"
+        assert voice["depends_on"] == [steps[0]["step_id"]]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "找到和这个声音相同的说话人",
+        "查找和参考声音相同的人出现的片段",
+        "找出听起来一样的声音",
+        "这是谁的声音",
+    ],
+)
+def test_voice_query_without_reference_asks_user_and_does_not_expose_tool(query):
+    orchestrator = FakeOrchestrator(modalities=["visual", "speaker"])
+    lab = SnapMindPlannerLab(orchestrator)
+
+    proposal = lab.propose(query, "assist", None, False)
+
+    assert "speaker" not in proposal["available_modalities"]
+    assert all(
+        step["tool_id"] != "voice.search"
+        for plan in proposal["plans"]
+        for step in plan["steps"]
+    )
+    assert proposal["clarifications"][0]["kind"] == "voice_reference_required"
+
+
+def test_generic_audio_query_does_not_require_voice_identity_reference():
+    lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["visual", "asr", "speaker"]))
+
+    proposal = lab.propose("找到背景声音很大的片段", "assist", None, False)
+
+    assert all(
+        item["kind"] != "voice_reference_required"
+        for item in proposal["clarifications"]
+    )
+
+
+def test_voice_search_only_fuses_confirmed_absolute_threshold_hits(monkeypatch):
+    orchestrator = FakeOrchestrator(modalities=["visual", "speaker"])
+    lab = SnapMindPlannerLab(orchestrator)
+    plan = CandidatePlan(
+        plan_id="fast",
+        label="Voice",
+        description="test",
+        estimated_cost="low",
+        fusion="combsum",
+        result_limit=10,
+        steps=[_step("voice", "voice.search")],
+    )
+
+    observed = {}
+
+    def fake_voice_search(*_args, **kwargs):
+        observed.update(kwargs)
+        return [
+            {
+                "video_id": "video-1", "video_name": "demo.mp4",
+                "utterance_index": 2, "track_id": 1,
+                "start_ms": 10000, "end_ms": 13000,
+                "score": 0.82, "text": "confirmed", "clip_url": "/confirmed",
+            },
+            {
+                "video_id": "video-1", "video_name": "demo.mp4",
+                "utterance_index": 3, "track_id": 1,
+                "start_ms": 20000, "end_ms": 23000,
+                "score": 0.42, "text": "ambiguous", "clip_url": "/ambiguous",
+            },
+        ]
+
+    monkeypatch.setattr(
+        "app.identity.speaker_service.voice_search_vectors",
+        fake_voice_search,
+    )
+    outcome = lab.execute(
+        "找到同一个声音",
+        None,
+        plan,
+        None,
+        voice_vectors=np.ones((1, 192), dtype=np.float32),
+        voice_exclude=("video-1", 7),
+    )
+
+    assert observed["exclude"] == ("video-1", 7)
+    assert outcome["count"] == 1
+    assert outcome["results"][0]["planner_evidence"]["raw_scores"]["voice.search"] == 0.82
+    assert outcome["trace"][0]["tool_trace"]["confirmed_count"] == 1
+    assert outcome["trace"][0]["tool_trace"]["ambiguous_count"] == 1
+
+
+def test_voice_plan_without_reference_fails_closed():
+    lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["speaker"]))
+    plan = CandidatePlan(
+        plan_id="fast",
+        label="Voice",
+        description="test",
+        estimated_cost="low",
+        steps=[_step("voice", "voice.search")],
+    )
+
+    with pytest.raises(OrchestrationError, match="参考声音"):
+        lab.execute("找到同一个声音", None, plan, None)
 
 
 def test_cross_modal_results_merge_into_one_auditable_moment():
@@ -181,7 +375,65 @@ def test_support_top_k_does_not_prune_primary_pool():
     assert outcome["trace"][1]["output_candidate_count"] == 2
 
 
-def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnostic(tmp_path):
+def test_face_support_verifies_milvus_candidate_windows_and_keeps_weak_diagnostic():
+    first = np.zeros(512, dtype=np.float32)
+    first[:2] = [0.8, 0.6]
+    second = np.zeros(512, dtype=np.float32)
+    second[:2] = [0.25, np.sqrt(1.0 - 0.25**2)]
+    boundary_only = np.zeros(512, dtype=np.float32)
+    boundary_only[0] = 1.0
+    rows = [
+        {
+            "track_idx": 0,
+            "start_ms": 10_000,
+            "end_ms": 13_000,
+            "best_ms": 11_000,
+            "embedding": first,
+        },
+        {
+            "track_idx": 1,
+            "start_ms": 30_000,
+            "end_ms": 33_000,
+            "best_ms": 31_000,
+            "embedding": second,
+        },
+        {
+            "track_idx": 2,
+            "start_ms": 7_000,
+            "end_ms": 10_000,
+            "best_ms": 9_000,
+            "embedding": boundary_only,
+        },
+    ]
+
+    class Iterator:
+        def __init__(self):
+            self.done = False
+
+        def next(self):
+            if self.done:
+                return []
+            self.done = True
+            return rows
+
+        def close(self):
+            pass
+
+    class Collection:
+        expr = None
+
+        @classmethod
+        def query_iterator(cls, *, expr, output_fields, batch_size, timeout):
+            del output_fields, batch_size, timeout
+            cls.expr = expr
+            return Iterator()
+
+    class Client:
+        @staticmethod
+        def collection_for(modality):
+            assert modality == "face"
+            return Collection()
+
     class WindowFaceSearchEngine(FakeSearchEngine):
         def __init__(self):
             self.global_face_calls = 0
@@ -194,27 +446,18 @@ def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnost
 
         @staticmethod
         def _resolve_face_query(_text, _image):
-            return np.asarray([1.0, 0.0], dtype=np.float32)
+            vector = np.zeros(512, dtype=np.float32)
+            vector[0] = 1.0
+            return vector
 
-    face_dir = tmp_path / "video-1"
-    face_dir.mkdir()
-    np.savez(
-        face_dir / "face.npz",
-        embeddings=np.asarray(
-            [
-                [0.8, 0.6],
-                [0.25, np.sqrt(1.0 - 0.25**2)],
-            ],
-            dtype=np.float32,
-        ),
-        track_times_ms=np.asarray(
-            [[10_000, 13_000, 11_000], [30_000, 33_000, 31_000]],
-            dtype=np.int32,
-        ),
-    )
     orchestrator = FakeOrchestrator()
-    orchestrator.settings.index_dir = tmp_path
     orchestrator.search_engine = WindowFaceSearchEngine()
+    orchestrator.search_engine._get_milvus_client = lambda: Client()
+    orchestrator.catalog.get_modality_publication = lambda *_args: {
+        "status": "ready",
+        "asset_version": "face-v1",
+        "row_count": 3,
+    }
     lab = SnapMindPlannerLab(orchestrator)
     face_support = _step("s2", "face.search").model_copy(update={
         "role": "support",
@@ -249,6 +492,10 @@ def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnost
     assert tool_trace["confirmed_count"] == 1
     assert tool_trace["ambiguous_count"] == 1
     assert tool_trace["ambiguous_matches"][0]["cosine"] == pytest.approx(0.25)
+    assert 'asset_version == "face-v1"' in Collection.expr
+    assert "start_ms < 13000 and end_ms > 10000" in Collection.expr
+    assert "start_ms < 33000 and end_ms > 30000" in Collection.expr
+    assert confirmed["evidence"][-1]["features"]["source"] == "candidate_window_milvus"
 
 
 def test_reranker_face_evidence_pool_keeps_confirmed_and_ambiguous_without_scoring():
@@ -292,6 +539,61 @@ def test_reranker_face_evidence_pool_keeps_confirmed_and_ambiguous_without_scori
     assert trace["status_counts"] == {"confirmed": 1, "ambiguous": 1}
     assert ambiguous.support_contributions == {}
     assert ambiguous.aggregate_score == pytest.approx(0.6)
+
+
+def test_face_support_rejects_invalid_milvus_track_without_scoring():
+    class Iterator:
+        done = False
+
+        def next(self):
+            if self.done:
+                return []
+            self.done = True
+            return [{
+                "track_idx": 0,
+                "start_ms": 10_000,
+                "end_ms": 10_000,
+                "best_ms": 10_000,
+                "embedding": np.ones(512, dtype=np.float32),
+            }]
+
+        def close(self):
+            pass
+
+    collection = SimpleNamespace(query_iterator=lambda **_kwargs: Iterator())
+    client = SimpleNamespace(collection_for=lambda _modality: collection)
+    orchestrator = FakeOrchestrator()
+    orchestrator.catalog.get_modality_publication = lambda *_args: {
+        "status": "ready",
+        "asset_version": "face-v1",
+        "row_count": 1,
+    }
+    orchestrator.search_engine._get_milvus_client = lambda: client
+    orchestrator.search_engine._resolve_face_query = lambda *_args: np.ones(
+        512, dtype=np.float32
+    )
+    lab = SnapMindPlannerLab(orchestrator)
+    face_support = _step("s2", "face.search").model_copy(update={
+        "role": "support", "depends_on": ["s1"], "query": "王俊凯",
+    })
+    plan = CandidatePlan(
+        plan_id="balanced",
+        label="Balanced",
+        description="test",
+        estimated_cost="medium",
+        early_stop_threshold=1,
+        steps=[_step("s1", "visual.search"), face_support],
+    )
+
+    outcome = lab.execute("王俊凯吃包子特写", None, plan, None)
+
+    assert all(
+        item["planner_evidence"]["support_source_count"] == 0
+        for item in outcome["results"]
+    )
+    tool_trace = outcome["trace"][1]["tool_trace"]
+    assert tool_trace["confirmed_count"] == 0
+    assert tool_trace["errors"][0]["reason"] == "face_milvus_unavailable:ValueError"
 
 
 def test_face_primary_keeps_global_recall_behavior():

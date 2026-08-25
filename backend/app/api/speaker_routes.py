@@ -1,5 +1,4 @@
 import json
-import subprocess
 import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -8,6 +7,7 @@ from fastapi.concurrency import run_in_threadpool
 from app.api.schemas import SpeakerUpdateRequest, UtteranceUpdateRequest, VoiceSearchRequest
 from app.identity.speaker_service import (
     SpeakerMilvusCoverageError,
+    encode_voice_reference_file,
     video_speakers,
     voice_search,
     voice_search_vectors,
@@ -24,7 +24,7 @@ def get_video_speakers(video_id: str) -> dict:
     if not context.catalog.get_video(video_id):
         raise HTTPException(status_code=404, detail="视频不存在")
     try:
-        return video_speakers(context.settings.index_dir, context.catalog, video_id)
+        return video_speakers(context.catalog, video_id)
     except SpeakerMilvusCoverageError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (FileNotFoundError, ValueError) as exc:
@@ -56,7 +56,6 @@ def search_voice(request: VoiceSearchRequest) -> dict:
 
     try:
         results = voice_search(
-            context.settings.index_dir,
             context.catalog,
             query_video_id=request.query_video_id,
             query_utterance_index=request.query_utterance_index,
@@ -81,32 +80,17 @@ async def search_voice_upload(
     video_ids: str | None = Form(default=None),
     limit: int = Form(default=50),
 ) -> dict:
-    from app.indexing.modalities.speaker.speaker import encode_voice_query
-
     settings = context.settings
     source_path = settings.query_dir / f"{uuid.uuid4().hex}{context._safe_suffix(reference.filename, '.wav')}"
-    wav_path = source_path.with_suffix(".voice.wav")
     await run_in_threadpool(context._save_upload, reference, source_path)
     try:
-        process = await run_in_threadpool(
-            subprocess.run,
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source_path),
-             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav_path)],
-            capture_output=True,
-            text=True,
-        )
-        if process.returncode != 0:
-            raise ValueError(process.stderr.strip() or "无法读取上传声音")
         vectors = await run_in_threadpool(
-            encode_voice_query,
-            str(wav_path),
-            model_repo=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_repo)),
-            model_cache_dir=str(settings.resolve_path(settings.app_model_dir / settings.speaker_model_cache_dir)),
-            device=settings.speaker_device,
+            encode_voice_reference_file,
+            settings,
+            source_path,
         )
         results = await run_in_threadpool(
             voice_search_vectors,
-            settings.index_dir,
             context.catalog,
             query_vectors=vectors,
             video_ids=json.loads(video_ids) if video_ids else None,
@@ -124,4 +108,3 @@ async def search_voice_upload(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
         source_path.unlink(missing_ok=True)
-        wav_path.unlink(missing_ok=True)

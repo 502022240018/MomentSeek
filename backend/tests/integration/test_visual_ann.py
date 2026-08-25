@@ -52,7 +52,7 @@ def test_video_id(milvus_client):
         col = milvus_client.collection_for("visual")
         # Try to find any video with embeddings
         results = col.query(
-            expr="video_id != ''",
+            expr="video_id != '' and asset_version != ''",
             output_fields=["video_id"],
             limit=1,
         )

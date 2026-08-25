@@ -2,7 +2,7 @@
 
 This is an explicit maintenance command, not a runtime fallback.  It rebuilds
 each selected source video through the normal indexing stages, which write and
-verify a new Milvus asset version before publishing its manifest pointer.
+verify a new Milvus asset version before publishing its Catalog pointer.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from dataclasses import dataclass
 
 from app.catalog.db import Catalog
 from app.core.settings import Settings, get_settings
-from app.indexing.manifest import load_index_manifest
 from app.indexing.stage_executor import execute_stage
 
 
@@ -113,16 +112,12 @@ def run_migration(
                     "milvus_asset_version": stage_result.get("milvus_asset_version"),
                     "milvus_row_count": stage_result.get("milvus_row_count"),
                 }
-            completed = set(video.get("indexed_modalities", []))
-            completed.update(published_modalities(stages, stage_results))
-            catalog.update_video(
-                video["id"], indexed_modalities=sorted(completed), status="ready"
-            )
+            catalog.update_video(video["id"], status="ready")
             item["status"] = "completed"
         except Exception as exc:
             # A failed replacement must not make a previously published index
             # look unavailable in the catalog.  Stage publication is atomic per
-            # modality, so the last published manifest pointers stay readable.
+            # modality, so the last Catalog publication stays readable.
             item.update(status="failed", error=str(exc))
             failed += 1
         item["wall_seconds"] = round(time.perf_counter() - started, 3)
@@ -137,7 +132,7 @@ def verify_published_versions(
     targets: list[MigrationTarget],
     stages: tuple[str, ...],
 ) -> tuple[list[dict], int]:
-    """Check manifest pointers against persisted rows in the declared Milvus version."""
+    """Check Catalog pointers against persisted rows in the declared Milvus version."""
     if not settings.milvus_enabled:
         raise RuntimeError("Milvus-only 验收需要 MILVUS_ENABLED=true")
     from app.vector_store.milvus.milvus_client import get_milvus_client
@@ -150,13 +145,15 @@ def verify_published_versions(
     failures = 0
     for target in targets:
         video_id = target.video["id"]
-        manifest = load_index_manifest(settings.index_dir / video_id) or {}
-        channels = manifest.get("channels") or {}
+        channels = {
+            publication["modality"]: publication
+            for publication in catalog.list_modality_publications([video_id])
+        }
         item = {"video_id": video_id, "status": "completed", "channels": {}}
         for modality in sorted(expected):
             channel = channels.get(modality) or {}
-            version = channel.get("milvus_asset_version")
-            declared = channel.get("milvus_row_count")
+            version = channel.get("asset_version")
+            declared = channel.get("row_count")
             if not version or declared is None:
                 item["channels"][modality] = {"status": "missing_publish_pointer"}
                 item["status"] = "failed"
@@ -168,7 +165,7 @@ def verify_published_versions(
             item["channels"][modality] = {
                 "status": state,
                 "asset_version": str(version),
-                "manifest_rows": int(declared),
+                "catalog_rows": int(declared),
                 "milvus_rows": actual,
             }
             if state != "ok":
@@ -199,7 +196,7 @@ def main() -> int:
     parser.add_argument(
         "--verify-only",
         action="store_true",
-        help="只核验已发布 manifest 指针和 Milvus 行数",
+        help="只核验已发布 Catalog 指针和 Milvus 行数",
     )
     parser.add_argument(
         "--execute", action="store_true", help="确认执行重建；未传入时只做 dry-run"

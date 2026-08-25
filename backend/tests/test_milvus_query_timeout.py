@@ -35,8 +35,11 @@ def _make_client() -> tuple[MagicMock, MagicMock]:
     collection.search.return_value = [[]]
     collection.hybrid_search.return_value = [[]]
     # Speaker/face go through _ann_search → _verify_ann_index_type_once, which
-    # introspects col.index(); present the expected DISKANN type for speaker.
-    collection.index.return_value.params = {"index_type": "DISKANN"}
+    # introspects col.index(); present the expected Speaker index configuration.
+    collection.index.return_value.params = {
+        "index_type": "DISKANN",
+        "metric_type": "COSINE",
+    }
     client = MagicMock()
     client.collection_for.return_value = collection
     return client, collection

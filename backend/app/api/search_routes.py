@@ -21,7 +21,7 @@ def _parse_id_list(value: str | None, field_name: str) -> list[str] | None:
         raise HTTPException(status_code=422, detail=f"{field_name} 必须是 JSON 字符串数组") from exc
     if not isinstance(parsed, list) or any(not isinstance(item, str) or not item.strip() for item in parsed):
         raise HTTPException(status_code=422, detail=f"{field_name} 必须是非空字符串数组")
-    return list(dict.fromkeys(item.strip() for item in parsed)) or None
+    return list(dict.fromkeys(item.strip() for item in parsed))
 
 
 @router.get("/api/orchestration/profiles")

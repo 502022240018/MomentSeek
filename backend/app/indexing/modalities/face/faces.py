@@ -4,9 +4,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
+import cv2
 
 from app.encoders.face import FaceEncoder
-from app.indexing.common import atomic_save_npz, normalize
+from app.indexing.common import normalize
 from app.media.media import read_frames
 
 if TYPE_CHECKING:
@@ -32,6 +33,8 @@ class Track:
     best_quality: float = 0
     best_time: float = 0
     best_crop: np.ndarray | None = None
+    best_bbox: np.ndarray = field(default_factory=lambda: np.full(4, -1.0, dtype=np.float32))
+    detection_count: int = 0
 
 
 def _expire_face_tracks(active: list[Track], timestamp: float, max_gap: float) -> tuple[list[Track], list[Track]]:
@@ -61,20 +64,41 @@ def _best_face_track_match(
     return None, None
 
 
-def _update_best_face_crop(track: Track, face, frame: np.ndarray, bbox: np.ndarray, timestamp: float) -> None:
+def face_detection_quality(face, frame: np.ndarray, bbox: np.ndarray) -> float:
+    """Score one detected face consistently for indexing and legacy refinement."""
     x1, y1, x2, y2 = bbox.astype(int)
     area = max(0, x2 - x1) * max(0, y2 - y1)
-    quality = float(face.det_score) * float(np.sqrt(area))
+    height, width = frame.shape[:2]
+    relative_size = min(1.0, np.sqrt(area / max(1.0, height * width)) / 0.35)
+    crop = frame[max(0, y1):min(height, y2), max(0, x1):min(width, x2)]
+    sharpness = 0.0
+    if crop.size:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        sharpness = min(1.0, float(cv2.Laplacian(gray, cv2.CV_64F).var()) / 500.0)
+    border_margin = min(x1, y1, width - x2, height - y2)
+    border_score = min(1.0, max(0.0, border_margin) / max(1.0, 0.08 * min(width, height)))
+    return float(
+        0.50 * float(face.det_score)
+        + 0.25 * relative_size
+        + 0.15 * sharpness
+        + 0.10 * border_score
+    )
+
+
+def _update_best_face_crop(track: Track, face, frame: np.ndarray, bbox: np.ndarray, timestamp: float) -> None:
+    x1, y1, x2, y2 = bbox.astype(int)
+    height, width = frame.shape[:2]
+    quality = face_detection_quality(face, frame, bbox)
     if quality <= track.best_quality:
         return
     pad = max(4, int(0.15 * max(x2 - x1, y2 - y1)))
-    height, width = frame.shape[:2]
     track.best_crop = frame[
         max(0, y1 - pad):min(height, y2 + pad),
         max(0, x1 - pad):min(width, x2 + pad),
     ].copy()
     track.best_quality = quality
     track.best_time = timestamp
+    track.best_bbox = np.asarray([x1 / width, y1 / height, x2 / width, y2 / height], dtype=np.float32)
 
 
 def _face_track_arrays(tracks: list[Track]) -> tuple[list[np.ndarray], list[list[int]]]:
@@ -93,21 +117,23 @@ def _face_track_arrays(tracks: list[Track]) -> tuple[list[np.ndarray], list[list
 
 def build_face_index(
     video_path: str,
-    output_path: str,
     model_name: str,
     sample_fps: float,
     provider: str,
     device_id: int,
+    milvus_ctx: "MilvusWriteContext",
     model_root: str | None = None,
     max_gap: float = 1.5,
     cosine_threshold: float = 0.35,
+    gallery_cosine_threshold: float = 0.52,
     encoder: "FaceEncoder | None" = None,
     decode_height: int = 0,
     prefer_ffmpeg: bool = True,
     ort_intra_op_threads: int = 8,
     ort_inter_op_threads: int = 1,
-    milvus_ctx: "MilvusWriteContext | None" = None,
 ) -> dict:
+    if milvus_ctx is None:
+        raise ValueError("Face 索引必须提供 MilvusWriteContext")
     # encoder may be supplied by the warm pool (model already resident); otherwise
     # load it for this call (the process_exit path).
     if encoder is None:
@@ -146,6 +172,7 @@ def build_face_index(
                 next_number += 1
                 active.append(track)
                 used_tracks.add(len(active) - 1)
+            track.detection_count += 1
             _update_best_face_crop(track, face, frame, bbox, timestamp)
     finished.extend(active)
     embeddings, track_times_ms = _face_track_arrays(finished)
@@ -156,23 +183,46 @@ def build_face_index(
         if embeddings else np.empty((0, dimension), np.float32)
     )
     track_times_array = np.asarray(track_times_ms, dtype=np.int32).reshape((-1, 3))
-    milvus_rows = None
-    if milvus_ctx is not None:
-        from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
+    valid_tracks = [track for track in finished if track.embeddings]
+    qualities = np.asarray([track.best_quality for track in valid_tracks], dtype=np.float32)
+    bboxes = np.asarray([track.best_bbox for track in valid_tracks], dtype=np.float32).reshape((-1, 4))
+    detection_counts = np.asarray([track.detection_count for track in valid_tracks], dtype=np.int32)
+    from app.identity.face_gallery import (
+        FACE_GROUP_ALGORITHM_VERSION,
+        cluster_face_tracks,
+        face_group_arrays,
+        face_group_model_version,
+    )
+    groups = cluster_face_tracks(
+        embedding_array,
+        track_times_array,
+        qualities=qualities,
+        bboxes=bboxes,
+        detection_counts=detection_counts,
+        cosine_threshold=gallery_cosine_threshold,
+    )
+    group_arrays = face_group_arrays(groups)
+    group_model_version = face_group_model_version(gallery_cosine_threshold)
+    from app.vector_store.milvus.milvus_indexer import write_modality_from_memory
 
-        milvus_rows = write_modality_from_memory(
-            milvus_ctx,
-            "face",
-            {"embeddings": embedding_array, "track_times_ms": track_times_array},
-        )
-    # Retained only as an offline recovery artifact; no runtime path reads it.
-    atomic_save_npz(
-        output_path,
-        embeddings=embedding_array,
-        track_times_ms=track_times_array,
+    milvus_rows = write_modality_from_memory(
+        milvus_ctx,
+        "face",
+        {
+            "embeddings": embedding_array,
+            "track_times_ms": track_times_array,
+            "group_model_version": group_model_version,
+            **group_arrays,
+        },
     )
     return {
         "tracks": len(embeddings),
+        "face_groups": len(groups),
+        "face_group_rows": len(groups),
+        "face_group_version": group_model_version,
+        "face_group_algorithm": FACE_GROUP_ALGORITHM_VERSION,
+        "face_group_cosine_threshold": float(gallery_cosine_threshold),
+        "face_group_source": "index-time-tracks",
         "detections": detections,
         "provider": encoder.provider,
         "schema_version": 3,

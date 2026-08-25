@@ -5,41 +5,6 @@ from pathlib import Path
 import numpy as np
 
 from app.encoders.text import TextEmbeddingEncoder
-from app.indexing.common import atomic_save_npz
-
-
-def build_text_semantic_index(
-    chunks: list[dict],
-    output_path: str | Path,
-    model_name: str,
-    model_dir: str | Path,
-    device: str,
-    batch_size: int = 32,
-    local_files_only: bool = True,
-) -> dict:
-    result = build_text_semantic_arrays(
-        chunks=chunks,
-        model_name=model_name,
-        model_dir=model_dir,
-        device=device,
-        batch_size=batch_size,
-        local_files_only=local_files_only,
-        dtype=np.float32,
-    )
-    atomic_save_npz(
-        output_path,
-        schema_version=np.asarray([1], dtype=np.int16),
-        embeddings=result["embeddings"],
-        chunk_indices=result["embedding_chunk_indices"],
-        model=np.asarray([model_name]),
-        device=np.asarray([device]),
-    )
-    return {
-        "semantic_chunks": result["semantic_chunks"],
-        "semantic_dim": result["semantic_dim"],
-        "semantic_model": model_name,
-        "semantic_device": device,
-    }
 
 
 def build_text_semantic_arrays(
