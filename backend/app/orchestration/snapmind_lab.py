@@ -6,8 +6,7 @@ import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
