@@ -1,19 +1,21 @@
-"""Visual modality ANN-based retrieval (simplified).
+"""Visual modality publication-scoped ANN retrieval.
 
-Replaces full-query approach with pure ANN recall:
-1. ANN recall of top-K candidate frames per subquery
-2. Aggregate multi-query results with legacy semantics (0.65*mean + 0.35*min)
-3. Aggregate by segment and generate candidates
+1. Search all selected, currently-published frame vectors once per model cohort
+2. ANN recall of global top-K candidate frames per subquery
+3. Aggregate multi-query results with legacy semantics (0.65*mean + 0.35*min)
+4. Aggregate by publication-safe segment keys and generate candidates
 
-Performance target: 60-80% latency reduction, maintains semantic correctness.
-
-NOTE: No distribution sampling/z-score normalization - results go to VLM reranking.
+No distribution sampling/z-score normalization is applied; candidates continue
+through the shared fusion and optional VLM reranking path.
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
+import time
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -58,11 +60,30 @@ def milvus_visual_candidates_ann(
     profile: str = "balanced",
     profiler: RetrievalProfiler | None = None,
 ) -> list[Candidate]:
-    """Visual retrieval using ANN recall with multi-query aggregation.
+    """Compatibility wrapper for one published video version."""
+    return milvus_visual_candidates_global_ann(
+        client,
+        {video_id: asset_version},
+        query_texts,
+        limit,
+        profile,
+        profiler,
+    )
+
+
+def milvus_visual_candidates_global_ann(
+    client: MilvusClient,
+    publication_versions: Mapping[str, str],
+    query_texts: list[np.ndarray],
+    limit: int = 20,
+    profile: str = "balanced",
+    profiler: RetrievalProfiler | None = None,
+) -> list[Candidate]:
+    """Search one compatible publication cohort in a single ANN RPC.
 
     Args:
         client: Milvus client
-        video_id: Video ID
+        publication_versions: Exact ``video_id -> asset_version`` allowlist
         query_texts: List of query vectors (encoded subqueries)
         limit: Number of candidates to return
         profile: Search profile ("precision", "balanced", "recall")
@@ -76,6 +97,10 @@ def milvus_visual_candidates_ann(
     """
     from app.core.settings import get_settings
 
+    versions = _normalize_publication_versions(publication_versions)
+    if not versions or not query_texts or limit <= 0:
+        return []
+
     settings = get_settings()
     ann_top_k = settings.visual_ann_top_k
     segment_top_n = settings.visual_ann_segment_top_n
@@ -85,15 +110,22 @@ def milvus_visual_candidates_ann(
 
     # Normalize query vectors
     query_values = np.stack([_normalize(q) for q in query_texts])
+    if query_values.ndim != 2 or not np.all(np.isfinite(query_values)):
+        raise ValueError("Visual ANN query vectors must form one finite 2D batch")
+    if np.any(np.linalg.norm(query_values, axis=1) < 1e-8):
+        raise ValueError("Visual ANN query vectors must have non-zero norm")
 
     # ANN recall of candidate frames (multi-query batch)
-    ann_results = _ann_recall_multi_query(
-        client, video_id, asset_version, query_values, ann_top_k,
+    ann_results = _ann_recall_global_multi_query(
+        client, versions, query_values, ann_top_k,
         settings.visual_use_diskann, profiler
     )
 
     if not ann_results:
-        logger.info(f"Visual ANN: no results for video {video_id}")
+        logger.info(
+            "Visual ANN: no results for publication cohort (%d videos)",
+            len(versions),
+        )
         return []
 
     # Aggregate by segment with multi-query semantics
@@ -103,17 +135,47 @@ def milvus_visual_candidates_ann(
         else nullcontext()
     )
     with aggregate_span:
-        candidates = _aggregate_by_segment(
-            ann_results, video_id, limit, profile, len(query_texts), segment_top_n
+        candidates = _aggregate_global_by_segment(
+            ann_results,
+            versions,
+            limit,
+            profile,
+            len(query_texts),
+            segment_top_n,
         )
 
     logger.info(
-        f"Visual ANN: video={video_id}, profile={profile}, "
-        f"queries={len(query_texts)}, recalled={len(ann_results)}, "
-        f"candidates={len(candidates)}"
+        "Visual ANN: cohort_videos=%d, profile=%s, queries=%d, "
+        "recalled=%d, candidates=%d",
+        len(versions),
+        profile,
+        len(query_texts),
+        len(ann_results),
+        len(candidates),
     )
 
     return candidates
+
+
+def _normalize_publication_versions(
+    publication_versions: Mapping[str, str],
+) -> dict[str, str]:
+    """Normalize a deterministic non-empty publication pair allowlist."""
+    versions: dict[str, str] = {}
+    for raw_video_id, raw_asset_version in publication_versions.items():
+        if raw_video_id is None or raw_asset_version is None:
+            raise ValueError("Visual publication scope cannot contain null values")
+        video_id = str(raw_video_id)
+        asset_version = str(raw_asset_version)
+        if not video_id.strip() or not asset_version.strip():
+            raise ValueError("Visual publication scope cannot contain blank values")
+        previous = versions.get(video_id)
+        if previous is not None and previous != asset_version:
+            raise ValueError(
+                f"Conflicting Visual asset versions for video_id={video_id!r}"
+            )
+        versions[video_id] = asset_version
+    return dict(sorted(versions.items()))
 
 
 def _verify_index_type_once(client: MilvusClient, expect_diskann: bool) -> None:
@@ -210,72 +272,126 @@ def _ann_recall_multi_query(
     use_diskann: bool,
     profiler: RetrievalProfiler | None,
 ) -> list[dict[str, Any]]:
-    """ANN recall with batch multi-query support.
+    """Compatibility wrapper for one publication-scoped ANN RPC."""
+    return _ann_recall_global_multi_query(
+        client,
+        {video_id: asset_version},
+        query_values,
+        top_k,
+        use_diskann,
+        profiler,
+    )
 
-    Uses correct parameters for HNSW vs DiskANN:
-    - HNSW: ef parameter (must be >= top_k)
-    - DiskANN: search_list parameter (must be >= top_k)
 
-    Returns:
-        List of frame hits with fields: query_idx, frame_idx, timestamp_ms,
-        segment_id, segment_start_ms, segment_end_ms, cosine
-    """
+def _ann_recall_global_multi_query(
+    client: MilvusClient,
+    publication_versions: Mapping[str, str],
+    query_values: np.ndarray,
+    top_k: int,
+    use_diskann: bool,
+    profiler: RetrievalProfiler | None,
+) -> list[dict[str, Any]]:
+    """Recall global top-K frames for each subquery in one Milvus RPC."""
     from app.core.settings import get_settings
 
-    collection = client.collection_for("visual")
-
+    versions = _normalize_publication_versions(publication_versions)
+    if not versions or top_k <= 0:
+        return []
     try:
-        # Use correct parameters based on index type
+        collection = client.collection_for("visual")
+        expression_started = time.perf_counter()
+        scope_expression = _published_scope_expression(versions)
+        expression_seconds = time.perf_counter() - expression_started
+        if profiler:
+            profiler.increment(
+                "visual_scope", "publication_pair_count", len(versions)
+            )
+            profiler.increment(
+                "visual_scope",
+                "expr_utf8_bytes",
+                len(scope_expression.encode("utf-8")),
+            )
+            profiler.add_seconds(
+                "visual_scope", "expr_build", expression_seconds
+            )
+
         if use_diskann:
-            # DiskANN parameter: search_list >= top_k
             search_params = {
                 "metric_type": "COSINE",
-                "params": {"search_list": max(top_k, 100)},
+                # Keep ANN breadth equal to the configured global recall K.
+                "params": {"search_list": top_k},
             }
         else:
-            # HNSW parameter: ef >= top_k
             search_params = {
                 "metric_type": "COSINE",
                 "params": {"ef": max(top_k, 128)},
             }
 
-        # Batch search: process all subqueries in one call.
         rpc_span = (
             profiler.span("milvus_rpc", "visual")
             if profiler
             else nullcontext()
         )
-        with rpc_span:
-            hits = collection.search(
-                data=query_values.tolist(),
-                anns_field="embedding",
-                param=search_params,
-                limit=top_k,
-                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
-                output_fields=[
-                    "frame_idx",
-                    "timestamp_ms",
-                    "segment_id",
-                    "segment_start_ms",
-                    "segment_end_ms",
-                ],
-                # Do NOT return embedding field to reduce network transfer
-                timeout=get_settings().milvus_query_timeout_seconds,
+        # ``visual_requests`` counts attempted Milvus RPCs, including calls that
+        # raise. Increment immediately before collection.search so diagnostics do
+        # not under-report failing backends.
+        if profiler:
+            profiler.increment("milvus", "visual_requests")
+            profiler.increment("milvus", "visual_rpc_attempted")
+        try:
+            with rpc_span:
+                hits = collection.search(
+                    data=query_values.tolist(),
+                    anns_field="embedding",
+                    param=search_params,
+                    limit=top_k,
+                    expr=scope_expression,
+                    output_fields=[
+                        "video_id",
+                        "asset_version",
+                        "frame_idx",
+                        "timestamp_ms",
+                        "segment_id",
+                        "segment_start_ms",
+                        "segment_end_ms",
+                    ],
+                    timeout=get_settings().milvus_query_timeout_seconds,
+                )
+        except Exception:
+            if profiler:
+                profiler.increment("milvus", "visual_rpc_failed")
+            raise
+        else:
+            if profiler:
+                profiler.increment("milvus", "visual_rpc_succeeded")
+
+        # A partial batch is ambiguous: query indexes would no longer identify
+        # the input subqueries reliably, so do not return degraded candidates.
+        if len(hits) != len(query_values):
+            raise ValueError(
+                "Visual ANN returned an unexpected result-set count: "
+                f"expected={len(query_values)} actual={len(hits)}"
             )
 
         raw_hit_count = sum(len(query_hits) for query_hits in hits)
-        results = []
+        results: list[dict[str, Any]] = []
         malformed_hits = 0
         for query_idx, query_hits in enumerate(hits):
             for hit in query_hits:
                 entity = hit.entity
                 try:
-                    # Do not default missing time fields to zero: that turns schema
-                    # mismatches into plausible-looking 0:00-0:00 candidates.
+                    # Required fields intentionally have no compatibility defaults:
+                    # missing scope/time metadata must not become a plausible hit.
                     results.append({
                         "query_idx": query_idx,
+                        "video_id": str(_required_entity_field(entity, "video_id")),
+                        "asset_version": str(
+                            _required_entity_field(entity, "asset_version")
+                        ),
                         "frame_idx": int(_required_entity_field(entity, "frame_idx")),
-                        "timestamp_ms": int(_required_entity_field(entity, "timestamp_ms")),
+                        "timestamp_ms": int(
+                            _required_entity_field(entity, "timestamp_ms")
+                        ),
                         "segment_id": int(_required_entity_field(entity, "segment_id")),
                         "segment_start_ms": int(
                             _required_entity_field(entity, "segment_start_ms")
@@ -288,18 +404,17 @@ def _ann_recall_multi_query(
                 except (KeyError, TypeError, ValueError, OverflowError):
                     malformed_hits += 1
 
-        valid_results = _valid_visual_results(results, video_id=video_id)
+        valid_results = _valid_global_visual_results(results, versions)
         dropped_hits = malformed_hits + len(results) - len(valid_results)
         if dropped_hits:
             logger.warning(
-                "Visual ANN dropped %d invalid hit(s) for video=%s; "
-                "re-index visual data with explicit time bounds",
+                "Visual ANN dropped %d invalid/out-of-scope hit(s) for "
+                "publication cohort (%d videos)",
                 dropped_hits,
-                video_id,
+                len(versions),
             )
 
         if profiler:
-            profiler.increment("milvus", "visual_requests")
             profiler.increment("milvus", "visual_rows", len(valid_results))
             if dropped_hits:
                 profiler.increment("milvus", "visual_invalid_rows", dropped_hits)
@@ -308,9 +423,26 @@ def _ann_recall_multi_query(
             profiler.increment("milvus_rows", "visual_invalid", dropped_hits)
         return valid_results
 
-    except Exception as e:
-        logger.error(f"Visual ANN batch search failed: {e}")
-        raise MilvusVisualSearchError(f"ANN search failed for video {video_id}") from e
+    except MilvusVisualSearchError:
+        raise
+    except Exception as exc:
+        logger.error("Visual ANN global batch search failed: %s", exc)
+        raise MilvusVisualSearchError(
+            f"ANN search failed for publication cohort ({len(versions)} videos)"
+        ) from exc
+
+
+def _published_scope_expression(publication_versions: Mapping[str, str]) -> str:
+    """Build an escaped exact-pair allowlist for the active publications."""
+    versions = _normalize_publication_versions(publication_versions)
+    if not versions:
+        raise ValueError("Visual publication scope cannot be empty")
+    return " or ".join(
+        "(video_id == "
+        f"{json.dumps(video_id, ensure_ascii=False)} and asset_version == "
+        f"{json.dumps(asset_version, ensure_ascii=False)})"
+        for video_id, asset_version in versions.items()
+    )
 
 
 def _aggregate_by_segment(
@@ -452,6 +584,126 @@ def _aggregate_by_segment(
     return candidates
 
 
+def _aggregate_global_by_segment(
+    ann_results: list[dict[str, Any]],
+    publication_versions: Mapping[str, str],
+    limit: int,
+    profile: str,
+    n_queries: int,
+    segment_top_n: int = 3,
+) -> list[Candidate]:
+    """Aggregate a global recall pool without crossing publication boundaries.
+
+    The score calculation intentionally matches ``_aggregate_by_segment``.
+    Scope fields are only added to every grouping key and to the resulting
+    candidates so videos with identical segment/frame ids remain independent.
+    """
+    versions = _normalize_publication_versions(publication_versions)
+    ann_results = _valid_global_visual_results(ann_results, versions)
+
+    frame_scores: dict[
+        tuple[str, str, int, int], dict[int, float]
+    ] = defaultdict(dict)
+    frame_meta: dict[tuple[str, str, int, int], dict[str, int]] = {}
+
+    for result in ann_results:
+        key = (
+            result["video_id"],
+            result["asset_version"],
+            result["segment_id"],
+            result["frame_idx"],
+        )
+        # Assignment (rather than max) preserves the singleton legacy behavior
+        # should Milvus ever return the same frame/query more than once.
+        frame_scores[key][result["query_idx"]] = result["cosine"]
+        if key not in frame_meta:
+            frame_meta[key] = {
+                "timestamp_ms": result["timestamp_ms"],
+                "segment_start_ms": result["segment_start_ms"],
+                "segment_end_ms": result["segment_end_ms"],
+            }
+
+    frame_aggregates: dict[tuple[str, str, int, int], float] = {}
+    for key, query_scores in frame_scores.items():
+        if n_queries == 1:
+            aggregate = list(query_scores.values())[0]
+        else:
+            scores = [query_scores.get(query_idx, 0.0) for query_idx in range(n_queries)]
+            aggregate = 0.65 * np.mean(scores) + 0.35 * np.min(scores)
+        frame_aggregates[key] = float(aggregate)
+
+    if not frame_aggregates:
+        return []
+
+    segment_frames: dict[
+        tuple[str, str, int], list[tuple[int, float, dict[str, int]]]
+    ] = defaultdict(list)
+    for (video_id, asset_version, segment_id, frame_idx), score in (
+        frame_aggregates.items()
+    ):
+        frame_key = (video_id, asset_version, segment_id, frame_idx)
+        segment_frames[(video_id, asset_version, segment_id)].append(
+            (frame_idx, score, frame_meta[frame_key])
+        )
+
+    segment_scores: list[dict[str, Any]] = []
+    for (video_id, asset_version, segment_id), frames in segment_frames.items():
+        scores = [score for _, score, _ in frames]
+        topn_scores = sorted(scores, reverse=True)[:segment_top_n]
+        segment_score = float(np.mean(topn_scores))
+        best_index = scores.index(max(scores))
+        best_meta = frames[best_index][2]
+        segment_scores.append({
+            "video_id": video_id,
+            "asset_version": asset_version,
+            "segment_id": segment_id,
+            "score": segment_score,
+            "start_ms": best_meta["segment_start_ms"],
+            "end_ms": best_meta["segment_end_ms"],
+            "best_ms": best_meta["timestamp_ms"],
+            "frame_count": len(frames),
+        })
+
+    # Python's stable sort retains Milvus/aggregation insertion order for exact
+    # score ties, matching the singleton path's historic behavior.
+    segment_scores.sort(key=lambda item: item["score"], reverse=True)
+    cap = 500 if profile == "recall" else limit
+
+    candidates: list[Candidate] = []
+    for segment in segment_scores[:cap]:
+        raw_score = segment["score"]
+        rank_score = visual_confidence(raw_score)
+        evidence = (
+            f"[milvus_ann] score={raw_score:.3f} · rank={rank_score:.3f} · "
+            f"{segment['frame_count']} frames · {n_queries} queries"
+        )
+        candidates.append(
+            Candidate(
+                video_id=segment["video_id"],
+                start_time=_seconds(segment["start_ms"]),
+                end_time=_seconds(segment["end_ms"]),
+                score=rank_score,
+                modality="visual",
+                evidence=evidence,
+                raw_score=raw_score,
+                best_time=_seconds(segment["best_ms"]),
+                unit_type="segment",
+                unit_id=segment["segment_id"],
+                best_ms=segment["best_ms"],
+                features={
+                    "visual_rank_score": rank_score,
+                    "segment_id": segment["segment_id"],
+                    "frame_count": segment["frame_count"],
+                    "source": "milvus_ann",
+                },
+            )
+        )
+        if len(candidates) >= limit and profile != "recall":
+            break
+
+    return candidates
+
+
 def _normalize(vec: np.ndarray) -> np.ndarray:
     """L2 normalization."""
     norm = np.linalg.norm(vec)
@@ -531,4 +783,84 @@ def _valid_visual_results(
         result
         for result in structurally_valid
         if result["segment_id"] not in inconsistent_segments
+    ]
+
+
+def _valid_global_visual_results(
+    results: list[dict[str, Any]],
+    publication_versions: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """Validate time metadata and re-check the exact publication allowlist."""
+    versions = _normalize_publication_versions(publication_versions)
+    structurally_valid: list[dict[str, Any]] = []
+    bounds_by_segment: dict[
+        tuple[str, str, int], set[tuple[int, int]]
+    ] = defaultdict(set)
+
+    for result in results:
+        try:
+            video_id = str(result["video_id"])
+            asset_version = str(result["asset_version"])
+            query_idx = int(result["query_idx"])
+            frame_idx = int(result["frame_idx"])
+            timestamp_ms = int(result["timestamp_ms"])
+            segment_id = int(result["segment_id"])
+            start_ms = int(result["segment_start_ms"])
+            end_ms = int(result["segment_end_ms"])
+            cosine = float(result["cosine"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+
+        if versions.get(video_id) != asset_version:
+            continue
+        if (
+            query_idx < 0
+            or frame_idx < 0
+            or segment_id < 0
+            or timestamp_ms < 0
+            or start_ms < 0
+            or end_ms <= start_ms
+            or timestamp_ms < start_ms
+            or timestamp_ms > end_ms
+            or not np.isfinite(cosine)
+        ):
+            continue
+
+        normalized = dict(result)
+        normalized.update({
+            "video_id": video_id,
+            "asset_version": asset_version,
+            "query_idx": query_idx,
+            "frame_idx": frame_idx,
+            "timestamp_ms": timestamp_ms,
+            "segment_id": segment_id,
+            "segment_start_ms": start_ms,
+            "segment_end_ms": end_ms,
+            "cosine": cosine,
+        })
+        structurally_valid.append(normalized)
+        bounds_by_segment[(video_id, asset_version, segment_id)].add(
+            (start_ms, end_ms)
+        )
+
+    inconsistent_segments = {
+        segment_key
+        for segment_key, bounds in bounds_by_segment.items()
+        if len(bounds) != 1
+    }
+    if inconsistent_segments:
+        logger.warning(
+            "Visual ANN ignored publication segments with inconsistent time "
+            "bounds: %s",
+            sorted(inconsistent_segments),
+        )
+    return [
+        result
+        for result in structurally_valid
+        if (
+            result["video_id"],
+            result["asset_version"],
+            result["segment_id"],
+        )
+        not in inconsistent_segments
     ]

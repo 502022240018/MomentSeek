@@ -189,7 +189,9 @@ class Settings(BaseSettings):
 
     # Visual ANN search configuration
     visual_use_diskann: bool = True  # Index type: True=DiskANN (disk), False=HNSW (memory)
-    visual_ann_top_k: int = 500  # ANN recall size per subquery (recommended: 300-1000)
+    # Global recall size per subquery. Keep configurable for 1000/2000/4000
+    # quality/latency sweeps; 2000 is the first production-candidate baseline.
+    visual_ann_top_k: int = 2000
     visual_ann_segment_top_n: int = 3  # Number of top frames per segment for aggregation (recommended: 3-10)
 
     # OCR hybrid search configuration (DiskANN + BM25)
@@ -333,11 +335,18 @@ class Settings(BaseSettings):
             raise ValueError("milvus_search_max_workers 必须在 1 到 8 之间")
         return value
 
-    @field_validator("visual_ann_top_k", "visual_ann_segment_top_n")
+    @field_validator("visual_ann_top_k")
     @classmethod
-    def validate_visual_ann_positive(cls, value: int) -> int:
+    def validate_visual_ann_top_k(cls, value: int) -> int:
+        if not 1 <= value <= 16_383:
+            raise ValueError("visual_ann_top_k must be between 1 and 16383")
+        return value
+
+    @field_validator("visual_ann_segment_top_n")
+    @classmethod
+    def validate_visual_ann_segment_top_n(cls, value: int) -> int:
         if value <= 0:
-            raise ValueError("Visual ANN parameters must be greater than 0")
+            raise ValueError("visual_ann_segment_top_n must be greater than 0")
         return value
 
     @property

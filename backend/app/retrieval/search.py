@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
+from functools import partial
 import logging
 import threading
 
@@ -836,8 +837,6 @@ class SearchEngine:
         *,
         text: str | None,
         modalities: list[str],
-        visual_profile: str,
-        visual_queries: dict[str, np.ndarray],
         face_query: np.ndarray | None,
         channel_limits: dict[str, int],
         semantic_queries: dict[str, np.ndarray | None],
@@ -848,7 +847,6 @@ class SearchEngine:
             milvus_asr_candidates_hybrid,
             milvus_face_candidates,
             milvus_ocr_candidates_hybrid,
-            milvus_visual_candidates,
         )
 
         if client is None:
@@ -856,25 +854,6 @@ class SearchEngine:
         video_id = video["id"]
         indexed = set(video.get("indexed_modalities") or [])
         candidates: list[Candidate] = []
-        if "visual" in modalities and "visual" in indexed:
-            channel_publication = _channel_publication_for(video, "visual")
-            asset_version = _published_asset_version(
-                channel_publication, str(video.get("name") or video_id), "visual"
-            )
-            visual_model = str(channel_publication.get("model_key") or self.settings.visual_model)
-            if visual_model not in visual_queries:
-                raise RuntimeError(
-                    f"visual query vector was not prepared for model={visual_model}"
-                )
-            candidates.extend(milvus_visual_candidates(
-                client,
-                video_id,
-                visual_queries[visual_model],
-                asset_version,
-                profile=visual_profile,
-                limit=channel_limits["visual"],
-                profiler=profiler,
-            ))
         if "face" in modalities and face_query is not None and "face" in indexed:
             channel_publication = _channel_publication_for(video, "face")
             candidates.extend(milvus_face_candidates(
@@ -947,6 +926,31 @@ class SearchEngine:
         if text:
             requested.update({"asr", "ocr"} & set(modalities) & indexed)
         return requested
+
+    def _visual_publication_cohorts(
+        self,
+        videos: list[dict],
+        requested_by_video: dict[str, set[str]],
+    ) -> dict[str, dict[str, str]]:
+        """Group exact published Visual versions by compatible query model."""
+        cohorts: dict[str, dict[str, str]] = {}
+        for video in videos:
+            video_id = str(video["id"])
+            if "visual" not in requested_by_video[video_id]:
+                continue
+            publication = _channel_publication_for(video, "visual")
+            model_key = str(
+                publication.get("model_key") or self.settings.visual_model
+            )
+            cohorts.setdefault(model_key, {})[video_id] = _published_asset_version(
+                publication,
+                str(video.get("name") or video_id),
+                "visual",
+            )
+        return {
+            model_key: dict(sorted(publication_versions.items()))
+            for model_key, publication_versions in sorted(cohorts.items())
+        }
 
     def _prepare_query_vectors(
         self,
@@ -1048,6 +1052,10 @@ class SearchEngine:
             )
             for video in videos
         }
+        visual_cohorts = self._visual_publication_cohorts(
+            videos,
+            requested_by_video,
+        )
         if profiler:
             profiler.increment("scope", "selected_videos", len(videos))
             profiler.increment(
@@ -1055,9 +1063,22 @@ class SearchEngine:
                 "configured_candidate_workers",
                 self.settings.milvus_search_max_workers,
             )
+            profiler.increment(
+                "scope",
+                "visual_publications",
+                sum(len(cohort) for cohort in visual_cohorts.values()),
+            )
+            profiler.increment(
+                "scope",
+                "visual_model_cohorts",
+                len(visual_cohorts),
+            )
+            for _model_key in visual_cohorts:
+                profiler.increment("planned_rpc", "visual")
             for requested_modalities in requested_by_video.values():
                 for modality in requested_modalities:
-                    profiler.increment("planned_rpc", modality)
+                    if modality != "visual":
+                        profiler.increment("planned_rpc", modality)
         self._prepare_query_vectors(
             videos,
             text=text,
@@ -1095,13 +1116,39 @@ class SearchEngine:
                     video,
                     text=text,
                     modalities=[modality],
-                    visual_profile=visual_profile,
-                    visual_queries=visual_queries,
                     face_query=face_query,
                     channel_limits=resolved_channel_limits,
                     semantic_queries=semantic_queries,
                     profiler=profiler,
                     client=milvus_client,
+                )
+
+        def visual_recall_task(
+            model_key: str,
+            publication_versions: dict[str, str],
+        ) -> list[Candidate]:
+            from app.vector_store.milvus.milvus_search import (
+                milvus_visual_candidates_global,
+            )
+
+            query = visual_queries.get(model_key)
+            if query is None:
+                raise RuntimeError(
+                    f"visual query vector was not prepared for model={model_key}"
+                )
+            scoring_span = (
+                profiler.span("local_processing", "visual_scoring")
+                if profiler
+                else nullcontext()
+            )
+            with scoring_span:
+                return milvus_visual_candidates_global(
+                    milvus_client,
+                    query,
+                    publication_versions,
+                    profile=visual_profile,
+                    limit=resolved_channel_limits["visual"],
+                    profiler=profiler,
                 )
 
         max_workers = self.settings.milvus_search_max_workers
@@ -1118,20 +1165,34 @@ class SearchEngine:
                 batch_size = self.settings.milvus_search_video_batch_size
                 for batch_offset in range(0, len(videos), batch_size):
                     batch_videos = videos[batch_offset:batch_offset + batch_size]
-                    ordered_tasks = [
-                        (video, modality)
+                    ordered_tasks = []
+                    if batch_offset == 0:
+                        ordered_tasks.extend(
+                            (
+                                "visual",
+                                partial(
+                                    visual_recall_task,
+                                    model_key,
+                                    publication_versions,
+                                ),
+                            )
+                            for model_key, publication_versions in visual_cohorts.items()
+                        )
+                    ordered_tasks.extend(
+                        (
+                            modality,
+                            partial(recall_task, video, modality),
+                        )
                         for video in batch_videos
                         for modality in sorted(requested_by_video[video["id"]])
-                    ]
+                        if modality != "visual"
+                    )
                     if executor is None:
-                        batch_results = [
-                            recall_task(video, modality)
-                            for video, modality in ordered_tasks
-                        ]
+                        batch_results = [task() for _, task in ordered_tasks]
                     else:
                         futures = [
-                            executor.submit(recall_task, video, modality)
-                            for video, modality in ordered_tasks
+                            executor.submit(task)
+                            for _, task in ordered_tasks
                         ]
                         try:
                             # Never collect via as_completed(): insertion order is
@@ -1142,7 +1203,7 @@ class SearchEngine:
                                 future.cancel()
                             raise
 
-                    for (_, modality), modality_candidates in zip(
+                    for (modality, _task), modality_candidates in zip(
                         ordered_tasks,
                         batch_results,
                         strict=True,

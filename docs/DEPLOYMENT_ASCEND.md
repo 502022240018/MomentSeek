@@ -96,7 +96,7 @@ Docker 网络。
 
 ```dotenv
 VISUAL_USE_DISKANN=true
-VISUAL_ANN_TOP_K=500
+VISUAL_ANN_TOP_K=2000
 VISUAL_ANN_SEGMENT_TOP_N=3
 SEARCH_VISUAL_PRIORITY_ENABLED=true
 ```
@@ -104,8 +104,8 @@ SEARCH_VISUAL_PRIORITY_ENABLED=true
 `VISUAL_USE_DISKANN` 必须与现有 visual collection 的实际索引类型一致：
 DiskANN 使用 `true`，HNSW 使用 `false`。改变此值不会迁移已有索引；必须先
 在维护窗口重建 collection，再更新配置并启动应用。`VISUAL_ANN_TOP_K` 为每个
-子查询的 ANN 召回数量，`VISUAL_ANN_SEGMENT_TOP_N` 为一个时间段参与聚合的帧数；
-两者必须是正整数。
+子查询、每个兼容视觉模型 cohort 的全局 ANN 召回数量，范围为 1..16383；
+`VISUAL_ANN_SEGMENT_TOP_N` 为一个时间段参与聚合的帧数，必须是正整数。
 
 默认开启 `SEARCH_VISUAL_PRIORITY_ENABLED`：当一次检索明确包含 `visual` 通道时，
 先按“是否超过阈值”分层，再在同一层内将含视觉证据的结果排在纯 Face、ASR 或 OCR
