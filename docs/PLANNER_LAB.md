@@ -96,3 +96,18 @@ Python/NPU 依赖和编排 Profile，只替换应用代码、新 prompt 与前�
 脚本要求显式提供 `BASE_IMAGE`，默认使用容器名
 `momentseek-29154-snapmind-planner-lab`、端口 8010 和 NPU 2；它会保留旧容器作为备份，
 健康检查或能力接口失败时自动恢复，不会修改正式 8000 容器。
+
+Visual ANN 实验值通过部署专用变量传入。例如只让本次 Planner Lab 运行 K=1000：
+
+```bash
+PLANNER_LAB_VISUAL_ANN_TOP_K=1000 \
+BASE_IMAGE=momentseek-29154-platform:validated \
+bash scripts/deploy_ascend_planner_lab.sh
+```
+
+脚本校验范围为 `1..16383`，并在 `--env-file` 之后把它映射为应用实际读取的
+`VISUAL_ANN_TOP_K`；没有显式传值时依次采用当前 `VISUAL_ANN_TOP_K` 或代码实验默认
+2000，因此不会把全平台默认永久改为 1000。`PLANNER_LAB_RELEASE_ID` 和
+`PLANNER_LAB_GIT_COMMIT` 可显式指定；否则脚本分别从镜像 tag 和当前 Git HEAD 推导，
+`IMAGE_TAG` 始终记录实际启动的覆盖层镜像。部署成功前会同时核对容器环境和
+`/api/health` 返回的 release、git、image 元数据，失败则恢复备份容器。
