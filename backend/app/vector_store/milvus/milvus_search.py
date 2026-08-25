@@ -42,8 +42,11 @@ from app.vector_store.milvus.row_contract import (
 if TYPE_CHECKING:
     from app.vector_store.milvus.milvus_client import MilvusClient
 
-# Visual modality optimization: ANN + sampling implementation (v2)
-from .milvus_search_visual_v2 import milvus_visual_candidates_ann
+# Visual modality ANN implementation.
+from .milvus_search_visual_v2 import (
+    milvus_visual_candidates_ann,
+    milvus_visual_candidates_global_ann,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +364,27 @@ def milvus_visual_candidates(
 
     return milvus_visual_candidates_ann(
         client, video_id, asset_version, query_texts, limit, profile, profiler
+    )
+
+
+def milvus_visual_candidates_global(
+    client: MilvusClient,
+    query: np.ndarray,
+    publication_versions: dict[str, str],
+    *,
+    profile: str = "balanced",
+    limit: int = 72,
+    profiler: RetrievalProfiler | None = None,
+) -> list[Candidate]:
+    """Recall Visual candidates from one compatible publication cohort."""
+    query_texts = [query] if query.ndim == 1 else list(query)
+    return milvus_visual_candidates_global_ann(
+        client,
+        publication_versions,
+        query_texts,
+        limit,
+        profile,
+        profiler,
     )
 
 

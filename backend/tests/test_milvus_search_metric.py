@@ -109,6 +109,8 @@ def test_visual_ann_uses_supported_retrieval_profiler_api():
     hit = MagicMock()
     hit.distance = 0.85
     hit.entity.get.side_effect = lambda field, default=None: {
+        "video_id": "test-video",
+        "asset_version": "7",
         "frame_idx": 0,
         "timestamp_ms": 200,
         "segment_id": 0,

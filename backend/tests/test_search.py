@@ -683,22 +683,29 @@ def test_query_model_status_reads_encoder_maps_under_lock(tmp_path):
     assert status["text_models"] == ["text-a"]
 
 
-def _make_visual_index(settings, catalog, video_id="v-shadow"):
+def _make_visual_index(
+    settings,
+    catalog,
+    video_id="v-shadow",
+    *,
+    model_key="siglip2-so400m-384",
+    asset_version="1",
+):
     """Create a minimal published visual index for Milvus search tests."""
     _create_video(settings, catalog, video_id=video_id, duration=20)
     _publish(catalog, video_id, {
         "visual": {
-            "model_key": "siglip2-so400m-384",
+            "model_key": model_key,
             "embedding_space": "siglip2-image-text",
             "sample_fps": 5.0,
             "decode_status": "complete",
-            "milvus_asset_version": "1",
+            "milvus_asset_version": asset_version,
         }
     }, duration_ms=20000)
     return video_id
 
 
-def test_milvus_search_scores_each_selected_video_once(tmp_path):
+def test_visual_search_uses_one_global_rpc_for_one_model_cohort(tmp_path):
     from unittest.mock import patch
 
     settings = _settings(tmp_path)
@@ -709,24 +716,217 @@ def test_milvus_search_scores_each_selected_video_once(tmp_path):
         for index in range(3)
     ]
     engine = SearchEngine(settings, catalog)
-    events = []
+    profiler = RetrievalProfiler()
+    def fake_prepare(*_args, **kwargs):
+        kwargs["visual_queries"]["siglip2-so400m-384"] = np.ones(
+            (1, 2), dtype=np.float32
+        )
 
-    def fake_candidates(video, **_kwargs):
-        events.append(("score", video["id"]))
-        return [Candidate(video["id"], 0.0, 1.0, 0.8, "visual")]
+    def fake_global(_client, _query, publication_versions, **_kwargs):
+        first_video = next(iter(publication_versions))
+        return [Candidate(first_video, 0.0, 1.0, 0.8, "visual")]
 
     with (
-        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(engine, "_prepare_query_vectors", side_effect=fake_prepare),
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
             engine,
             "_milvus_candidates_for_video",
-            side_effect=fake_candidates,
-        ),
+        ) as per_video_search,
+        patch(
+            "app.vector_store.milvus.milvus_search.milvus_visual_candidates_global",
+            side_effect=fake_global,
+        ) as global_search,
     ):
-        engine.search("football", None, ["visual"])
+        engine.search("football", None, ["visual"], profiler=profiler)
 
-    assert sorted(events) == sorted(("score", video_id) for video_id in video_ids)
+    per_video_search.assert_not_called()
+    global_search.assert_called_once()
+    assert global_search.call_args.args[2] == {
+        video_id: "1" for video_id in sorted(video_ids)
+    }
+    counters = profiler.snapshot()["counters"]
+    assert counters["scope"]["visual_publications"] == 3
+    assert counters["scope"]["visual_model_cohorts"] == 1
+    assert counters["planned_rpc"]["visual"] == 1
+
+
+def test_visual_search_uses_one_global_rpc_per_model_cohort(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    catalog = Catalog(settings.db_path)
+    video_a = _make_visual_index(
+        settings,
+        catalog,
+        video_id="model-a-video",
+        model_key="visual-model-a",
+        asset_version="11",
+    )
+    video_b = _make_visual_index(
+        settings,
+        catalog,
+        video_id="model-b-video",
+        model_key="visual-model-b",
+        asset_version="22",
+    )
+    engine = SearchEngine(settings, catalog)
+    profiler = RetrievalProfiler()
+
+    def fake_prepare(*_args, **kwargs):
+        kwargs["visual_queries"].update({
+            "visual-model-a": np.ones((1, 2), dtype=np.float32),
+            "visual-model-b": np.ones((1, 2), dtype=np.float32),
+        })
+
+    with (
+        patch.object(engine, "_prepare_query_vectors", side_effect=fake_prepare),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(engine, "_milvus_candidates_for_video") as per_video_search,
+        patch(
+            "app.vector_store.milvus.milvus_search.milvus_visual_candidates_global",
+            return_value=[],
+        ) as global_search,
+    ):
+        engine.search(
+            "football",
+            None,
+            ["visual"],
+            [video_a, video_b],
+            profiler=profiler,
+        )
+
+    per_video_search.assert_not_called()
+    assert global_search.call_count == 2
+    scopes = [call.args[2] for call in global_search.call_args_list]
+    assert scopes == [{video_a: "11"}, {video_b: "22"}]
+    counters = profiler.snapshot()["counters"]
+    assert counters["scope"]["visual_publications"] == 2
+    assert counters["scope"]["visual_model_cohorts"] == 2
+    assert counters["planned_rpc"]["visual"] == 2
+
+
+def test_global_visual_and_per_video_text_channels_share_one_executor(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    settings.milvus_search_video_batch_size = 2
+    settings.milvus_search_max_workers = 5
+    catalog = Catalog(settings.db_path)
+    video_ids = [
+        _make_visual_index(settings, catalog, video_id=f"shared-{index}")
+        for index in range(2)
+    ]
+    engine = SearchEngine(settings, catalog)
+    barrier = threading.Barrier(5)
+    lock = threading.Lock()
+    active = 0
+    peak_active = 0
+    started = []
+
+    def participate(task):
+        nonlocal active, peak_active
+        with lock:
+            started.append(task)
+            active += 1
+            peak_active = max(peak_active, active)
+        barrier.wait(timeout=5)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+
+    def fake_prepare(*_args, **kwargs):
+        kwargs["visual_queries"]["siglip2-so400m-384"] = np.ones(
+            (1, 2), dtype=np.float32
+        )
+
+    def fake_global(_client, _query, publication_versions, **_kwargs):
+        participate(("global", tuple(publication_versions)))
+        return [
+            Candidate(next(iter(publication_versions)), 0.0, 1.0, 0.8, "visual")
+        ]
+
+    def fake_per_video(video, **kwargs):
+        modality = kwargs["modalities"][0]
+        participate((modality, video["id"]))
+        return [Candidate(video["id"], 0.0, 1.0, 0.7, modality)]
+
+    with (
+        patch.object(
+            engine,
+            "_requested_indexed_modalities",
+            return_value={"visual", "asr", "ocr"},
+        ),
+        patch.object(engine, "_prepare_query_vectors", side_effect=fake_prepare),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_milvus_candidates_for_video",
+            side_effect=fake_per_video,
+        ),
+        patch(
+            "app.vector_store.milvus.milvus_search.milvus_visual_candidates_global",
+            side_effect=fake_global,
+        ),
+        patch("app.retrieval.search._fuse_candidate_groups", return_value=[]),
+    ):
+        assert engine.search(
+            "football",
+            None,
+            ["visual", "asr", "ocr"],
+            video_ids,
+        ) == []
+
+    assert peak_active == 5
+    assert {task[0] for task in started} == {"global", "asr", "ocr"}
+    assert sum(task[0] == "global" for task in started) == 1
+    assert sum(task[0] == "asr" for task in started) == 2
+    assert sum(task[0] == "ocr" for task in started) == 2
+
+
+def test_shared_visual_and_text_executor_fails_closed_on_global_error(tmp_path):
+    from unittest.mock import patch
+
+    settings = _settings(tmp_path)
+    settings.milvus_search_video_batch_size = 1
+    settings.milvus_search_max_workers = 3
+    catalog = Catalog(settings.db_path)
+    video_id = _make_visual_index(settings, catalog, video_id="global-failure")
+    engine = SearchEngine(settings, catalog)
+
+    def fake_prepare(*_args, **kwargs):
+        kwargs["visual_queries"]["siglip2-so400m-384"] = np.ones(
+            (1, 2), dtype=np.float32
+        )
+
+    with (
+        patch.object(
+            engine,
+            "_requested_indexed_modalities",
+            return_value={"visual", "asr", "ocr"},
+        ),
+        patch.object(engine, "_prepare_query_vectors", side_effect=fake_prepare),
+        patch.object(engine, "_get_milvus_client", return_value=object()),
+        patch.object(
+            engine,
+            "_milvus_candidates_for_video",
+            return_value=[],
+        ),
+        patch(
+            "app.vector_store.milvus.milvus_search.milvus_visual_candidates_global",
+            side_effect=RuntimeError("global visual failed"),
+        ),
+        patch("app.retrieval.search._fuse_candidate_groups") as fusion_mock,
+    ):
+        with pytest.raises(RuntimeError, match="global visual failed"):
+            engine.search(
+                "football",
+                None,
+                ["visual", "asr", "ocr"],
+                [video_id],
+            )
+
+    fusion_mock.assert_not_called()
 
 
 @pytest.mark.parametrize("workers", [4, 8])
@@ -749,7 +949,7 @@ def test_bounded_milvus_concurrency_preserves_task_collection_order(
     expected_order = [
         (video_id, modality)
         for video_id in selected_ids
-        for modality in ("ocr", "visual")
+        for modality in ("asr", "ocr")
     ]
     barrier = threading.Barrier(len(expected_order))
     lock = threading.Lock()
@@ -783,7 +983,7 @@ def test_bounded_milvus_concurrency_preserves_task_collection_order(
         patch.object(
             engine,
             "_requested_indexed_modalities",
-            return_value={"visual", "ocr"},
+            return_value={"asr", "ocr"},
         ),
         patch.object(engine, "_prepare_query_vectors"),
         patch.object(engine, "_get_milvus_client", return_value=object()),
@@ -800,7 +1000,7 @@ def test_bounded_milvus_concurrency_preserves_task_collection_order(
         assert engine.search(
             "football",
             None,
-            ["visual", "ocr"],
+            ["asr", "ocr"],
             video_ids,
             profiler=profiler,
         ) == []
@@ -814,7 +1014,7 @@ def test_bounded_milvus_concurrency_preserves_task_collection_order(
         == workers
     )
     assert (
-        snapshot["timing_stats"]["local_processing"]["visual_scoring"]["count"]
+        snapshot["timing_stats"]["local_processing"]["asr_scoring"]["count"]
         == video_count
     )
     assert (
@@ -837,7 +1037,7 @@ def test_workers_1_4_8_produce_identical_search_json(tmp_path):
     def fake_candidates(video, **kwargs):
         index = int(video["id"].rsplit("-", 1)[1])
         modality = kwargs["modalities"][0]
-        score = 0.8 if modality == "visual" else 0.6 + index * 0.01
+        score = 0.8 if modality == "asr" else 0.6 + index * 0.01
         return [Candidate(
             video_id=video["id"],
             start_time=float(index * 10),
@@ -846,7 +1046,7 @@ def test_workers_1_4_8_produce_identical_search_json(tmp_path):
             modality=modality,
             evidence=f"{video['id']}:{modality}",
             raw_score=score,
-            unit_type="segment" if modality == "visual" else "frame",
+            unit_type="segment" if modality == "asr" else "frame",
             unit_id=index,
         )]
 
@@ -855,7 +1055,7 @@ def test_workers_1_4_8_produce_identical_search_json(tmp_path):
         patch.object(
             engine,
             "_requested_indexed_modalities",
-            return_value={"visual", "ocr"},
+            return_value={"asr", "ocr"},
         ),
         patch.object(engine, "_prepare_query_vectors"),
         patch.object(engine, "_get_milvus_client", return_value=object()),
@@ -870,7 +1070,7 @@ def test_workers_1_4_8_produce_identical_search_json(tmp_path):
             outputs[workers] = engine.search(
                 "football",
                 None,
-                ["visual", "ocr"],
+                ["asr", "ocr"],
                 video_ids,
             )
 
@@ -895,13 +1095,13 @@ def test_bounded_milvus_concurrency_remains_fail_closed(tmp_path):
         if video["id"] == failing_video_id:
             raise RuntimeError("milvus task failed")
         time.sleep(0.01)
-        return [Candidate(video["id"], 0.0, 1.0, 0.8, "visual")]
+        return [Candidate(video["id"], 0.0, 1.0, 0.8, "ocr")]
 
     with (
         patch.object(
             engine,
             "_requested_indexed_modalities",
-            return_value={"visual"},
+            return_value={"ocr"},
         ),
         patch.object(engine, "_prepare_query_vectors"),
         patch.object(engine, "_get_milvus_client", return_value=object()),
@@ -913,7 +1113,7 @@ def test_bounded_milvus_concurrency_remains_fail_closed(tmp_path):
         patch("app.retrieval.search._fuse_candidate_groups") as fusion_mock,
     ):
         with pytest.raises(RuntimeError, match="milvus task failed"):
-            engine.search("football", None, ["visual"], video_ids)
+            engine.search("football", None, ["ocr"], video_ids)
 
     fusion_mock.assert_not_called()
 
@@ -941,16 +1141,21 @@ def test_query_encoding_finishes_before_local_candidate_scoring(tmp_path):
         lambda _model=None, _profiler=None: StubClip()
     )
 
-    def fake_candidates(video, **_kwargs):
+    def fake_global(_client, _query, publication_versions, **_kwargs):
         events.append("score")
-        return [Candidate(video["id"], 0.0, 1.0, 0.8, "visual")]
+        return [
+            Candidate(next(iter(publication_versions)), 0.0, 1.0, 0.8, "visual")
+        ]
 
     with (
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
             engine,
             "_milvus_candidates_for_video",
-            side_effect=fake_candidates,
+        ) as per_video_search,
+        patch(
+            "app.vector_store.milvus.milvus_search.milvus_visual_candidates_global",
+            side_effect=fake_global,
         ),
     ):
         engine.search(
@@ -961,6 +1166,7 @@ def test_query_encoding_finishes_before_local_candidate_scoring(tmp_path):
             profiler=profiler,
         )
 
+    per_video_search.assert_not_called()
     assert events == ["encode", "score"]
     snapshot = profiler.snapshot()
     timing = snapshot["timing"]
@@ -992,16 +1198,26 @@ def test_milvus_publication_is_the_online_retrieval_source(tmp_path):
     )
 
     with (
-        patch.object(engine, "_prepare_query_vectors"),
+        patch.object(
+            engine,
+            "_prepare_query_vectors",
+            side_effect=lambda *_args, **kwargs: kwargs["visual_queries"].update({
+                "siglip2-so400m-384": np.ones((1, 2), dtype=np.float32)
+            }),
+        ),
         patch.object(engine, "_get_milvus_client", return_value=object()),
         patch.object(
             engine,
             "_milvus_candidates_for_video",
+        ) as per_video_search,
+        patch(
+            "app.vector_store.milvus.milvus_search.milvus_visual_candidates_global",
             return_value=[milvus_hit],
-        ) as milvus_search,
+        ) as global_search,
     ):
         results = engine.search("football", None, ["visual"], [video_id])
 
-    milvus_search.assert_called_once()
+    per_video_search.assert_not_called()
+    global_search.assert_called_once()
     assert results[0]["start_time"] == 5.0
     assert results[0]["evidence"][0]["features"] == {}
