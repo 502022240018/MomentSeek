@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 import uuid
@@ -9,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.orchestration.retrieval_orchestration import (
     OrchestrationError,
@@ -19,6 +20,9 @@ from app.orchestration.retrieval_orchestration import (
     _extract_json_object,
 )
 from app.retrieval.search import face_confidence
+
+
+logger = logging.getLogger(__name__)
 
 
 PlanMode = Literal["guide", "assist", "auto"]
@@ -69,6 +73,15 @@ class PlanStep(BaseModel):
                 self.role = "constraint"
             else:
                 self.role = "primary"
+
+        # Infer operation from tool_id if not specified
+        if self.operation is None:
+            if self.tool_id == "vlm.rerank":
+                self.operation = "rerank"
+            elif self.tool_id == "confidence.filter":
+                self.operation = "filter"
+            else:
+                self.operation = "search"
 
         self.target_id = self.target_id.strip() or "main"
         self.depends_on = list(dict.fromkeys(item.strip() for item in self.depends_on if item.strip()))
@@ -917,6 +930,12 @@ class SnapMindPlannerLab:
                     fallback_for = step.get("fallback_for")
                     if isinstance(fallback_for, str):
                         step["fallback_for"] = id_map.get(fallback_for, fallback_for)
+                    # Lift query/weight/top_k from parameters to top level (backward compatibility)
+                    parameters = step.get("parameters")
+                    if isinstance(parameters, dict):
+                        for field_name in ("query", "weight", "top_k"):
+                            if field_name in parameters:
+                                step[field_name] = parameters.pop(field_name)
                     parameters = step.get("parameters")
                     if isinstance(parameters, dict):
                         for field_name in ("query", "weight", "top_k"):
@@ -1144,14 +1163,30 @@ class SnapMindPlannerLab:
                             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
                         ],
                         "temperature": 0,
-                        "max_tokens": profile.planner.max_tokens,  # read from profile, not hardcoded
+                        "max_tokens": getattr(profile.planner, "max_tokens", None) or 2200,
                         "response_format": {"type": "json_object"},  # FSM constraint disabled; Pydantic validates downstream
                         "chat_template_kwargs": {"enable_thinking": False},
                     }
                 )
                 content = response["choices"][0]["message"]["content"]
                 raw_plan_set = self._normalize_llm_payload(_extract_json_object(content))
-                plan_set = PlanSet.model_validate(raw_plan_set)
+
+                # Validate LLM output with detailed error logging
+                try:
+                    plan_set = PlanSet.model_validate(raw_plan_set)
+                except ValidationError as exc:
+                    logger.error(
+                        "PlanSet validation failed - LLM output does not match schema",
+                        extra={
+                            "validation_errors": exc.errors(),
+                            "error_count": len(exc.errors()),
+                            "raw_output_preview": content[:500],
+                            "query": query,
+                            "profile": profile_name,
+                        }
+                    )
+                    # Re-raise to trigger fallback mechanism
+                    raise
                 plan_set = self._sanitize_plan_set(
                     plan_set,
                     available,
