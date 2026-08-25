@@ -116,6 +116,7 @@ async def propose_plans(
     folder_ids: str | None = Form(default=None),
     mode: str = Form(default="assist"),
     orchestration_profile: str | None = Form(default=None),
+    force_llm: bool | None = Form(default=None),
 ) -> dict:
     _ensure_enabled()
     query = query_text.strip()
@@ -138,6 +139,7 @@ async def propose_plans(
             has_query_image=bool(query_image and query_image.filename),
             profile_name=orchestration_profile,
             voice_reference=trusted_voice_reference,
+            force_llm=force_llm,
         )
     except OrchestrationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

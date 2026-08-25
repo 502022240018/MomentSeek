@@ -8,6 +8,7 @@ BASE_IMAGE="${BASE_IMAGE:?Set BASE_IMAGE to a validated Planner Lab or platform 
 IMAGE_TAG="${IMAGE_TAG:-momentseek-29154-platform:snapmind-planner-lab-$(date +%Y%m%d-%H%M%S)}"
 NPU_DEVICE="${NPU_DEVICE:-2}"
 APP_PORT="${APP_PORT:-8010}"
+PLANNER_LAB_ORCHESTRATION_ENABLED="${PLANNER_LAB_ORCHESTRATION_ENABLED:-true}"
 ENV_FILE="${ENV_FILE:-${WORK_ROOT}/builds/planner-lab/container.env}"
 RUNTIME_DIR="${RUNTIME_DIR:-${WORK_ROOT}/runtime}"
 MODEL_DIR="${MODEL_DIR:-${WORK_ROOT}/models/platform}"
@@ -56,6 +57,7 @@ if ! docker run -d \
   --restart unless-stopped \
   --env-file "$ENV_FILE" \
   -e "APP_PORT=$APP_PORT" \
+  -e "ORCHESTRATION_ENABLED=$PLANNER_LAB_ORCHESTRATION_ENABLED" \
   --device "/dev/davinci${NPU_DEVICE}:/dev/davinci${NPU_DEVICE}" \
   --device /dev/davinci_manager:/dev/davinci_manager \
   --device /dev/devmm_svm:/dev/devmm_svm \

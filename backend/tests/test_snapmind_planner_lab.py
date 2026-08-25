@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from fastapi import HTTPException
 
+from app.api import planner_lab_routes
 from app.api.planner_lab_routes import _voice_exclude, _voice_reference
 from app.orchestration.retrieval_orchestration import OrchestrationError
 from app.orchestration.snapmind_lab import (
@@ -113,6 +114,43 @@ def test_upload_voice_reference_is_deferred_during_planning_but_required_for_exe
     assert reference.kind == "upload"
     with pytest.raises(HTTPException, match="upload 声音引用必须附带音频文件"):
         _voice_reference(value, None, require_upload=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force_llm", [True, False])
+async def test_plans_route_forwards_force_llm_to_planner(monkeypatch, force_llm):
+    observed = {}
+    monkeypatch.setattr(planner_lab_routes, "_ensure_enabled", lambda: None)
+    monkeypatch.setattr(
+        planner_lab_routes,
+        "_scope",
+        lambda _videos, _folders: (None, {"resolved_video_count": 0}),
+    )
+    monkeypatch.setattr(
+        planner_lab_routes,
+        "_voice_reference",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def propose(**kwargs):
+        observed.update(kwargs)
+        return {"plans": []}
+
+    monkeypatch.setattr(planner_lab_routes.planner_lab, "propose", propose)
+
+    await planner_lab_routes.propose_plans(
+        query_text="一名女子在采访间讲话",
+        query_image=None,
+        query_audio=None,
+        voice_reference=None,
+        video_ids=None,
+        folder_ids=None,
+        mode="assist",
+        orchestration_profile=None,
+        force_llm=force_llm,
+    )
+
+    assert observed["force_llm"] is force_llm
 
 
 def test_only_utterance_voice_reference_excludes_its_seed_from_planner_results():
@@ -889,6 +927,95 @@ def test_face_primary_keeps_global_recall_behavior():
     assert outcome["results"][0]["start_time"] == 40
 
 
+def test_trusted_face_support_uses_surviving_pool_when_first_primary_fails(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    face_calls = []
+
+    def search(_query, _image, step, _videos):
+        if step.tool_id == "visual.search":
+            return []
+        if step.tool_id == "asr.search":
+            return [_result("asr", 50, 0.8)]
+        raise AssertionError(f"unexpected global search: {step.tool_id}")
+
+    def face_support(_query, _image, nodes, _step):
+        face_calls.append([node.start_time for node in nodes])
+        return [_result("face", 50, 0.9)], {"status": "ok"}
+
+    monkeypatch.setattr(lab, "_search_step", search)
+    monkeypatch.setattr(lab, "_face_support_step", face_support)
+    face = _step("face", "face.search").model_copy(update={
+        "role": "support",
+        "depends_on": [],
+        "query": "姜妍",
+        "parameters": {"trusted_identity": True},
+    })
+    plan = CandidatePlan(
+        plan_id="balanced",
+        label="Balanced",
+        description="test",
+        estimated_cost="medium",
+        steps=[
+            _step("visual", "visual.search"),
+            _step("asr", "asr.search"),
+            face,
+        ],
+    )
+
+    outcome = lab.execute("姜妍说林大厨像家长一样", None, plan, None)
+
+    assert [item["decision"] for item in outcome["trace"]] == [
+        "skipped",
+        "accepted",
+        "accepted",
+    ]
+    assert face_calls == [[50]]
+    assert outcome["results"][0]["modalities"] == ["asr", "face"]
+
+
+def test_ranking_stability_cannot_skip_trusted_face_support(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    face_calls = []
+
+    def stable_search(_query, _image, step, _videos):
+        modality = step.tool_id.split(".", 1)[0]
+        return [_result(modality, 10, 0.9), _result(modality, 30, 0.2)]
+
+    def face_support(_query, _image, nodes, _step):
+        face_calls.append(True)
+        return [
+            _result("face", node.start_time, 0.9 - index * 0.1)
+            for index, node in enumerate(nodes)
+        ], {"status": "ok"}
+
+    monkeypatch.setattr(lab, "_search_step", stable_search)
+    monkeypatch.setattr(lab, "_face_support_step", face_support)
+    face = _step("face", "face.search").model_copy(update={
+        "role": "support",
+        "depends_on": [],
+        "query": "姜妍",
+        "parameters": {"trusted_identity": True},
+    })
+    plan = CandidatePlan(
+        plan_id="deep",
+        label="Deep",
+        description="test",
+        estimated_cost="high",
+        early_stop_threshold=0.9,
+        steps=[
+            _step("visual", "visual.search"),
+            _step("asr", "asr.search"),
+            face,
+        ],
+    )
+
+    outcome = lab.execute("姜妍在采访间反思菜品标准", None, plan, None)
+
+    assert outcome["trace"][1]["early_stop_blocked_by"] == ["face"]
+    assert outcome["executed_steps"] == 3
+    assert face_calls == [True]
+
+
 def test_failed_primary_triggers_explicit_fallback(monkeypatch):
     lab = SnapMindPlannerLab(FakeOrchestrator())
     monkeypatch.setattr(
@@ -1133,6 +1260,219 @@ def test_registered_compound_identity_uses_candidate_window_face_and_bounded_rer
         assert steps[2]["parameters"]["candidate_pool"] == "face_evidence"
         assert steps[2]["parameters"]["include_face_statuses"] == [
             "confirmed", "ambiguous",
+        ]
+
+
+def test_force_llm_uses_qwen_plan_and_keeps_trusted_identity_guards(tmp_path):
+    query = "穿米色开衫女子（姜妍）在采访间讲述对菜品标准的反思"
+    generated = HeuristicPlanGenerator().generate(
+        query,
+        ["visual", "face", "asr", "speaker"],
+        False,
+        True,
+    )
+    generated.identity_mentions = [IdentityMention(
+        name="姜妍",
+        visual_fallback_query="穿米色开衫女子在采访间讲述对菜品标准的反思",
+        rationale="查询包含已注册人物和复合语义条件",
+    )]
+    for plan in generated.plans:
+        visual = _step("visual", "visual.search").model_copy(update={
+            "query": "穿米色开衫女子在采访间",
+            "role": "support",
+            "depends_on": ["face"],
+        })
+        face = _step("face", "face.search").model_copy(update={
+            "query": "姜妍",
+            "role": "primary",
+            "top_k": 300,
+            "parameters": {
+                "identity_threshold": 0.0,
+                "ambiguous_threshold": 0.0,
+                "window_padding_seconds": 30.0,
+            },
+        })
+        voice = _step("voice", "voice.search").model_copy(update={
+            "query": "姜妍",
+            "role": "support",
+            "depends_on": ["face"],
+        })
+        asr = _step("asr", "asr.search").model_copy(update={
+            "query": "讲述对菜品标准的反思",
+            "role": "support",
+            "depends_on": ["visual"],
+        })
+        plan.steps = [face, voice, visual, asr]
+        plan.description = "Qwen 选择视觉主召回并用 ASR 补充抽象语义。"
+
+    class FakeProvider:
+        descriptor = {
+            "provider": "qwen35-planner",
+            "type": "openai-compatible",
+            "model": "qwen3.5-4b",
+        }
+
+        def __init__(self):
+            self.requests = []
+
+        def chat(self, payload):
+            self.requests.append(payload)
+            return {
+                "choices": [{"message": {"content": generated.model_dump_json()}}]
+            }, 0.125
+
+    provider = FakeProvider()
+    orchestrator = FakeOrchestrator(
+        orchestration_enabled=True,
+        entity={"id": "person-1", "name": "姜妍"},
+        modalities=["visual", "face", "asr", "speaker"],
+    )
+    prompt = tmp_path / "planner.txt"
+    prompt.write_text("Return a strict plan set.", encoding="utf-8")
+    orchestrator.settings.resolve_path = lambda _value: prompt
+    orchestrator._profile = lambda _name: (
+        "qwen35-unified",
+        SimpleNamespace(planner=SimpleNamespace(provider="qwen35-planner")),
+    )
+    orchestrator._provider = lambda _name: provider
+
+    proposal = SnapMindPlannerLab(orchestrator).propose(
+        query,
+        "assist",
+        None,
+        False,
+        voice_reference=VoiceReference(
+            kind="entity",
+            entity_id="person-1",
+            label="姜妍",
+        ),
+        force_llm=True,
+    )
+
+    assert len(provider.requests) == 1
+    assert proposal["planner_trace"]["status"] == "ok"
+    assert proposal["planner_trace"]["planner"] == "qwen3.5-vllm"
+    assert proposal["planner_trace"]["model"] == "qwen3.5-4b"
+    for raw_plan in proposal["plans"]:
+        tools = [step["tool_id"] for step in raw_plan["steps"]]
+        assert tools == ["visual.search", "face.search", "asr.search", "voice.search"]
+        face = raw_plan["steps"][1]
+        assert face["role"] == "support"
+        assert face["depends_on"] == []
+        assert face["top_k"] == 100
+        assert face["parameters"]["identity_threshold"] == pytest.approx(0.35)
+        assert face["parameters"]["ambiguous_threshold"] == pytest.approx(0.20)
+        assert face["parameters"]["window_padding_seconds"] == pytest.approx(0.0)
+        assert face["parameters"]["trusted_identity"] is True
+        assert raw_plan["steps"][2]["query"] == "讲述对菜品标准的反思"
+        assert raw_plan["steps"][3]["role"] == "support"
+        SnapMindPlannerLab._validate_plan(CandidatePlan.model_validate(raw_plan))
+
+
+def test_force_llm_reports_explicit_fallback_when_qwen_is_disabled():
+    orchestrator = FakeOrchestrator(
+        entity={"id": "person-1", "name": "姜妍"},
+        modalities=["visual", "face", "asr"],
+    )
+
+    proposal = SnapMindPlannerLab(orchestrator).propose(
+        "姜妍说林大厨像家长一样",
+        "assist",
+        None,
+        False,
+        force_llm=True,
+    )
+
+    assert proposal["planner_trace"]["status"] == "fallback"
+    assert proposal["planner_trace"]["requested_planner"] == "qwen3.5-vllm"
+    assert proposal["planner_trace"]["reason"] == "qwen_planner_not_enabled"
+    assert proposal["planner_trace"]["model_call_skipped"] is True
+    assert any(
+        step["tool_id"] == "face.search"
+        for plan in proposal["plans"]
+        for step in plan["steps"]
+    )
+
+
+def test_explicit_fast_template_skips_qwen_for_ordinary_query():
+    orchestrator = FakeOrchestrator(
+        orchestration_enabled=True,
+        modalities=["visual", "asr", "ocr"],
+    )
+
+    proposal = SnapMindPlannerLab(orchestrator).propose(
+        "一名女子在采访间讲述菜品标准",
+        "assist",
+        None,
+        False,
+        force_llm=False,
+    )
+
+    assert proposal["planner_trace"] == {
+        "status": "ok",
+        "planner": "heuristic-v1",
+        "model_call_skipped": True,
+        "reason": "user_selected_fast_template",
+        "elapsed_seconds": 0.0,
+    }
+    assert len(proposal["plans"]) == 3
+
+
+def test_force_llm_sanitizer_failure_fails_open_to_identity_template(
+    tmp_path,
+    monkeypatch,
+):
+    query = "姜妍说林大厨像家长一样"
+    generated = HeuristicPlanGenerator().generate(
+        query,
+        ["visual", "face", "asr"],
+        False,
+    )
+
+    class FakeProvider:
+        descriptor = {
+            "provider": "qwen35-planner",
+            "type": "openai-compatible",
+            "model": "qwen3.5-4b",
+        }
+
+        def chat(self, _payload):
+            return {
+                "choices": [{"message": {"content": generated.model_dump_json()}}]
+            }, 0.1
+
+    orchestrator = FakeOrchestrator(
+        orchestration_enabled=True,
+        entity={"id": "person-1", "name": "姜妍"},
+        modalities=["visual", "face", "asr"],
+    )
+    prompt = tmp_path / "planner.txt"
+    prompt.write_text("Return a strict plan set.", encoding="utf-8")
+    orchestrator.settings.resolve_path = lambda _value: prompt
+    orchestrator._profile = lambda _name: (
+        "qwen35-unified",
+        SimpleNamespace(planner=SimpleNamespace(provider="qwen35-planner")),
+    )
+    orchestrator._provider = lambda _name: FakeProvider()
+    lab = SnapMindPlannerLab(orchestrator)
+    original_sanitize = lab._sanitize_plan_set
+
+    def fail_model_sanitize(*args, **kwargs):
+        if kwargs.get("apply_identity_template") is False:
+            raise ValueError("unsafe model plan")
+        return original_sanitize(*args, **kwargs)
+
+    monkeypatch.setattr(lab, "_sanitize_plan_set", fail_model_sanitize)
+
+    proposal = lab.propose(query, "assist", None, False, force_llm=True)
+
+    assert proposal["planner_trace"]["status"] == "fallback"
+    assert proposal["planner_trace"]["planner"] == "heuristic-v1"
+    assert "unsafe model plan" in proposal["planner_trace"]["error"]
+    for plan in proposal["plans"]:
+        assert [step["tool_id"] for step in plan["steps"][:2]] == [
+            "asr.search",
+            "face.search",
         ]
 
 

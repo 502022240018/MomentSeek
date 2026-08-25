@@ -314,7 +314,7 @@ export const api = {
   plannerLabPlans: (params: {
     queryText: string; queryImage?: File; queryAudio?: File;
     voiceReference?: VoiceReferenceInput; videoIds?: string[]; folderIds?: string[];
-    mode: PlannerMode; orchestrationProfile?: string;
+    mode: PlannerMode; orchestrationProfile?: string; forceLlm?: boolean;
   }) => {
     const form = new FormData();
     form.append("query_text", params.queryText);
@@ -324,6 +324,7 @@ export const api = {
     if (params.videoIds?.length) form.append("video_ids", JSON.stringify(params.videoIds));
     if (params.folderIds?.length) form.append("folder_ids", JSON.stringify(params.folderIds));
     form.append("mode", params.mode);
+    form.append("force_llm", String(params.forceLlm ?? true));
     if (params.orchestrationProfile) form.append("orchestration_profile", params.orchestrationProfile);
     return json<PlanSetResponse>("/api/planner-lab/plans", { method: "POST", body: form }, normalizePlanSetResponse);
   },

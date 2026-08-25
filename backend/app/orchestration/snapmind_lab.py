@@ -591,6 +591,7 @@ class SnapMindPlannerLab:
             identity_threshold=0.35,
             ambiguous_threshold=0.20,
             window_padding_seconds=0.0,
+            trusted_identity=True,
         )
         if plan_id == "fast" or not self.settings.orchestration_enabled:
             return [primary, face]
@@ -623,6 +624,7 @@ class SnapMindPlannerLab:
         query: str,
         matched_entity: dict[str, Any] | None = None,
         has_voice_reference: bool = False,
+        apply_identity_template: bool = True,
     ) -> PlanSet:
         available = set(available_modalities)
         entity_name = str((matched_entity or {}).get("name") or "").strip()
@@ -685,7 +687,7 @@ class SnapMindPlannerLab:
                         step.fallback_for = primary_ids[-1]
                         step.parameters["fallback_retargeted_from"] = original_fallback_for
                 accepted.append(step)
-            if compound_identity:
+            if compound_identity and apply_identity_template:
                 accepted = self._compound_identity_steps(
                     plan.plan_id,
                     identity_residual,
@@ -716,7 +718,78 @@ class SnapMindPlannerLab:
                 )
                 replacement = next(item for item in fallback.plans if item.plan_id == plan.plan_id)
                 accepted = replacement.steps
-            if matched_entity and "face" in available and not any(
+            if compound_identity and not apply_identity_template:
+                # Qwen owns the semantic channel mix, while the deterministic
+                # boundary owns trusted identity semantics.  A registered face
+                # must enrich an existing non-face candidate pool instead of
+                # silently turning into an expensive global face recall.
+                face_steps = [step for step in accepted if step.tool_id == "face.search"]
+                face_step = face_steps[0] if face_steps else _make_step(
+                    "identity-face",
+                    "face.search",
+                    entity_name,
+                    1.0,
+                    100,
+                    f"实体库已匹配 {entity_name}，在语义候选窗口内补充人物身份证据。",
+                    role="support",
+                )
+                accepted = [step for step in accepted if step.tool_id != "face.search"]
+                primary_indices = [
+                    index
+                    for index, step in enumerate(accepted)
+                    if step.role == "primary" and step.operation == "search"
+                ]
+                if not primary_indices:
+                    voice_intent = _contains_any(
+                        query,
+                        HeuristicPlanGenerator.VOICE_TERMS,
+                    )
+                    promotable = [
+                        (index, step)
+                        for index, step in enumerate(accepted)
+                        if step.operation == "search"
+                        and (voice_intent or step.tool_id != "voice.search")
+                    ]
+                    if not promotable:
+                        promotable = [
+                            (index, step)
+                            for index, step in enumerate(accepted)
+                            if step.operation == "search"
+                        ]
+                    if promotable:
+                        promote_at, promoted = promotable[0]
+                        accepted.pop(promote_at)
+                        promoted.role = "primary"
+                        promoted.depends_on = []
+                        promoted.fallback_for = None
+                        accepted.insert(0, promoted)
+                        primary_indices = [0]
+                if primary_indices:
+                    face_step.role = "support"
+                    face_step.depends_on = []
+                    insert_at = max(primary_indices) + 1
+                    face_step.rationale = (
+                        f"实体库已匹配 {entity_name}，只在 Qwen 规划的候选窗口内核验身份。"
+                    )
+                else:
+                    face_step.role = "primary"
+                    face_step.depends_on = []
+                    insert_at = 0
+                    face_step.rationale = (
+                        f"实体库已匹配 {entity_name}，当前没有其他主通道，使用人物身份主召回。"
+                    )
+                face_step.operation = "search"
+                face_step.query = entity_name
+                face_step.top_k = min(face_step.top_k, 100)
+                face_step.fallback_for = None
+                face_step.parameters.update({
+                    "identity_threshold": 0.35,
+                    "ambiguous_threshold": 0.20,
+                    "window_padding_seconds": 0.0,
+                    "trusted_identity": True,
+                })
+                accepted.insert(insert_at, face_step)
+            elif matched_entity and "face" in available and not any(
                 step.tool_id == "face.search" for step in accepted
             ):
                 entity_name = str(matched_entity.get("name") or query)
@@ -801,7 +874,9 @@ class SnapMindPlannerLab:
                 )
 
                 def removal_priority(step: PlanStep) -> int | None:
-                    if step.tool_id == "voice.search":
+                    if step.tool_id == "voice.search" or (
+                        matched_entity and step.tool_id == "face.search"
+                    ):
                         return None
                     if step.role == "support":
                         return 0
@@ -948,6 +1023,7 @@ class SnapMindPlannerLab:
         has_query_image: bool,
         profile_name: str | None = None,
         voice_reference: VoiceReference | None = None,
+        force_llm: bool | None = None,
     ) -> dict[str, Any]:
         has_voice_reference = voice_reference is not None
         available = self._available_modalities(
@@ -978,6 +1054,7 @@ class SnapMindPlannerLab:
             )
         trace: dict[str, Any] = {"status": "fallback", "planner": "heuristic-v1"}
         plan_set = fallback
+        model_generated = False
         entity_name = str((matched_entity or {}).get("name") or "").strip()
         deterministic_identity = bool(
             entity_name
@@ -985,7 +1062,15 @@ class SnapMindPlannerLab:
             and "face" in set(available)
             and bool(set(available) - {"face"})
         )
-        if deterministic_identity:
+        if force_llm is False:
+            trace = {
+                "status": "ok",
+                "planner": "heuristic-v1",
+                "model_call_skipped": True,
+                "reason": "user_selected_fast_template",
+                "elapsed_seconds": 0.0,
+            }
+        elif deterministic_identity and force_llm is not True:
             trace = {
                 "status": "ok",
                 "planner": "registered-identity-cascade-v1",
@@ -1053,15 +1138,20 @@ class SnapMindPlannerLab:
                     query,
                     matched_entity,
                     has_voice_reference,
+                    apply_identity_template=False,
                 )
+                model_generated = True
                 trace = {
                     "status": "ok",
+                    "planner": "qwen3.5-vllm",
                     **provider.descriptor,
                     "prompt_version": "snapmind-planner-v2-role-aware",
                     "elapsed_seconds": round(elapsed, 6),
                     "raw_output": content,
                 }
             except Exception as exc:
+                plan_set = fallback
+                model_generated = False
                 trace = {
                     "status": "fallback",
                     "planner": "heuristic-v1",
@@ -1069,14 +1159,25 @@ class SnapMindPlannerLab:
                 }
                 if not self.settings.orchestration_fail_open:
                     raise
-        plan_set = self._sanitize_plan_set(
-            plan_set,
-            available,
-            has_query_image,
-            query,
-            matched_entity,
-            has_voice_reference,
-        )
+        elif force_llm:
+            trace = {
+                "status": "fallback",
+                "planner": "heuristic-v1",
+                "requested_planner": "qwen3.5-vllm",
+                "model_call_skipped": True,
+                "reason": "qwen_planner_not_enabled",
+                "error": "Qwen Planner 未启用，已使用确定性备用计划。",
+            }
+        if not model_generated:
+            plan_set = self._sanitize_plan_set(
+                plan_set,
+                available,
+                has_query_image,
+                query,
+                matched_entity,
+                has_voice_reference,
+                apply_identity_template=True,
+            )
         clarifications = [
             *self._identity_clarifications(
                 query,
@@ -2063,6 +2164,10 @@ class SnapMindPlannerLab:
                 and (
                     remaining.role in {"primary", "constraint", "verifier"}
                     or remaining.tool_id == "voice.search"
+                    or (
+                        remaining.tool_id == "face.search"
+                        and bool(remaining.parameters.get("trusted_identity"))
+                    )
                 )
             ]
             trace.append(

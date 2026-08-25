@@ -48,6 +48,47 @@ const decisionMeta: Record<string, string> = {
   accepted: "已接受", skipped: "已跳过", rolled_back: "已回退", downweighted: "已降权",
 };
 
+type PlannerEngine = "qwen" | "template";
+
+type PlannerTraceView = {
+  kind: "qwen" | "template" | "fallback";
+  icon: string;
+  title: string;
+  model?: string;
+  elapsed?: string;
+  reason?: string;
+};
+
+function plannerTraceView(trace: Record<string, any> | undefined): PlannerTraceView {
+  const status = typeof trace?.status === "string" ? trace.status : "fallback";
+  const planner = typeof trace?.planner === "string" ? trace.planner : "";
+  const model = typeof trace?.model === "string" && trace.model.trim() ? trace.model.trim() : undefined;
+  const elapsedSeconds = typeof trace?.elapsed_seconds === "number" && Number.isFinite(trace.elapsed_seconds)
+    ? trace.elapsed_seconds : undefined;
+  const elapsed = elapsedSeconds == null ? undefined : elapsedSeconds < 1
+    ? `${Math.round(elapsedSeconds * 1000)} ms` : `${elapsedSeconds.toFixed(1)} s`;
+  const error = typeof trace?.error === "string"
+    ? trace.error.replace(/\s+/g, " ").trim().slice(0, 120) : "";
+  const modelCallSkipped = trace?.model_call_skipped === true;
+
+  if (status === "ok" && !modelCallSkipped && model) {
+    return { kind: "qwen", icon: "Q", title: "Qwen Planner 已生成", model, elapsed };
+  }
+  if (status === "ok" && (
+    modelCallSkipped || planner === "registered-identity-cascade-v1"
+  )) {
+    return { kind: "template", icon: "↯", title: "极速模板已生成", elapsed };
+  }
+  return {
+    kind: "fallback",
+    icon: "↺",
+    title: "已使用规则备用计划",
+    model,
+    elapsed,
+    reason: error || (planner ? `规划器：${planner}` : "模型不可用或返回未通过校验"),
+  };
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -71,6 +112,7 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
   const [voiceView, setVoiceView] = useState<SpeakerView>();
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [mode, setMode] = useState<PlannerMode>("assist");
+  const [plannerEngine, setPlannerEngine] = useState<PlannerEngine>("qwen");
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
   const [expandedFolderIds, setExpandedFolderIds] = useState<string[]>([]);
   const [scopeOpen, setScopeOpen] = useState(false);
@@ -152,6 +194,7 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
     () => Object.fromEntries(capabilities.map(item => [item.tool_id, item])),
     [capabilities],
   );
+  const traceView = plannerTraceView(planSet?.planner_trace);
 
   const generate = async () => {
     if (!query.trim()) return setNotice("先描述你想找到的画面、人物或事件");
@@ -164,6 +207,7 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
       const value = await api.plannerLabPlans({
         queryText: query.trim(), queryImage: image,
         voiceReference, videoIds: scope, mode,
+        forceLlm: plannerEngine === "qwen",
       });
       setPlanSet(value);
       setOriginalPlanSet(clone(value));
@@ -359,8 +403,8 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
         </div>
       </div>
       <div className="lab-runtime-card">
-        <div className="runtime-head"><span className="runtime-pulse" /><b>系统就绪</b><em>LIVE</em></div>
-        <div className="runtime-model"><span>Q</span><div><b>{capability.llm_enabled ? "Qwen3.5 vLLM" : "Heuristic Planner"}</b><small>{capability.llm_enabled ? "规划与多模态重排在线" : "当前使用备用规划器"}</small></div></div>
+        <div className="runtime-head"><span className={capability.llm_enabled ? "runtime-pulse" : "runtime-pulse fallback"} /><b>{capability.llm_enabled ? "规划服务已配置" : "规则规划可用"}</b><em>{capability.llm_enabled ? "CONFIGURED" : "FALLBACK"}</em></div>
+        <div className="runtime-model"><span>Q</span><div><b>{capability.llm_enabled ? "Qwen3.5 vLLM" : "Qwen3.5 未配置"}</b><small>{capability.llm_enabled ? "生成时调用模型，失败则安全回退" : "仍可使用极速模板与规则备用计划"}</small></div></div>
         <div className="runtime-stats"><div><strong>{capabilities.length}</strong><small>可用工具</small></div><div><strong>3</strong><small>候选策略</small></div><div><strong>∞</strong><small>可回放</small></div></div>
       </div>
     </section>
@@ -407,16 +451,23 @@ export function PlannerLabPage({ videos, folders, entities, capability, setNotic
       <aside className="composer-side">
         <div className="section-title compact"><span>02</span><div><h3>选择协作方式</h3><p>你希望对计划掌控到什么程度？</p></div></div>
         <div className="mode-selector">{(Object.keys(modeMeta) as PlannerMode[]).map(item => <button type="button" key={item} className={mode === item ? "selected" : ""} onClick={() => { setMode(item); setExecution(undefined); }}><span>{modeMeta[item].icon}</span><div><b>{modeMeta[item].name}</b><small>{modeMeta[item].description}</small></div><i /></button>)}</div>
+        <div className="planner-engine-picker">
+          <div><span>规划引擎</span><small>{plannerEngine === "qwen" ? "优先理解复杂意图与跨模态关系" : "按已验证规则快速生成"}</small></div>
+          <div className="planner-engine-options">
+            <button type="button" className={plannerEngine === "qwen" ? "selected" : ""} onClick={() => setPlannerEngine("qwen")}><span>Q</span><div><b>Qwen Planner</b><small>{capability.llm_enabled ? "模型规划 · 默认" : "未配置时自动回退"}</small></div><i /></button>
+            <button type="button" className={plannerEngine === "template" ? "selected" : ""} onClick={() => setPlannerEngine("template")}><span>↯</span><div><b>极速模板</b><small>低延迟 · 规则驱动</small></div><i /></button>
+          </div>
+        </div>
         <button type="button" className="capability-toggle" onClick={() => setCapabilitiesOpen(value => !value)}><span>能力注册表</span><b>{capabilities.length} 个工具可用</b><em>{capabilitiesOpen ? "−" : "+"}</em></button>
         {capabilitiesOpen && <div className="capability-drawer">{capabilities.map(tool => <div key={tool.tool_id}><span>{toolGlyph[tool.tool_id] || "◇"}</span><div><b>{tool.label}</b><small>{tool.description}</small></div><em className={`latency-${tool.latency}`}>{tool.latency}</em></div>)}</div>}
-        <button type="button" className="generate-button" disabled={planning} onClick={generate}><span>{planning ? "" : "✦"}</span><div><b>{planning ? "Qwen 正在设计策略" : "生成检索策略"}</b><small>{planning ? "理解意图 · 选择工具 · 估算成本" : "获得 Fast / Balanced / Deep 三套方案"}</small></div><em>{planning ? <i className="button-loader" /> : "→"}</em></button>
+        <button type="button" className="generate-button" disabled={planning} onClick={generate}><span>{planning ? "" : plannerEngine === "qwen" ? "Q" : "↯"}</span><div><b>{planning ? plannerEngine === "qwen" ? "Qwen 正在设计策略" : "正在生成极速策略" : plannerEngine === "qwen" ? "使用 Qwen 生成策略" : "使用极速模板"}</b><small>{planning ? plannerEngine === "qwen" ? "理解意图 · 选择工具 · 估算成本" : "匹配意图 · 组装已验证步骤" : "获得 Fast / Balanced / Deep 三套方案"}</small></div><em>{planning ? <i className="button-loader" /> : "→"}</em></button>
       </aside>
     </section>
 
-    {planning && <section className="planning-state"><div className="thinking-orbit"><i /><i /><i /><span>Q</span></div><div><b>正在把你的目标拆成可执行步骤</b><p>分析查询意图、检索范围与可用模态，通常需要 30–80 秒</p></div><div className="thinking-steps"><span className="done">理解意图</span><span className="active">组合工具</span><span>生成策略</span></div></section>}
+    {planning && <section className="planning-state"><div className="thinking-orbit"><i /><i /><i /><span>{plannerEngine === "qwen" ? "Q" : "↯"}</span></div><div><b>正在把你的目标拆成可执行步骤</b><p>{plannerEngine === "qwen" ? "Qwen 正在分析查询意图、检索范围与可用模态" : "正在匹配已验证模板，通常可在瞬间完成"}</p></div><div className="thinking-steps"><span className="done">理解意图</span><span className="active">组合工具</span><span>生成策略</span></div></section>}
 
     {planSet && !planning && <section id="strategy-section" className="strategy-section">
-      <div className="strategy-heading"><div className="section-title"><span>03</span><div><h3>选择一条检索路线</h3><p>三套方案使用不同的速度、覆盖度与精度取舍</p></div></div><div className="generated-by"><span className={planSet.planner_trace?.status === "ok" ? "ok" : "fallback"}>✦</span><div><b>{planSet.planner_trace?.status === "ok" ? "Qwen3.5 已生成" : "已使用备用计划"}</b><small>{planSet.query_intent}</small></div></div></div>
+      <div className="strategy-heading"><div className="section-title"><span>03</span><div><h3>选择一条检索路线</h3><p>三套方案使用不同的速度、覆盖度与精度取舍</p></div></div><div className={`generated-by ${traceView.kind}`}><span>{traceView.icon}</span><div><b>{traceView.title}</b><small>{planSet.query_intent}</small><div className="planner-trace-meta">{traceView.model && <em>{traceView.model}</em>}{traceView.elapsed && <em>{traceView.elapsed}</em>}{traceView.reason && <em className="reason" title={traceView.reason}>{traceView.reason}</em>}</div></div></div></div>
       {!!clarifications.length && <div className="identity-clarifications">{clarifications.map(item => {
         if (item.kind === "voice_reference_required") {
           const skipped = voiceClarificationChoices[item.clarification_id];
