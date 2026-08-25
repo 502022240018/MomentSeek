@@ -1294,7 +1294,7 @@ def test_force_llm_uses_qwen_plan_and_keeps_trusted_identity_guards(tmp_path):
         })
         voice = _step("voice", "voice.search").model_copy(update={
             "query": "姜妍",
-            "role": "support",
+            "role": "primary",
             "depends_on": ["face"],
         })
         asr = _step("asr", "asr.search").model_copy(update={
@@ -1356,6 +1356,13 @@ def test_force_llm_uses_qwen_plan_and_keeps_trusted_identity_guards(tmp_path):
     for raw_plan in proposal["plans"]:
         tools = [step["tool_id"] for step in raw_plan["steps"]]
         assert tools == ["visual.search", "face.search", "asr.search", "voice.search"]
+        semantic_primaries = [
+            step
+            for step in raw_plan["steps"]
+            if step["tool_id"] in {"visual.search", "asr.search", "ocr.search"}
+            and step["role"] == "primary"
+        ]
+        assert [step["tool_id"] for step in semantic_primaries] == ["visual.search"]
         face = raw_plan["steps"][1]
         assert face["role"] == "support"
         assert face["depends_on"] == []
@@ -1366,6 +1373,80 @@ def test_force_llm_uses_qwen_plan_and_keeps_trusted_identity_guards(tmp_path):
         assert face["parameters"]["trusted_identity"] is True
         assert raw_plan["steps"][2]["query"] == "讲述对菜品标准的反思"
         assert raw_plan["steps"][3]["role"] == "support"
+        SnapMindPlannerLab._validate_plan(CandidatePlan.model_validate(raw_plan))
+
+
+def test_force_llm_face_voice_only_plan_fails_open_to_identity_template(tmp_path):
+    query = "穿米色开衫女子（姜妍）在采访间讲述对菜品标准的反思"
+    generated = HeuristicPlanGenerator().generate(
+        query,
+        ["visual", "face", "asr", "speaker"],
+        False,
+        True,
+    )
+    for plan in generated.plans:
+        face = _step("face", "face.search").model_copy(update={
+            "query": "姜妍",
+            "role": "primary",
+        })
+        voice = _step("voice", "voice.search").model_copy(update={
+            "query": "姜妍",
+            "role": "primary",
+        })
+        plan.steps = [face, voice]
+
+    class FaceVoiceOnlyProvider:
+        descriptor = {
+            "provider": "qwen35-planner",
+            "type": "openai-compatible",
+            "model": "qwen3.5-4b",
+        }
+
+        def chat(self, _payload):
+            return {
+                "choices": [{"message": {"content": generated.model_dump_json()}}]
+            }, 0.1
+
+    orchestrator = FakeOrchestrator(
+        orchestration_enabled=True,
+        entity={"id": "person-1", "name": "姜妍"},
+        modalities=["visual", "face", "asr", "speaker"],
+    )
+    prompt = tmp_path / "planner.txt"
+    prompt.write_text("Return a strict plan set.", encoding="utf-8")
+    orchestrator.settings.resolve_path = lambda _value: prompt
+    orchestrator._profile = lambda _name: (
+        "qwen35-unified",
+        SimpleNamespace(planner=SimpleNamespace(provider="qwen35-planner")),
+    )
+    orchestrator._provider = lambda _name: FaceVoiceOnlyProvider()
+
+    proposal = SnapMindPlannerLab(orchestrator).propose(
+        query,
+        "assist",
+        None,
+        False,
+        voice_reference=VoiceReference(
+            kind="entity",
+            entity_id="person-1",
+            label="姜妍",
+        ),
+        force_llm=True,
+    )
+
+    assert proposal["planner_trace"]["status"] == "fallback"
+    assert proposal["planner_trace"]["planner"] == "heuristic-v1"
+    assert "no non-voice semantic search" in proposal["planner_trace"]["error"]
+    for raw_plan in proposal["plans"]:
+        assert any(
+            step["role"] == "primary"
+            and step["tool_id"] in {"visual.search", "asr.search", "ocr.search"}
+            for step in raw_plan["steps"]
+        )
+        voice = next(
+            step for step in raw_plan["steps"] if step["tool_id"] == "voice.search"
+        )
+        assert voice["role"] == "support"
         SnapMindPlannerLab._validate_plan(CandidatePlan.model_validate(raw_plan))
 
 

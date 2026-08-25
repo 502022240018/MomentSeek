@@ -734,16 +734,17 @@ class SnapMindPlannerLab:
                     role="support",
                 )
                 accepted = [step for step in accepted if step.tool_id != "face.search"]
+                voice_intent = _contains_any(
+                    query,
+                    HeuristicPlanGenerator.VOICE_TERMS,
+                )
                 primary_indices = [
                     index
                     for index, step in enumerate(accepted)
                     if step.role == "primary" and step.operation == "search"
+                    and (voice_intent or step.tool_id != "voice.search")
                 ]
                 if not primary_indices:
-                    voice_intent = _contains_any(
-                        query,
-                        HeuristicPlanGenerator.VOICE_TERMS,
-                    )
                     promotable = [
                         (index, step)
                         for index, step in enumerate(accepted)
@@ -751,6 +752,10 @@ class SnapMindPlannerLab:
                         and (voice_intent or step.tool_id != "voice.search")
                     ]
                     if not promotable:
+                        if not voice_intent:
+                            raise OrchestrationError(
+                                "Qwen compound identity plan has no non-voice semantic search"
+                            )
                         promotable = [
                             (index, step)
                             for index, step in enumerate(accepted)
