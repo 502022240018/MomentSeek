@@ -734,21 +734,21 @@ class SnapMindPlannerLab:
                 )
             if has_voice_reference and "speaker" in available:
                 voice_intent = _contains_any(query, HeuristicPlanGenerator.VOICE_TERMS)
-                voice_step = next(
-                    (step for step in accepted if step.tool_id == "voice.search"),
-                    None,
+                voice_steps = [step for step in accepted if step.tool_id == "voice.search"]
+                voice_step = voice_steps[0] if voice_steps else None
+                # One trusted reference should be searched once.  Remove model
+                # duplicates before positioning the normalized step.
+                accepted = [step for step in accepted if step.tool_id != "voice.search"]
+                primary_indices = [
+                    index
+                    for index, step in enumerate(accepted)
+                    if step.role == "primary" and step.operation == "search"
+                ]
+                role: EvidenceRole = (
+                    "primary" if voice_intent or not primary_indices else "support"
                 )
-                if voice_step is not None and voice_intent:
-                    voice_step.role = "primary"
-                    voice_step.depends_on = []
-                elif voice_step is None:
-                    primary_ids = [
-                        step.step_id
-                        for step in accepted
-                        if step.role == "primary" and step.operation == "search"
-                    ]
-                    role: EvidenceRole = "primary" if voice_intent or not primary_ids else "support"
-                    trusted_voice_step = _make_step(
+                if voice_step is None:
+                    voice_step = _make_step(
                         "trusted-voice",
                         "voice.search",
                         query,
@@ -760,25 +760,76 @@ class SnapMindPlannerLab:
                             else "用户已选择可信声音引用，只为现有候选补充声纹身份支持。"
                         ),
                         role=role,
-                        depends_on=[] if role == "primary" else primary_ids[:1],
                     )
-                    insert_at = next(
-                        (
-                            index
-                            for index, step in enumerate(accepted)
-                            if step.role in {"constraint", "verifier", "fallback"}
-                        ),
-                        len(accepted),
+                else:
+                    voice_step.role = role
+                    voice_step.rationale = (
+                        "用户已选择可信声音引用，作为声音身份主召回。"
+                        if role == "primary"
+                        else "用户已选择可信声音引用，对执行时的当前候选池补充声纹身份支持。"
                     )
-                    accepted.insert(insert_at, trusted_voice_step)
+                # Trusted voice support enriches whichever candidate pool
+                # survived preceding retrieval.  It must not be hard-bound to
+                # one primary, and it must follow at least one other primary.
+                voice_step.depends_on = []
+                voice_step.fallback_for = None
+                search_indices = [
+                    index
+                    for index, step in enumerate(accepted)
+                    if step.operation == "search"
+                ]
+                if role == "support":
+                    # Let every candidate-producing search, including a
+                    # fallback or another support channel, establish the pool
+                    # before trusted voice evidence enriches it.
+                    insert_at = max(search_indices) + 1 if search_indices else 0
+                else:
+                    insert_at = max(primary_indices) + 1 if primary_indices else 0
+                accepted.insert(insert_at, voice_step)
             if len(accepted) > 6:
-                verifier = next(
-                    (step for step in reversed(accepted) if step.role == "verifier"),
+                # A user-selected trusted voice step and the plan's required
+                # gates must survive the six-step UI/runtime budget.  Prefer
+                # removing ordinary optional evidence, then redundant primary
+                # searches, while retaining at least one primary search.
+                first_primary_id = next(
+                    (
+                        step.step_id
+                        for step in accepted
+                        if step.role == "primary" and step.operation == "search"
+                    ),
                     None,
                 )
-                accepted = accepted[:6]
-                if verifier is not None and verifier not in accepted:
-                    accepted[-1] = verifier
+
+                def removal_priority(step: PlanStep) -> int | None:
+                    if step.tool_id == "voice.search":
+                        return None
+                    if step.role == "support":
+                        return 0
+                    if step.role == "fallback":
+                        return 1
+                    if step.role == "primary" and step.step_id != first_primary_id:
+                        return 2
+                    if step.role == "verifier":
+                        return 3
+                    if step.role == "constraint":
+                        return 4
+                    if step.step_id != first_primary_id:
+                        return 2
+                    return None
+
+                while len(accepted) > 6:
+                    removable = [
+                        (removal_priority(step), index)
+                        for index, step in enumerate(accepted)
+                        if removal_priority(step) is not None
+                    ]
+                    if not removable:
+                        break
+                    _, remove_at = min(
+                        removable,
+                        key=lambda item: (item[0], -item[1]),
+                    )
+                    accepted.pop(remove_at)
             kept_ids = {step.step_id for step in accepted}
             for step in accepted:
                 step.depends_on = [item for item in step.depends_on if item in kept_ids]
@@ -1903,6 +1954,12 @@ class SnapMindPlannerLab:
                 step_statuses.get(item) not in {"accepted", "downweighted"}
                 for item in step.depends_on
             )
+            trusted_voice_can_rebind = bool(
+                dependency_failed
+                and step.tool_id == "voice.search"
+                and effective_role == "support"
+                and nodes
+            )
             fallback_not_needed = (
                 effective_role == "fallback"
                 and step.fallback_for not in failed_primary_steps
@@ -1913,6 +1970,7 @@ class SnapMindPlannerLab:
             elif (
                 dependency_failed
                 and effective_role != "fallback"
+                and not trusted_voice_can_rebind
                 and not (effective_role == "support" and not nodes)
             ):
                 decision, decision_reason = "skipped", "dependency_not_accepted"
@@ -1921,7 +1979,9 @@ class SnapMindPlannerLab:
                 decision, decision_reason = "skipped", "fallback_not_needed"
                 raw_count = 0
             else:
-                if effective_role == "support" and not nodes:
+                if trusted_voice_can_rebind:
+                    decision_reason = "trusted_voice_rebound_to_current_pool"
+                elif effective_role == "support" and not nodes:
                     effective_role = "fallback"
                     decision_reason = "support_promoted_for_empty_primary_pool"
                 try:
@@ -2000,7 +2060,10 @@ class SnapMindPlannerLab:
                 remaining.step_id
                 for remaining in planned_steps[index + 1 :]
                 if remaining.enabled
-                and remaining.role in {"primary", "constraint", "verifier"}
+                and (
+                    remaining.role in {"primary", "constraint", "verifier"}
+                    or remaining.tool_id == "voice.search"
+                )
             ]
             trace.append(
                 {

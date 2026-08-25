@@ -188,7 +188,272 @@ def test_trusted_voice_is_support_for_non_voice_visual_query():
         assert steps[0]["tool_id"] == "visual.search"
         voice = next(step for step in steps if step["tool_id"] == "voice.search")
         assert voice["role"] == "support"
-        assert voice["depends_on"] == [steps[0]["step_id"]]
+        assert voice["depends_on"] == []
+
+
+def test_existing_voice_first_is_moved_after_non_voice_primary():
+    lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["visual", "speaker"]))
+    plan_set = HeuristicPlanGenerator().generate(
+        "米色开衫女子在采访间",
+        ["visual", "speaker"],
+        False,
+        True,
+    )
+    for plan in plan_set.plans:
+        plan.steps = [_step("voice", "voice.search"), _step("visual", "visual.search")]
+
+    sanitized = lab._sanitize_plan_set(
+        plan_set,
+        ["visual", "speaker"],
+        False,
+        "米色开衫女子在采访间",
+        has_voice_reference=True,
+    )
+
+    for plan in sanitized.plans:
+        assert [step.tool_id for step in plan.steps] == ["visual.search", "voice.search"]
+        assert [step.role for step in plan.steps] == ["primary", "support"]
+        assert plan.steps[1].depends_on == []
+        lab._validate_plan(plan)
+
+
+def test_existing_voice_only_remains_primary_for_non_voice_query():
+    lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["speaker"]))
+    plan_set = HeuristicPlanGenerator().generate(
+        "采访片段",
+        ["speaker"],
+        False,
+        True,
+    )
+    for plan in plan_set.plans:
+        plan.steps = [_step("voice", "voice.search")]
+
+    sanitized = lab._sanitize_plan_set(
+        plan_set,
+        ["speaker"],
+        False,
+        "采访片段",
+        has_voice_reference=True,
+    )
+
+    for plan in sanitized.plans:
+        assert len(plan.steps) == 1
+        assert plan.steps[0].tool_id == "voice.search"
+        assert plan.steps[0].role == "primary"
+        assert plan.steps[0].depends_on == []
+        lab._validate_plan(plan)
+
+
+def test_duplicate_trusted_voice_steps_are_deduplicated():
+    lab = SnapMindPlannerLab(FakeOrchestrator(modalities=["visual", "speaker"]))
+    plan_set = HeuristicPlanGenerator().generate(
+        "米色开衫女子在采访间",
+        ["visual", "speaker"],
+        False,
+        True,
+    )
+    for plan in plan_set.plans:
+        plan.steps = [
+            _step("visual", "visual.search"),
+            _step("voice-1", "voice.search"),
+            _step("voice-2", "voice.search"),
+        ]
+
+    sanitized = lab._sanitize_plan_set(
+        plan_set,
+        ["visual", "speaker"],
+        False,
+        "米色开衫女子在采访间",
+        has_voice_reference=True,
+    )
+
+    for plan in sanitized.plans:
+        voice_steps = [step for step in plan.steps if step.tool_id == "voice.search"]
+        assert len(voice_steps) == 1
+        assert voice_steps[0].role == "support"
+        assert voice_steps[0].depends_on == []
+        lab._validate_plan(plan)
+
+
+def test_trusted_voice_survives_six_search_step_budget():
+    lab = SnapMindPlannerLab(
+        FakeOrchestrator(modalities=["visual", "asr", "ocr", "speaker"])
+    )
+    plan_set = HeuristicPlanGenerator().generate(
+        "米色开衫女子在采访间",
+        ["visual", "asr", "ocr", "speaker"],
+        False,
+        True,
+    )
+    tools = ["visual.search", "asr.search", "ocr.search"] * 2
+    for plan in plan_set.plans:
+        plan.steps = [_step(f"search-{index}", tool) for index, tool in enumerate(tools)]
+
+    sanitized = lab._sanitize_plan_set(
+        plan_set,
+        ["visual", "asr", "ocr", "speaker"],
+        False,
+        "米色开衫女子在采访间",
+        has_voice_reference=True,
+    )
+
+    for plan in sanitized.plans:
+        assert len(plan.steps) == 6
+        assert sum(step.tool_id == "voice.search" for step in plan.steps) == 1
+        assert any(step.role == "primary" for step in plan.steps)
+        lab._validate_plan(plan)
+
+
+def test_trusted_voice_and_verifier_both_survive_step_budget():
+    lab = SnapMindPlannerLab(
+        FakeOrchestrator(
+            orchestration_enabled=True,
+            modalities=["visual", "asr", "ocr", "speaker"],
+        )
+    )
+    plan_set = HeuristicPlanGenerator().generate(
+        "米色开衫女子在采访间",
+        ["visual", "asr", "ocr", "speaker"],
+        False,
+        True,
+    )
+    searches = [
+        _step("visual-1", "visual.search"),
+        _step("asr-1", "asr.search"),
+        _step("ocr-1", "ocr.search"),
+        _step("visual-2", "visual.search"),
+        _step("asr-2", "asr.search"),
+    ]
+    verifier = PlanStep(
+        step_id="verify",
+        tool_id="vlm.rerank",
+        operation="rerank",
+        role="verifier",
+        depends_on=["visual-1"],
+        query="米色开衫女子在采访间",
+        rationale="verify",
+    )
+    for plan in plan_set.plans:
+        plan.steps = [*searches, verifier]
+
+    sanitized = lab._sanitize_plan_set(
+        plan_set,
+        ["visual", "asr", "ocr", "speaker"],
+        False,
+        "米色开衫女子在采访间",
+        has_voice_reference=True,
+    )
+
+    for plan in sanitized.plans:
+        assert len(plan.steps) == 6
+        assert sum(step.tool_id == "voice.search" for step in plan.steps) == 1
+        assert sum(step.tool_id == "vlm.rerank" for step in plan.steps) == 1
+        lab._validate_plan(plan)
+
+
+def test_saved_trusted_voice_support_uses_fallback_pool_after_primary_rollback(monkeypatch):
+    orchestrator = FakeOrchestrator(
+        entity={"id": "person-1", "name": "姜妍", "embedding_path": "entity.npz"},
+        modalities=["visual", "face", "speaker"],
+    )
+    lab = SnapMindPlannerLab(orchestrator)
+    proposal = lab.propose(
+        "姜妍在采访间反思菜品标准",
+        "assist",
+        None,
+        False,
+        voice_reference=VoiceReference(kind="entity", entity_id="person-1", label="姜妍"),
+    )
+    plan = CandidatePlan.model_validate(
+        next(item for item in proposal["plans"] if item["plan_id"] == "fast")
+    )
+    voice_step = next(step for step in plan.steps if step.tool_id == "voice.search")
+    assert voice_step.depends_on == []
+    # Simulate a persisted plan created before trusted voice support switched
+    # from a hard primary dependency to the runtime candidate pool.
+    voice_step.depends_on = [plan.steps[0].step_id]
+
+    def fake_search(_query, _image, step, _videos):
+        if step.tool_id == "visual.search":
+            return [_result("visual", 10, 0.5), _result("visual", 30, 0.5)]
+        if step.tool_id == "face.search":
+            return [_result("face", 50, 0.9)]
+        raise AssertionError(f"unexpected search tool: {step.tool_id}")
+
+    voice_calls = []
+
+    def fake_voice_search(vectors, exclude, step, video_ids):
+        voice_calls.append((vectors, exclude, step.step_id, video_ids))
+        return [_result("speaker", 50, 0.82)], {"status": "ok"}
+
+    monkeypatch.setattr(lab, "_search_step", fake_search)
+    monkeypatch.setattr(lab, "_voice_search_step", fake_voice_search)
+
+    outcome = lab.execute(
+        "姜妍在采访间反思菜品标准",
+        None,
+        plan,
+        None,
+        voice_vectors=np.ones((1, 192), dtype=np.float32),
+    )
+
+    assert [item["decision"] for item in outcome["trace"]] == [
+        "rolled_back",
+        "accepted",
+        "accepted",
+    ]
+    assert outcome["trace"][1]["effective_role"] == "fallback"
+    assert outcome["trace"][2]["input_candidate_count"] == 1
+    assert outcome["trace"][2]["decision_reason"] == "trusted_voice_rebound_to_current_pool"
+    assert len(voice_calls) == 1
+    assert outcome["results"][0]["modalities"] == ["face", "speaker"]
+
+
+def test_trusted_voice_blocks_early_stop_until_it_executes(monkeypatch):
+    lab = SnapMindPlannerLab(FakeOrchestrator())
+    support = _step("support", "asr.search").model_copy(
+        update={"role": "support", "depends_on": ["primary"]}
+    )
+    voice = _step("voice", "voice.search").model_copy(
+        update={"role": "support", "depends_on": []}
+    )
+    plan = CandidatePlan(
+        plan_id="balanced",
+        label="Balanced",
+        description="test",
+        estimated_cost="medium",
+        early_stop_threshold=1,
+        steps=[_step("primary", "visual.search"), support, voice],
+    )
+
+    def stable_search(_query, _image, step, _videos):
+        modality = step.tool_id.split(".", 1)[0]
+        return [_result(modality, 10, 0.9), _result(modality, 30, 0.2)]
+
+    voice_calls = []
+
+    def fake_voice_search(vectors, exclude, step, video_ids):
+        voice_calls.append((vectors, exclude, step.step_id, video_ids))
+        return [
+            _result("speaker", 10, 0.82),
+            _result("speaker", 30, 0.62),
+        ], {"status": "ok"}
+
+    monkeypatch.setattr(lab, "_search_step", stable_search)
+    monkeypatch.setattr(lab, "_voice_search_step", fake_voice_search)
+
+    outcome = lab.execute(
+        "舞台演讲",
+        None,
+        plan,
+        None,
+        voice_vectors=np.ones((1, 192), dtype=np.float32),
+    )
+
+    assert outcome["trace"][1]["early_stop_blocked_by"] == ["voice"]
+    assert outcome["executed_steps"] == 3
+    assert len(voice_calls) == 1
+    assert outcome["trace"][2]["decision"] == "accepted"
 
 
 @pytest.mark.parametrize(
