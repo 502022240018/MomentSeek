@@ -18,6 +18,8 @@ WORKDIR /app/backend
 COPY backend/app/main.py ./app/main.py
 COPY backend/app/api/planner_lab_routes.py ./app/api/planner_lab_routes.py
 COPY backend/app/orchestration/snapmind_lab.py ./app/orchestration/snapmind_lab.py
+COPY deploy/orchestration/qwen35-vllm.json ./deploy/orchestration/qwen35-vllm.json
 COPY deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt ./deploy/orchestration/prompts/snapmind-planner-v1.txt
 COPY deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt ./deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt
+COPY deploy/orchestration/prompts/snapmind-planner-v2-adaptive.txt ./deploy/orchestration/prompts/snapmind-planner-v2-adaptive.txt
 COPY --from=frontend-build /src/frontend/dist ./app/static

@@ -52,11 +52,12 @@ def _reset_index_verification() -> None:
 def milvus_visual_candidates_ann(
     client: MilvusClient,
     video_id: str,
-    asset_version: str,
     query_texts: list[np.ndarray],
     limit: int = 20,
     profile: str = "balanced",
     profiler: RetrievalProfiler | None = None,
+    duration_ms: int | None = None,
+    segment_ms: int | None = None,
 ) -> list[Candidate]:
     """Visual retrieval using ANN recall with multi-query aggregation.
 
@@ -67,6 +68,8 @@ def milvus_visual_candidates_ann(
         limit: Number of candidates to return
         profile: Search profile ("precision", "balanced", "recall")
         profiler: Performance profiler
+        duration_ms: Video duration used to recover legacy rows without bounds
+        segment_ms: Fixed segment width used to recover legacy rows without bounds
 
     Returns:
         List of candidates sorted by score descending
@@ -87,19 +90,46 @@ def milvus_visual_candidates_ann(
     query_values = np.stack([_normalize(q) for q in query_texts])
 
     # ANN recall of candidate frames (multi-query batch)
-    ann_results = _ann_recall_multi_query(
-        client, video_id, asset_version, query_values, ann_top_k,
-        settings.visual_use_diskann, profiler
+    ann_span = (
+        profiler.span("milvus_rpc", "visual_ann")
+        if profiler
+        else nullcontext()
     )
+    with ann_span:
+        ann_results = _ann_recall_multi_query(
+            client,
+            video_id,
+            query_values,
+            ann_top_k,
+            settings.visual_use_diskann,
+            profiler,
+        )
+    if profiler:
+        profiler.increment("milvus", "visual_ann_requests")
+        profiler.increment("milvus", "visual_ann_queries", len(query_texts))
+        profiler.increment("milvus", "visual_ann_hits", len(ann_results))
 
     if not ann_results:
         logger.info(f"Visual ANN: no results for video {video_id}")
         return []
 
     # Aggregate by segment with multi-query semantics
-    candidates = _aggregate_by_segment(
-        ann_results, video_id, limit, profile, len(query_texts), segment_top_n
+    aggregation_span = (
+        profiler.span("local_processing", "visual_ann_aggregation")
+        if profiler
+        else nullcontext()
     )
+    with aggregation_span:
+        candidates = _aggregate_by_segment(
+            ann_results,
+            video_id,
+            limit,
+            profile,
+            len(query_texts),
+            segment_top_n,
+            duration_ms,
+            segment_ms,
+        )
 
     logger.info(
         f"Visual ANN: video={video_id}, profile={profile}, "
@@ -168,7 +198,6 @@ def _verify_index_type(client: MilvusClient, expect_diskann: bool) -> None:
 def _ann_recall_multi_query(
     client: MilvusClient,
     video_id: str,
-    asset_version: str,
     query_values: np.ndarray,
     top_k: int,
     use_diskann: bool,
@@ -201,28 +230,22 @@ def _ann_recall_multi_query(
                 "params": {"ef": max(top_k, 128)},
             }
 
-        # Batch search: process all subqueries in one call.
-        rpc_span = (
-            profiler.span("milvus_rpc", "visual")
-            if profiler
-            else nullcontext()
+        # Batch search: process all subqueries in one call
+        hits = collection.search(
+            data=query_values.tolist(),
+            anns_field="embedding",
+            param=search_params,
+            limit=top_k,
+            expr=f'video_id == "{video_id}"',
+            output_fields=[
+                "frame_idx",
+                "timestamp_ms",
+                "segment_id",
+                "segment_start_ms",
+                "segment_end_ms",
+            ],
+            # Do NOT return embedding field to reduce network transfer
         )
-        with rpc_span:
-            hits = collection.search(
-                data=query_values.tolist(),
-                anns_field="embedding",
-                param=search_params,
-                limit=top_k,
-                expr=f'video_id == "{video_id}" and asset_version == "{asset_version}"',
-                output_fields=[
-                    "frame_idx",
-                    "timestamp_ms",
-                    "segment_id",
-                    "segment_start_ms",
-                    "segment_end_ms",
-                ],
-                # Do NOT return embedding field to reduce network transfer
-            )
 
         results = []
         for query_idx, query_hits in enumerate(hits):
@@ -238,9 +261,6 @@ def _ann_recall_multi_query(
                     "cosine": float(hit.distance),  # COSINE metric returns cosine value
                 })
 
-        if profiler:
-            profiler.increment("milvus", "visual_requests")
-            profiler.increment("milvus", "visual_rows", len(results))
         return results
 
     except Exception as e:
@@ -255,6 +275,8 @@ def _aggregate_by_segment(
     profile: str,
     n_queries: int,
     segment_top_n: int = 3,
+    duration_ms: int | None = None,
+    segment_ms: int | None = None,
 ) -> list[Candidate]:
     """Aggregate ANN frames by segment with multi-query support.
 
@@ -274,6 +296,8 @@ def _aggregate_by_segment(
         profile: Search profile
         n_queries: Number of query vectors
         segment_top_n: Number of top frames per segment for score aggregation (default: 3)
+        duration_ms: Video duration used for legacy fixed-segment bounds
+        segment_ms: Fixed segment width used for legacy rows whose bounds are -1
     """
     # Group frames by (segment_id, frame_idx, query_idx)
     frame_scores: dict[tuple[int, int], dict[int, float]] = defaultdict(dict)
@@ -329,13 +353,20 @@ def _aggregate_by_segment(
         # Best frame for timestamp
         best_idx = scores.index(max(scores))
         best_meta = frames[best_idx][2]
+        start_ms, end_ms, bounds_source = _resolve_segment_bounds(
+            seg_id,
+            best_meta,
+            duration_ms=duration_ms,
+            segment_ms=segment_ms,
+        )
 
         segment_scores.append({
             "segment_id": seg_id,
             "score": segment_score,
-            "start_ms": best_meta["segment_start_ms"],
-            "end_ms": best_meta["segment_end_ms"],
+            "start_ms": start_ms,
+            "end_ms": end_ms,
             "best_ms": best_meta["timestamp_ms"],
+            "bounds_source": bounds_source,
             "frame_count": len(frames),
             "max_frame_score": max(scores),
         })
@@ -354,7 +385,8 @@ def _aggregate_by_segment(
 
         evidence = (
             f"[milvus_ann] score={raw:.3f} · rank={rank_score:.3f} · "
-            f"{seg['frame_count']} frames · {n_queries} queries"
+            f"{seg['frame_count']} frames · {n_queries} queries · "
+            f"bounds={seg['bounds_source']}"
         )
 
         candidates.append(
@@ -374,6 +406,7 @@ def _aggregate_by_segment(
                     "visual_rank_score": rank_score,
                     "segment_id": seg["segment_id"],
                     "frame_count": seg["frame_count"],
+                    "bounds_source": seg["bounds_source"],
                     "source": "milvus_ann",
                 },
             )
@@ -383,6 +416,47 @@ def _aggregate_by_segment(
             break
 
     return candidates
+
+
+def _resolve_segment_bounds(
+    segment_id: int,
+    meta: dict[str, Any],
+    *,
+    duration_ms: int | None,
+    segment_ms: int | None,
+) -> tuple[int, int, str]:
+    """Return valid segment bounds while preserving explicit shot boundaries.
+
+    The Milvus schema defaults ``segment_start_ms`` and ``segment_end_ms`` to
+    ``-1``. Rows backfilled before those fields were populated therefore need
+    their fixed 5-second bounds reconstructed from the index manifest.
+    """
+    start_ms = int(meta.get("segment_start_ms", -1))
+    end_ms = int(meta.get("segment_end_ms", -1))
+    best_ms = max(0, int(meta.get("timestamp_ms", 0)))
+    valid_duration = int(duration_ms) if duration_ms and duration_ms > 0 else None
+    valid_segment = int(segment_ms) if segment_ms and segment_ms > 0 else None
+
+    if start_ms >= 0 and end_ms > start_ms:
+        source = "milvus"
+    elif valid_segment is not None:
+        start_ms = max(0, int(segment_id) * valid_segment)
+        end_ms = start_ms + valid_segment
+        source = "manifest"
+    else:
+        # Last-resort compatibility for callers without a manifest. Keep the
+        # hit centred in a small window instead of emitting a negative clip.
+        half_window = 2500
+        start_ms = max(0, best_ms - half_window)
+        end_ms = best_ms + half_window
+        source = "best_frame"
+
+    if valid_duration is not None:
+        start_ms = min(start_ms, max(0, valid_duration - 1))
+        end_ms = min(end_ms, valid_duration)
+    if end_ms <= start_ms:
+        end_ms = start_ms + 1
+    return start_ms, end_ms, source
 
 
 def _normalize(vec: np.ndarray) -> np.ndarray:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -764,3 +765,171 @@ def test_llm_step_ids_are_canonicalized_before_validation():
     assert normalized["plans"][0]["steps"][0]["top_k"] == 17
     assert normalized["plans"][0]["steps"][0]["weight"] == 0.7
     assert normalized["plans"][0]["steps"][0]["parameters"] == {}
+
+
+# ============================================================================
+# 2026-08-17 planner optimization regression tests
+# Covers: profile max_tokens, json_object format, no capability_registry in
+# user context, and single _sanitize_plan_set call on LLM success.
+# ============================================================================
+
+
+def _minimal_plan_set_json() -> dict:
+    """Smallest valid PlanSet JSON for mocking an LLM response."""
+    def _plan(plan_id: str, cost: str) -> dict:
+        return {
+            "plan_id": plan_id,
+            "label": plan_id.title(),
+            "description": f"{plan_id} test plan",
+            "estimated_cost": cost,
+            "fusion": "rrf",
+            "result_limit": 24,
+            "early_stop_threshold": 0.9,
+            "steps": [{
+                "step_id": "s1",
+                "tool_id": "visual.search",
+                "operation": "search",
+                "role": "primary",
+                "query": "演讲者上台",
+                "weight": 1.0,
+                "top_k": 50,
+                "rationale": "visual evidence",
+            }],
+        }
+    return {
+        "query_intent": "find speech segment",
+        "constraints": [],
+        "negative_constraints": [],
+        "identity_mentions": [],
+        "plans": [
+            _plan("fast", "low"),
+            _plan("balanced", "medium"),
+            _plan("deep", "high"),
+        ],
+    }
+
+
+def _llm_orchestrator(tmp_path: Path, max_tokens: int = 1200):
+    """
+    Return (orchestrator, captured_payloads).
+
+    The orchestrator has orchestration_enabled=True and intercepts the LLM
+    chat() call made by propose(), recording each request payload so tests
+    can inspect max_tokens, response_format, and message content.
+    """
+    from app.orchestration.retrieval_orchestration import PlannerSpec, ProfileSpec
+
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text(
+        "Test prompt — capability registry at end of this prompt.",
+        encoding="utf-8",
+    )
+
+    captured: list[dict] = []
+
+    class _FakeLLMProvider:
+        descriptor = {
+            "provider": "fake-planner",
+            "type": "openai_compatible",
+            "model": "qwen3.5-4b-test",
+        }
+
+        def chat(self, payload: dict) -> tuple[dict, float]:
+            captured.append(payload)
+            content = json.dumps(_minimal_plan_set_json())
+            return {"choices": [{"message": {"content": content}}]}, 0.42
+
+    planner_spec = PlannerSpec(
+        provider="fake-planner",
+        prompt_path="prompts/unused.txt",
+        prompt_version="test-v1",
+        max_tokens=max_tokens,
+    )
+    profile = ProfileSpec(planner=planner_spec)
+
+    orch = FakeOrchestrator(orchestration_enabled=True, modalities=["visual", "asr"])
+    orch.settings.resolve_path = lambda _p: prompt_file
+    orch._profile = lambda _name: ("test-profile", profile)
+    orch._provider = lambda _name: _FakeLLMProvider()
+
+    return orch, captured
+
+
+def test_propose_max_tokens_reads_from_profile(tmp_path):
+    """chat() payload max_tokens must equal profile.planner.max_tokens, not a hardcoded value."""
+    orch, captured = _llm_orchestrator(tmp_path, max_tokens=999)
+    lab = SnapMindPlannerLab(orch)
+
+    lab.propose("演讲者走上台发言", "assist", None, False)
+
+    assert len(captured) == 1, "expected exactly one LLM call"
+    actual = captured[0]["max_tokens"]
+    assert actual == 999, (
+        f"max_tokens should be read from profile.planner.max_tokens (999), got {actual}; "
+        "hardcoded 2200 or any other value indicates the fix was not applied"
+    )
+
+
+def test_propose_response_format_is_json_object(tmp_path):
+    """response_format must be {type: json_object}; json_schema + strict must be absent."""
+    orch, captured = _llm_orchestrator(tmp_path)
+    lab = SnapMindPlannerLab(orch)
+
+    lab.propose("演讲者展示幻灯片内容", "assist", None, False)
+
+    fmt = captured[0]["response_format"]
+    assert fmt == {"type": "json_object"}, (
+        f"expected {{'type': 'json_object'}}, got {fmt!r}; "
+        "FSM constraint decoding must be disabled after optimization"
+    )
+    assert "json_schema" not in fmt, (
+        "json_schema key must be absent — strict FSM decoding was removed"
+    )
+
+
+def test_propose_context_excludes_capability_registry(tmp_path):
+    """
+    user message must NOT contain capability_registry after it was moved into
+    the system prompt.  Required keys (query, mode, etc.) must still be present.
+    """
+    orch, captured = _llm_orchestrator(tmp_path)
+    lab = SnapMindPlannerLab(orch)
+
+    lab.propose("找到播音员播报新闻的片段", "auto", None, False)
+
+    user_msg = next(m for m in captured[0]["messages"] if m["role"] == "user")
+    context = json.loads(user_msg["content"])
+
+    assert "capability_registry" not in context, (
+        "capability_registry must not appear in the user message; "
+        "it has been moved into the system prompt for vLLM prefix-cache reuse"
+    )
+    for key in ("query", "mode", "available_modalities", "has_query_image", "matched_entity"):
+        assert key in context, f"required context key '{key}' is missing from user message"
+
+
+def test_propose_sanitize_called_once_on_llm_success(tmp_path, monkeypatch):
+    """
+    _sanitize_plan_set must be called exactly once when the LLM succeeds.
+
+    Before the fix it was called twice (once inside the try block, once outside).
+    After the fix only the outer call remains, so LLM success produces exactly 1 call.
+    """
+    orch, _captured = _llm_orchestrator(tmp_path)
+    lab = SnapMindPlannerLab(orch)
+
+    call_count: list[int] = [0]
+    original = SnapMindPlannerLab._sanitize_plan_set
+
+    def _counting_sanitize(self_inner, plan_set, *args, **kwargs):
+        call_count[0] += 1
+        return original(self_inner, plan_set, *args, **kwargs)
+
+    monkeypatch.setattr(SnapMindPlannerLab, "_sanitize_plan_set", _counting_sanitize)
+
+    lab.propose("演讲者上台发言精彩片段", "assist", None, False)
+
+    assert call_count[0] == 1, (
+        f"_sanitize_plan_set must be called exactly once on LLM success, "
+        f"called {call_count[0]} time(s); double-call fix may not have been applied"
+    )

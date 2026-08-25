@@ -7,7 +7,7 @@ import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -45,7 +45,7 @@ class PlanStep(BaseModel):
 
     step_id: str
     tool_id: str
-    operation: Operation
+    operation: Operation | None = None
     role: EvidenceRole | None = None
     target_id: str = "main"
     depends_on: list[str] = Field(default_factory=list)
@@ -61,7 +61,8 @@ class PlanStep(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def infer_role(self):
+    def infer_defaults(self):
+        # Infer role from tool_id and operation
         if self.role is None:
             if self.tool_id == "vlm.rerank":
                 self.role = "verifier"
@@ -69,6 +70,7 @@ class PlanStep(BaseModel):
                 self.role = "constraint"
             else:
                 self.role = "primary"
+
         self.target_id = self.target_id.strip() or "main"
         self.depends_on = list(dict.fromkeys(item.strip() for item in self.depends_on if item.strip()))
         return self
@@ -108,6 +110,24 @@ class IdentityMention(BaseModel):
     rationale: str = Field(default="", max_length=500)
 
 
+class OptimizationHints(BaseModel):
+    """LLM 输出的优化提示，用于指导 fast/deep 派生"""
+    model_config = ConfigDict(extra="ignore")
+
+    # Fast 计划策略
+    fast_strategy: Literal["primary_only", "keep_asr_support", "keep_all_support"] = "primary_only"
+    fast_top_k_ratio: float = Field(default=0.5, ge=0.3, le=0.8)
+
+    # Deep 计划策略
+    deep_needs_rerank: bool = True  # 是否需要 vlm.rerank
+    deep_extra_modality: list[str] = Field(default_factory=list)  # 建议新增的模态 ["ocr", "asr"]
+    deep_enhance_primary: bool = False  # 是否增强 primary 步骤的 top_k
+
+    # 通用
+    query_complexity: Literal["simple", "moderate", "complex"] = "moderate"
+    rationale: str = ""  # 为什么这样建议（可选，用于调试）
+
+
 class PlanSet(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -115,12 +135,23 @@ class PlanSet(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     negative_constraints: list[str] = Field(default_factory=list)
     identity_mentions: list[IdentityMention] = Field(default_factory=list, max_length=5)
-    plans: list[CandidatePlan] = Field(min_length=3, max_length=3)
+    optimization_hints: OptimizationHints = Field(default_factory=OptimizationHints)
+    plans: list[CandidatePlan] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def validate_plan_shapes(self):
-        if {plan.plan_id for plan in self.plans} != {"fast", "balanced", "deep"}:
-            raise ValueError("plans must contain fast, balanced, and deep")
+        plan_ids = {plan.plan_id for plan in self.plans}
+
+        # 松绑校验：允许只有 balanced 或完整 3 个计划
+        if len(self.plans) == 1:
+            if "balanced" not in plan_ids:
+                raise ValueError("单计划模式必须是 balanced")
+        elif len(self.plans) == 3:
+            if plan_ids != {"fast", "balanced", "deep"}:
+                raise ValueError("三计划模式必须包含 fast, balanced, deep")
+        else:
+            raise ValueError("plans 必须是 1 个（balanced）或 3 个（fast/balanced/deep）")
+
         return self
 
 
@@ -712,6 +743,10 @@ class SnapMindPlannerLab:
                 if isinstance(step, dict):
                     step["step_id"] = f"s{index}"
                     dependencies = step.get("depends_on")
+                    # Coerce string → list (LLM sometimes outputs "s1" instead of ["s1"])
+                    if isinstance(dependencies, str):
+                        dependencies = [dependencies] if dependencies.strip() else []
+                        step["depends_on"] = dependencies
                     if isinstance(dependencies, list):
                         step["depends_on"] = [
                             id_map.get(item, item) for item in dependencies if isinstance(item, str)
@@ -725,6 +760,138 @@ class SnapMindPlannerLab:
                             if field_name in parameters:
                                 step[field_name] = parameters.pop(field_name)
         return payload
+
+    def _derive_fast_plan(
+        self,
+        balanced: CandidatePlan,
+        hints: OptimizationHints,
+    ) -> CandidatePlan:
+        """从 balanced 派生 fast 计划，根据 hints 保留不同程度的步骤"""
+
+        # 根据策略选择要保留的步骤
+        if hints.fast_strategy == "primary_only":
+            # Fast 策略 1：只保留 primary 检索步骤（最快，适合简单查询）
+            kept_steps = [
+                step for step in balanced.steps
+                if step.role == "primary" and (step.operation == "search" or step.operation is None)
+            ]
+        elif hints.fast_strategy == "keep_asr_support":
+            # Fast 策略 2：保留 primary + ASR support（适合需要对话理解的查询）
+            kept_steps = [
+                step for step in balanced.steps
+                if (step.role == "primary" and (step.operation == "search" or step.operation is None)) or
+                   (step.role == "support" and step.tool_id == "asr.search")
+            ]
+        else:  # keep_all_support
+            # Fast 策略 3：保留 primary + 所有 support（适合需要多证据交叉验证的复杂查询）
+            kept_steps = [
+                step for step in balanced.steps
+                if step.role in {"primary", "support"} and (step.operation == "search" or step.operation is None)
+            ]
+
+        # 参数缩减并确保 operation 字段正确
+        fast_steps = []
+        for step in kept_steps:
+            fast_step = step.model_copy(deep=True)
+            # 确保 operation 字段被正确设置（如果是 None，推断为 search）
+            if fast_step.operation is None:
+                fast_step.operation = "search"
+            fast_step.top_k = max(20, int(step.top_k * hints.fast_top_k_ratio))
+            fast_step.weight = step.weight  # 保持权重不变
+            fast_steps.append(fast_step)
+
+        return CandidatePlan(
+            plan_id="fast",
+            label="Fast",
+            description=f"快速检索：{hints.fast_strategy.replace('_', ' ')} 策略",
+            estimated_cost="low",
+            fusion=balanced.fusion,
+            result_limit=min(12, balanced.result_limit),
+            steps=fast_steps,
+        )
+
+    def _derive_deep_plan(
+        self,
+        balanced: CandidatePlan,
+        hints: OptimizationHints,
+        available: list[str],
+    ) -> CandidatePlan:
+        """从 balanced 派生 deep 计划，根据 hints 智能增强
+
+        增强策略：
+        1. 增强 primary 步骤的 top_k（如果 hints 建议）
+        2. 新增 hints 建议的模态（如 OCR、ASR）
+        3. 添加 vlm.rerank 多模态重排（如果 hints 建议且未超过步骤限制）
+        """
+
+        deep_steps = [step.model_copy(deep=True) for step in balanced.steps]
+
+        # 确保所有复制的步骤都有正确的 operation 字段
+        for step in deep_steps:
+            if step.operation is None:
+                step.operation = "search"
+
+        next_step_id = len(deep_steps) + 1
+
+        # 1. 增强 primary 步骤的 top_k（扩大召回范围）
+        if hints.deep_enhance_primary:
+            for step in deep_steps:
+                if step.role == "primary" and (step.operation == "search" or step.operation is None):
+                    step.top_k = min(200, int(step.top_k * 1.5))
+
+        # 2. 新增 hints 建议的模态（增强跨模态证据）
+        for modality in hints.deep_extra_modality:
+            if modality not in available:
+                continue  # 跳过不可用的模态
+
+            # 检查是否已存在该模态的步骤
+            existing_tools = {step.tool_id for step in deep_steps}
+            tool_id = f"{modality}.search"
+
+            if tool_id not in existing_tools and tool_id in CAPABILITY_BY_ID:
+                capability = CAPABILITY_BY_ID[tool_id]
+                new_step = PlanStep(
+                    step_id=f"s{next_step_id}",
+                    tool_id=tool_id,
+                    operation="search",
+                    role="support",
+                    query="{query}",  # 使用原始 query
+                    weight=capability.default_weight,
+                    top_k=capability.default_top_k,
+                    rationale=f"Deep mode: 新增 {modality} 模态以增强召回",
+                )
+                deep_steps.append(new_step)
+                next_step_id += 1
+
+        # 3. 添加 vlm.rerank（如果 hints 建议且未超过步骤限制）
+        if hints.deep_needs_rerank and self.settings.orchestration_enabled:
+            if len(deep_steps) < 6:  # max_length=6 约束
+                # 找到所有 primary 步骤作为依赖
+                primary_ids = [s.step_id for s in deep_steps if s.role == "primary"]
+
+                rerank_step = PlanStep(
+                    step_id=f"s{next_step_id}",
+                    tool_id="vlm.rerank",
+                    operation="rerank",
+                    role="verifier",
+                    depends_on=primary_ids,
+                    query="{query}",
+                    weight=1.0,
+                    top_k=20,
+                    rationale="Deep mode: Qwen3.5 多模态重排验证",
+                )
+                deep_steps.append(rerank_step)
+
+        return CandidatePlan(
+            plan_id="deep",
+            label="Deep",
+            description=f"深度检索：{len(deep_steps)} 步骤，" +
+                        ("含 VLM rerank" if hints.deep_needs_rerank else "无 rerank"),
+            estimated_cost="high",
+            fusion=balanced.fusion,
+            result_limit=balanced.result_limit,
+            steps=deep_steps,
+        )
 
     def propose(
         self,
@@ -774,61 +941,94 @@ class SnapMindPlannerLab:
                 if profile.planner is None:
                     raise OrchestrationError("selected profile has no planner")
                 provider = self.orchestrator._provider(profile.planner.provider)
-                prompt_path = self.settings.resolve_path(
-                    getattr(
-                        self.settings,
-                        "planner_lab_prompt_path",
-                        "deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt",
-                    )
+                # Read prompt_path from profile config, enabling per-profile prompt customization
+                prompt_path = self.settings.resolve_path(profile.planner.prompt_path)
+                base_prompt = prompt_path.read_text(encoding="utf-8")
+
+                # Prefix caching enhancement: move available_modalities to system
+                # This extends the cacheable prefix from ~1950 to ~2050 tokens,
+                # improving cache hit rate when querying within the same video corpus.
+                system_content = (
+                    base_prompt +
+                    f"\n\n## Current Session Modalities\n\n{json.dumps(available, ensure_ascii=False)}"
                 )
-                prompt = prompt_path.read_text(encoding="utf-8")
+
                 context = {
                     "query": query,
                     "mode": mode,
-                    "available_modalities": available,
                     "has_query_image": has_query_image,
                     "matched_entity": public_entity,
-                    "capability_registry": [
-                        item.as_dict() for item in CAPABILITIES
-                        if item.tool_id != "vlm.rerank" or self.settings.orchestration_enabled
-                    ],
+                    # available_modalities moved to system prompt above
                 }
                 response, elapsed = provider.chat(
                     {
                         "messages": [
-                            {"role": "system", "content": prompt},
+                            {"role": "system", "content": system_content},
                             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
                         ],
                         "temperature": 0,
-                        "max_tokens": 2200,
-                        "response_format": {
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": "snapmind_plan_set",
-                                "schema": PlanSet.model_json_schema(),
-                                "strict": True,
-                            },
-                        },
+                        "max_tokens": profile.planner.max_tokens,  # read from profile, not hardcoded
+                        "response_format": {"type": "json_object"},  # FSM constraint disabled; Pydantic validates downstream
                         "chat_template_kwargs": {"enable_thinking": False},
                     }
                 )
                 content = response["choices"][0]["message"]["content"]
                 raw_plan_set = self._normalize_llm_payload(_extract_json_object(content))
                 plan_set = PlanSet.model_validate(raw_plan_set)
-                plan_set = self._sanitize_plan_set(
-                    plan_set,
-                    available,
-                    has_query_image,
-                    query,
-                    matched_entity,
-                )
-                trace = {
-                    "status": "ok",
-                    **provider.descriptor,
-                    "prompt_version": "snapmind-planner-v2-role-aware",
-                    "elapsed_seconds": round(elapsed, 6),
-                    "raw_output": content,
-                }
+
+                # 如果 LLM 只返回了 balanced，派生 fast/deep
+                if len(plan_set.plans) == 1:
+                    if plan_set.plans[0].plan_id == "balanced":
+                        # 正常派生路径
+                        balanced = plan_set.plans[0]
+                        hints = plan_set.optimization_hints
+
+                        # 派生 fast
+                        fast_plan = self._derive_fast_plan(balanced, hints)
+
+                        # 派生 deep
+                        deep_plan = self._derive_deep_plan(balanced, hints, available)
+
+                        # 重组 plans 列表
+                        plan_set.plans = [fast_plan, balanced, deep_plan]
+
+                        # 更新 trace
+                        trace = {
+                            "status": "ok",
+                            **provider.descriptor,
+                            "prompt_version": "snapmind-planner-v2-adaptive",
+                            "elapsed_seconds": round(elapsed, 6),
+                            "raw_output": content,
+                            "derivation": {
+                                "mode": "hints_guided",
+                                "hints": hints.model_dump(),
+                                "fast_steps": len(fast_plan.steps),
+                                "deep_steps": len(deep_plan.steps),
+                            },
+                        }
+                    else:
+                        # LLM 返回了非 balanced 的单计划（异常情况）
+                        raise OrchestrationError(
+                            f"LLM 返回了单计划但 plan_id 不是 balanced: {plan_set.plans[0].plan_id}"
+                        )
+                elif len(plan_set.plans) == 3:
+                    # LLM 返回完整 3 计划（旧 prompt 或已经是完整输出），不派生
+                    trace = {
+                        "status": "ok",
+                        **provider.descriptor,
+                        "prompt_version": "snapmind-planner-v2-role-aware",
+                        "elapsed_seconds": round(elapsed, 6),
+                        "raw_output": content,
+                        "derivation": {
+                            "mode": "none",
+                            "reason": "llm_returned_full_3_plans",
+                        },
+                    }
+                else:
+                    # LLM 返回了 2 个或 >3 个计划（异常情况）
+                    raise OrchestrationError(
+                        f"LLM 返回了 {len(plan_set.plans)} 个计划，期望 1 或 3 个"
+                    )
             except Exception as exc:
                 trace = {
                     "status": "fallback",

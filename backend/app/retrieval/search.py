@@ -1148,7 +1148,14 @@ class SearchEngine:
                 client,
                 video_id,
                 visual_queries[visual_model],
-                asset_version,
+                duration_ms=int(
+                    manifest.get("duration_ms")
+                    or round(float(video.get("duration") or 0) * 1000)
+                ),
+                segment_ms=int(
+                    manifest.get("segment_ms")
+                    or round(float(self.settings.visual_segment_seconds) * 1000)
+                ),
                 profile=visual_profile,
                 limit=channel_limits["visual"],
                 profiler=profiler,

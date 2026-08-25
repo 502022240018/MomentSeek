@@ -118,10 +118,11 @@ def test_visual_ann_uses_supported_retrieval_profiler_api():
             results = milvus_visual_candidates_ann(
                 client,
                 "test-video",
-                "7",
                 [np.ones(1152, dtype=np.float32)],
                 limit=10,
                 profiler=profiler,
+                duration_ms=10_000,
+                segment_ms=5_000,
             )
     finally:
         _reset_index_verification()

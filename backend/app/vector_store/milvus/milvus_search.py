@@ -421,7 +421,6 @@ def milvus_visual_candidates(
     client: MilvusClient,
     video_id: str,
     query: np.ndarray,
-    asset_version: str,
     duration_ms: int | None = None,
     segment_ms: int | None = None,
     profile: str = "balanced",
@@ -438,22 +437,28 @@ def milvus_visual_candidates(
         query: Query embedding(s), shape [D] or [N_queries, D]
         profile: "precision", "balanced", or "recall"
         limit: Number of candidates to return
-        duration_ms: Deprecated – no longer used by the ANN implementation.
-        segment_ms: Deprecated – no longer used by the ANN implementation.
+        duration_ms: Video duration used to recover legacy rows without bounds.
+        segment_ms: Fixed segment width used to recover legacy rows without bounds.
         rows: Deprecated – no longer used by the ANN implementation.
     """
-    if rows is not None or duration_ms is not None or segment_ms is not None:
+    if rows is not None:
         logger.warning(
-            "milvus_visual_candidates: parameters 'rows', 'duration_ms', and "
-            "'segment_ms' are not used by the ANN-based v2 implementation. "
-            "These arguments are silently ignored; remove them from the call site."
+            "milvus_visual_candidates: parameter 'rows' is not used by the "
+            "ANN-based v2 implementation and is silently ignored."
         )
 
     # Convert query format to list (support multi-query)
     query_texts = [query] if query.ndim == 1 else list(query)
 
     return milvus_visual_candidates_ann(
-        client, video_id, asset_version, query_texts, limit, profile, profiler
+        client,
+        video_id,
+        query_texts,
+        limit,
+        profile,
+        profiler,
+        duration_ms,
+        segment_ms,
     )
 
 
