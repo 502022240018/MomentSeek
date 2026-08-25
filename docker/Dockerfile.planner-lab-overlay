@@ -20,14 +20,6 @@ COPY backend/scripts/ ./scripts/
 COPY deploy/orchestration/ ./deploy/orchestration/
 COPY deploy/models/ /app/deploy/models/
 COPY scripts/verify_models.py /app/scripts/verify_models.py
-# Preserve the validated base image's retrieval/Milvus implementation. The
-# server can therefore keep using its existing index schema while the lab adds
-# only its isolated orchestration surface.
-COPY backend/app/main.py ./app/main.py
-COPY backend/app/api/planner_lab_routes.py ./app/api/planner_lab_routes.py
-COPY backend/app/orchestration/snapmind_lab.py ./app/orchestration/snapmind_lab.py
-COPY deploy/orchestration/qwen35-vllm.json ./deploy/orchestration/qwen35-vllm.json
-COPY deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt ./deploy/orchestration/prompts/snapmind-planner-v1.txt
 COPY deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt ./deploy/orchestration/prompts/snapmind-planner-v2-role-aware.txt
 COPY deploy/orchestration/prompts/snapmind-planner-v2-adaptive.txt ./deploy/orchestration/prompts/snapmind-planner-v2-adaptive.txt
 COPY --from=frontend-build /src/frontend/dist ./app/static

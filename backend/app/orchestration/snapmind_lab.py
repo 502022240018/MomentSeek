@@ -1136,14 +1136,7 @@ class SnapMindPlannerLab:
                         voice_reference.planner_summary() if voice_reference else None
                     ),
                     "matched_entity": public_entity,
-                    "capability_registry": [
-                        item.as_dict() for item in CAPABILITIES
-                        if (
-                            (item.tool_id != "vlm.rerank" or self.settings.orchestration_enabled)
-                            and (item.modality == "aggregate" or item.modality in available)
-                        )
-                    ],
-                    # available_modalities moved to system prompt above
+                    # capability_registry and available_modalities moved to system prompt above
                 }
                 response, elapsed = provider.chat(
                     {

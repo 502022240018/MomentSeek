@@ -36,6 +36,9 @@ Every step must have an evidence role:
 - depends_on must always be a list of step_id strings. Use ["s1"] not "s1". Use [] for steps with no dependencies.
 - A fallback step must set fallback_for to a previous primary step_id.
 - Use face.search only when a query image or a known catalog identity is available.
+- Use voice.search only when voice_reference is non-null. It is an opaque trusted slot: never invent or copy entity IDs, video IDs, utterance IDs, paths, or vectors into a plan.
+- Prefer voice.search as primary when the user explicitly asks for the same voice/speaker. For a visual action involving the referenced speaker, prefer visual as primary and voice.search as support.
+- Voice similarity is identity evidence with an absolute threshold. Do not request score normalization or treat an ambiguous voice match as confirmed support.
 - The input field matched_entity is the authoritative catalog match. When non-null, use face.search for identity.
 - Extract explicit person names from the query into identity_mentions with: name, visual_fallback_query, rationale. Do not add occupations, roles, brands, or objects.
 - Prefer ASR as primary for spoken quotations/topics and OCR as primary for visible text.
@@ -138,6 +141,11 @@ The following tools are the ONLY valid tool_id values. Do not reference any tool
 **ocr.search** / operations: search, rerank
 - Visible text, captions, signs, logos, slides, jersey numbers, UI text
 - Default top_k: 80, weight: 0.75
+
+**voice.search** / operations: search
+- Voice similarity search for the same speaker using a trusted reference
+- Use ONLY when voice_reference is non-null in the input context
+- Default top_k: 80, weight: 1.0
 
 **vlm.rerank** / operations: rerank
 - Multimodal visual reranking with Qwen3.5

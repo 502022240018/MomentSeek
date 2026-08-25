@@ -48,8 +48,10 @@ from .milvus_search_visual_v2 import milvus_visual_candidates_ann
 logger = logging.getLogger(__name__)
 
 
-# Milvus ANN search params. Face can explicitly target an already-published
-# IVF_FLAT/L2 collection; returned embeddings are then re-scored by cosine.
+# Milvus ANN search params. face and speaker both use DISKANN now; _HNSW_EF is
+# retained only for the currently-unreachable HNSW branch in _ann_search (kept
+# for a possible future modality that indexes with HNSW). IVF_FLAT is no longer
+# used by any modality, so its nprobe constant and branch were removed.
 _HNSW_EF    = 128
 
 # Per-modality metric config — static mapping, must stay in sync with
@@ -86,18 +88,7 @@ def get_modality_index_type(modality: str) -> str:
     if modality == "visual":
         settings = get_settings()
         return "DISKANN" if settings.visual_use_diskann else "HNSW"
-    if modality == "face":
-        profile = get_settings().milvus_face_ann_profile
-        return "IVF_FLAT" if profile == "ivf_flat_l2" else "DISKANN"
     return _STATIC_INDEX_TYPES[modality]
-
-
-def get_modality_metric_type(modality: str) -> str:
-    """Return the metric paired with the configured ANN index contract."""
-    if modality == "face":
-        profile = get_settings().milvus_face_ann_profile
-        return "L2" if profile == "ivf_flat_l2" else "COSINE"
-    return _MODALITY_METRIC[modality]
 
 
 class MilvusServiceError(RuntimeError):
@@ -149,7 +140,7 @@ def _verify_ann_index_type_once(client: MilvusClient, modality: str) -> None:
         if modality in _verified_index_modalities:
             return
         expected = get_modality_index_type(modality)
-        expected_metric = get_modality_metric_type(modality)
+        expected_metric = _MODALITY_METRIC[modality]
         # col.index() (the RPC) is intentionally inside the lock so that
         # concurrent searches on first startup do not fan out duplicate
         # introspection RPCs. The lock is held for one network round-trip
@@ -252,7 +243,7 @@ def _ann_search(
     """Execute a per-video ANN search; used only by face and speaker."""
     _verify_ann_index_type_once(client, modality)
     col = client.collection_for(modality)
-    metric     = get_modality_metric_type(modality)
+    metric     = _MODALITY_METRIC[modality]
     index_type = get_modality_index_type(modality)
     if index_type == "DISKANN":
         # DiskANN hard constraint: search_list >= limit. `limit` here is the
@@ -267,15 +258,10 @@ def _ann_search(
         # HNSW path lives in milvus_search_visual_v2 (not via _ann_search).
         # Retained for a possible future modality that indexes with HNSW.
         sp = {"metric_type": metric, "params": {"ef": _HNSW_EF}}
-    elif index_type == "IVF_FLAT" and modality == "face":
-        sp = {
-            "metric_type": metric,
-            "params": {"nprobe": get_settings().face_ivf_nprobe},
-        }
     else:
         raise MilvusServiceError(
             f"_ann_search does not support index_type={index_type!r} "
-            f"for modality={modality!r}."
+            f"for modality={modality!r}; only DISKANN and HNSW are supported."
         )
     try:
         span = profiler.span("milvus_rpc", modality) if profiler else nullcontext()
@@ -327,6 +313,7 @@ def milvus_visual_candidates(
     client: MilvusClient,
     video_id: str,
     query: np.ndarray,
+    asset_version: str,
     duration_ms: int | None = None,
     segment_ms: int | None = None,
     profile: str = "balanced",
@@ -343,28 +330,22 @@ def milvus_visual_candidates(
         query: Query embedding(s), shape [D] or [N_queries, D]
         profile: "precision", "balanced", or "recall"
         limit: Number of candidates to return
-        duration_ms: Video duration used to recover legacy rows without bounds.
-        segment_ms: Fixed segment width used to recover legacy rows without bounds.
+        duration_ms: Deprecated – no longer used by the ANN implementation.
+        segment_ms: Deprecated – no longer used by the ANN implementation.
         rows: Deprecated – no longer used by the ANN implementation.
     """
-    if rows is not None:
+    if rows is not None or duration_ms is not None or segment_ms is not None:
         logger.warning(
-            "milvus_visual_candidates: parameter 'rows' is not used by the "
-            "ANN-based v2 implementation and is silently ignored."
+            "milvus_visual_candidates: parameters 'rows', 'duration_ms', and "
+            "'segment_ms' are not used by the ANN-based v2 implementation. "
+            "These arguments are silently ignored; remove them from the call site."
         )
 
     # Convert query format to list (support multi-query)
     query_texts = [query] if query.ndim == 1 else list(query)
 
     return milvus_visual_candidates_ann(
-        client,
-        video_id,
-        query_texts,
-        limit,
-        profile,
-        profiler,
-        duration_ms,
-        segment_ms,
+        client, video_id, asset_version, query_texts, limit, profile, profiler
     )
 
 
@@ -752,7 +733,7 @@ def milvus_face_candidates(
     threshold: float | None = None,
     profiler: RetrievalProfiler | None = None,
 ) -> list[Candidate]:
-    """Face track recall for modern and explicitly configured legacy indexes.
+    """Face track recall: single-phase ANN with trusted COSINE distance.
 
     Face embeddings are unit-normalised before write (faces.py), so under a
     COSINE metric Milvus returns ``_distance`` that IS the exact cosine
@@ -770,43 +751,24 @@ def milvus_face_candidates(
     if threshold is None:
         threshold = settings.face_identity_threshold
     query_norm = normalize(np.asarray(query, dtype=np.float32))
-    legacy_l2 = settings.milvus_face_ann_profile == "ivf_flat_l2"
-    # IVF/L2 is approximate and its distance is not the score consumed by the
-    # platform, so recall at least 2x before exact cosine re-scoring.
-    recall_multiplier = max(2, settings.face_recall_multiplier) if legacy_l2 else (
-        settings.face_recall_multiplier
-    )
-    ann_limit = min(limit * recall_multiplier, 16_384)
-    output_fields = ["track_idx", "start_ms", "end_ms", "best_ms"]
-    if legacy_l2:
-        output_fields.append("embedding")
+    # Reranking removed → wide recall no longer needed. multiplier defaults to 1;
+    # search_list >= ann_limit is enforced in _ann_search's DISKANN branch.
+    ann_limit = min(limit * settings.face_recall_multiplier, 16_384)
     hits = _ann_search(
         client, "face", video_id, asset_version, query_norm.tolist(),
         ann_limit,
-        output_fields,
+        ["track_idx", "start_ms", "end_ms", "best_ms"],
         profiler,
     )
     scoring_started = time.perf_counter()
-    scored: list[tuple[float, dict]] = []
-    for hit in hits:
-        if not legacy_l2:
-            scored.append((float(hit["_distance"]), hit))
-            continue
-        embedding = np.asarray(hit.get("embedding"), dtype=np.float32).reshape(-1)
-        if (
-            embedding.size != query_norm.size
-            or not np.all(np.isfinite(embedding))
-            or float(np.linalg.norm(embedding)) <= 0.0
-        ):
-            logger.warning(
-                "FACE search dropped legacy IVF hit with invalid embedding "
-                "for video=%s track=%s",
-                video_id,
-                hit.get("track_idx"),
-            )
-            continue
-        cosine = float(np.dot(query_norm, normalize(embedding)))
-        scored.append((float(np.clip(cosine, -1.0, 1.0)), hit))
+    # COSINE metric on unit vectors: _distance is the exact cosine similarity.
+    # Real Milvus ANN returns hits sorted by descending similarity; the explicit
+    # sort below enforces that contract regardless of mock order in tests, and is
+    # O(n) on an already-sorted production result. hits[:limit] drops any surplus
+    # when multiplier > 1; with multiplier=1 ann_limit==limit so it is a no-op.
+    scored: list[tuple[float, dict]] = [
+        (float(hit["_distance"]), hit) for hit in hits
+    ]
     scored.sort(key=lambda x: x[0], reverse=True)
     candidates: list[Candidate] = []
     invalid_time_rows = 0
@@ -934,120 +896,3 @@ def milvus_speaker_candidates(
     _log_dropped_time_rows("speaker", video_id, invalid_rows)
     candidates.sort(key=lambda c: c.score, reverse=True)
     return candidates
-
-
-def milvus_speaker_candidates_scoped(
-    client: MilvusClient,
-    queries: np.ndarray,
-    asset_versions: dict[str, str],
-    limit: int,
-    threshold: float | None = None,
-    profiler: RetrievalProfiler | None = None,
-) -> list[Candidate]:
-    """Search many published video versions and reference vectors in one RPC."""
-    if not asset_versions or limit <= 0:
-        return []
-    settings = get_settings()
-    if threshold is None:
-        threshold = settings.speaker_identity_threshold
-    vectors = np.asarray(queries, dtype=np.float32)
-    if vectors.ndim == 1:
-        vectors = vectors.reshape(1, -1)
-    if vectors.ndim != 2 or not len(vectors):
-        raise ValueError("Speaker scoped search requires at least one query vector")
-    vectors = np.vstack([normalize(vector) for vector in vectors])
-    versions = {
-        str(video_id): str(asset_version)
-        for video_id, asset_version in asset_versions.items()
-        if str(video_id) and str(asset_version)
-    }
-    if not versions:
-        return []
-    _verify_ann_index_type_once(client, "speaker")
-    collection = client.collection_for("speaker")
-    ann_limit = min(limit * settings.speaker_recall_multiplier, 16_384)
-    search_params = {
-        "metric_type": _MODALITY_METRIC["speaker"],
-        "params": {
-            "search_list": max(ann_limit, settings.speaker_diskann_search_list),
-        },
-    }
-    expression = " or ".join(
-        (
-            f'(video_id == {json.dumps(video_id)} and '
-            f'asset_version == {json.dumps(asset_version)})'
-        )
-        for video_id, asset_version in sorted(versions.items())
-    )
-    output_fields = [
-        "video_id", "asset_version", "utterance_idx", "start_ms", "end_ms",
-        "track_id", "asr_chunk_idx",
-    ]
-    try:
-        span = profiler.span("milvus_rpc", "speaker") if profiler else nullcontext()
-        with span:
-            result_sets = collection.search(
-                data=vectors.tolist(),
-                anns_field="embedding",
-                param=search_params,
-                limit=ann_limit,
-                expr=expression,
-                output_fields=output_fields,
-                timeout=settings.milvus_query_timeout_seconds,
-            )
-    except Exception as exc:
-        raise MilvusServiceError(f"Milvus scoped Speaker ANN search failed: {exc}") from exc
-    best: dict[tuple[str, int], Candidate] = {}
-    invalid_rows = 0
-    row_count = 0
-    for result_set in result_sets:
-        for hit in result_set:
-            row_count += 1
-            try:
-                video_id = str(hit.entity.get("video_id") or "")
-                asset_version = str(hit.entity.get("asset_version") or "")
-                if not video_id or versions.get(video_id) != asset_version:
-                    raise ValueError("Speaker hit escaped the published scope")
-                cosine = float(hit.distance)
-                if not np.isfinite(cosine):
-                    raise ValueError("speaker cosine must be finite")
-                entity = {field: hit.entity.get(field) for field in output_fields}
-                start_ms, end_ms = _required_time_window(entity)
-                utterance_idx = required_nonnegative_int_field(entity, "utterance_idx")
-                track_id = required_nonnegative_int_field(entity, "track_id")
-                asr_chunk_idx = required_nonnegative_int_field(entity, "asr_chunk_idx")
-            except (KeyError, TypeError, ValueError, OverflowError):
-                invalid_rows += 1
-                continue
-            above = cosine >= threshold
-            detail = f"[milvus] speaker cosine={cosine:.3f} track_id={track_id}"
-            candidate = Candidate(
-                video_id=video_id,
-                start_time=_seconds(start_ms),
-                end_time=_seconds(end_ms),
-                score=cosine,
-                modality="speaker",
-                evidence=detail if above else detail + " · 低于阈值",
-                raw_score=cosine,
-                decision="absolute_hit" if above else "weak",
-                above_threshold=above,
-                best_time=_seconds(start_ms),
-                unit_type="utterance",
-                unit_id=utterance_idx,
-                best_ms=start_ms,
-                features={
-                    "speaker_cosine": cosine,
-                    "track_id": track_id,
-                    "asr_chunk_idx": asr_chunk_idx,
-                    "source": "milvus",
-                },
-            )
-            key = (video_id, utterance_idx)
-            previous = best.get(key)
-            if previous is None or candidate.score > previous.score:
-                best[key] = candidate
-    _log_dropped_time_rows("speaker", "published-scope", invalid_rows)
-    if profiler:
-        profiler.increment("milvus", "speaker_rows", row_count)
-        profiler.increment("milvus", "speaker_requests")
-    return sorted(best.values(), key=lambda item: item.score, reverse=True)[:limit]
