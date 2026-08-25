@@ -33,7 +33,100 @@ def _result(modality: str, start: float, score: float) -> dict:
     }
 
 
+class FakeMilvusIterator:
+    """Mock Milvus query iterator for face track data."""
+    def __init__(self, data):
+        self.data = data
+        self.returned = False
+
+    def next(self):
+        if self.returned:
+            return []
+        self.returned = True
+        return self.data
+
+    def close(self):
+        pass
+
+
+class FakeMilvusCollection:
+    """Mock Milvus collection for face tracks."""
+    def __init__(self, index_dir: Path):
+        self.index_dir = index_dir
+
+    def query_iterator(self, expr: str, output_fields: list, batch_size: int, timeout: float):
+        """Return face tracks matching the expression."""
+        # Parse video_id from expr: video_id == "video-1"
+        import re
+        video_match = re.search(r'video_id == "([^"]+)"', expr)
+        if not video_match:
+            return FakeMilvusIterator([])
+
+        video_id = video_match.group(1)
+        face_file = self.index_dir / video_id / "face.npz"
+
+        if not face_file.exists():
+            return FakeMilvusIterator([])
+
+        data = np.load(face_file)
+        embeddings = data["embeddings"]
+        track_times_ms = data["track_times_ms"]
+
+        # Parse time windows from expr
+        time_window_matches = re.findall(r'start_ms < (\d+) and end_ms > (\d+)', expr)
+        if not time_window_matches:
+            return FakeMilvusIterator([])
+
+        # Convert to list of (start_ms, end_ms) tuples
+        windows = [(int(start), int(end)) for end, start in time_window_matches]
+
+        # Filter tracks that overlap with any window
+        results = []
+        for track_idx in range(len(embeddings)):
+            track_start_ms = int(track_times_ms[track_idx][0])
+            track_end_ms = int(track_times_ms[track_idx][1])
+            track_best_ms = int(track_times_ms[track_idx][2])
+
+            # Check if track overlaps with any window
+            overlaps = any(
+                track_start_ms < window_end and track_end_ms > window_start
+                for window_start, window_end in windows
+            )
+
+            if overlaps:
+                # Pad embedding to 512 dimensions if needed (for compatibility with test data)
+                embedding = embeddings[track_idx]
+                if len(embedding) < 512:
+                    padded = np.zeros(512, dtype=np.float32)
+                    padded[:len(embedding)] = embedding
+                    embedding = padded
+
+                results.append({
+                    "track_idx": track_idx,
+                    "start_ms": track_start_ms,
+                    "end_ms": track_end_ms,
+                    "best_ms": track_best_ms,
+                    "embedding": embedding,
+                })
+
+        return FakeMilvusIterator(results)
+
+
+class FakeMilvusClient:
+    """Mock Milvus client."""
+    def __init__(self, index_dir: Path):
+        self.index_dir = index_dir
+
+    def collection_for(self, modality: str):
+        if modality == "face":
+            return FakeMilvusCollection(self.index_dir)
+        raise ValueError(f"Unknown modality: {modality}")
+
+
 class FakeSearchEngine:
+    def __init__(self):
+        self.index_dir = None  # Will be set by test
+
     def search(self, _query, _image, modalities, *_args):
         modality = modalities[0]
         if modality == "visual":
@@ -42,6 +135,12 @@ class FakeSearchEngine:
             return [_result("asr", 11, 0.8), _result("asr", 50, 0.1)]
         return []
 
+    def _get_milvus_client(self):
+        """Return mock Milvus client for face verification."""
+        if self.index_dir is None:
+            raise RuntimeError("index_dir not set")
+        return FakeMilvusClient(self.index_dir)
+
 
 class FakeCatalog:
     def __init__(self, entity=None):
@@ -49,6 +148,16 @@ class FakeCatalog:
 
     def find_entity_in_text(self, _query):
         return self.entity
+
+    def get_modality_publication(self, video_id: str, modality: str):
+        """Return face publication metadata for Milvus-based face verification."""
+        if modality == "face":
+            return {
+                "status": "ready",
+                "asset_version": "test-v1",
+                "row_count": 2,  # matches the test data
+            }
+        return None
 
 
 class FakeOrchestrator:
@@ -184,6 +293,7 @@ def test_support_top_k_does_not_prune_primary_pool():
 def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnostic(tmp_path):
     class WindowFaceSearchEngine(FakeSearchEngine):
         def __init__(self):
+            super().__init__()
             self.global_face_calls = 0
 
         def search(self, query, image, modalities, *args):
@@ -194,7 +304,12 @@ def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnost
 
         @staticmethod
         def _resolve_face_query(_text, _image):
-            return np.asarray([1.0, 0.0], dtype=np.float32)
+            # Return 512-dim query vector to match Milvus expectations
+            # First 2 dims match test embeddings, rest are zero-padded
+            query = np.zeros(512, dtype=np.float32)
+            query[0] = 1.0
+            query[1] = 0.0
+            return query
 
     face_dir = tmp_path / "video-1"
     face_dir.mkdir()
@@ -214,7 +329,9 @@ def test_face_support_verifies_candidate_windows_and_keeps_weak_matches_diagnost
     )
     orchestrator = FakeOrchestrator()
     orchestrator.settings.index_dir = tmp_path
-    orchestrator.search_engine = WindowFaceSearchEngine()
+    search_engine = WindowFaceSearchEngine()
+    search_engine.index_dir = tmp_path
+    orchestrator.search_engine = search_engine
     lab = SnapMindPlannerLab(orchestrator)
     face_support = _step("s2", "face.search").model_copy(update={
         "role": "support",
