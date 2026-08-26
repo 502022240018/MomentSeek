@@ -82,7 +82,7 @@ def video_stage_lock(index_dir: Path, video_id: str, stage: str):
     """
     lock_path = index_dir / f".{stage}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "w", encoding="utf-8")  # noqa: WPS515
+    fh = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115
     try:
         _lock(fh)
     except (IOError, OSError) as exc:
