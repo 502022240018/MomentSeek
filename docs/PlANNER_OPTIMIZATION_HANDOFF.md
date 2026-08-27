@@ -46,7 +46,6 @@
 |--------|----------|---------|
 | `snapmind-planner-v2-adaptive.txt` | **v2-adaptive（方案 D）** | ✅ **当前使用**（profile: `qwen35-adaptive`） |
 | `snapmind-planner-v2-role-aware.txt` | v2-role-aware（原版） | ✅ 活跃（profile: `qwen35-unified` / `qwen35-temporal-efficient`） |
-| `snapmind-planner-v2-role-aware.txt.backup` | 同事合并前的备份 | 归档（8月20日） |
 | `snapmind-planner-v1.txt` | v1 | 历史版本 |
 | `planner-v1.txt` | v1 变体 | 历史版本 |
 | `planner-v2-temporal.txt` | v2 时序变体 | 历史版本 |
@@ -435,6 +434,8 @@ bash scripts/test_planner_optimize_0829.sh
 | 无 `hints_guided` 标记 | 派生逻辑未执行 | 检查 `snapmind_lab.py` 的 `_derive_*_plan()` 函数是否正常 |
 | 502 错误"无可用索引" | `catalog.db` 为空文件 | `rm -f runtime/catalog.db && docker restart momentseek-0829-planner-lab`（见 5.5 Q1） |
 
+如果存在参数调整，也会报不一致，注意甄别和修改即可。
+
 ### 6.4 单个测试查询示例
 
 ```bash
@@ -475,11 +476,13 @@ curl -s -X POST http://localhost:8101/api/planner-lab/propose \
 ---
 
 
+## 8. 未合并功能说明
 
+**main 分支当前状态**：
+- ✅ 后端 voice search 工具已增加（`snapmind_lab.py`）
+- ❌ Planner Lab 页面缺少声音参考面板（选择参考声音-上传音频）
 
-**补充说明（2026-08-25）**：
-- ✅ 已修复  缺失 voice.search 的问题
-- 新增内容：Planning Rules 中 3 条 voice.search 规则 + Registered Capabilities 中 voice.search 定义
-- 现在 adaptive prompt 和 role-aware prompt 对 voice.search 的支持完全一致
-- Capabilities 总数：7 个（visual, face, asr, ocr, voice, vlm.rerank, confidence.filter）
+**原因**：`remotes/origin/codex/snapmind-planner-lab` 分支的前端 UI 改动未合并到 main。该分支由开发者 502022240018 维护，包含 30+ 次提交（始于 2026-08-21）。
+
+**接手人行动**：需与 `codex/snapmind-planner-lab` 分支负责人对接，了解最新开发状态后再决定合并策略。
 
