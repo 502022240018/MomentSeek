@@ -7,7 +7,7 @@
 **目标读者**：需要理解或维护 Milvus 向量存储层的开发者。
 
 **相关文档**：
-- `README.md` - 项目整体介绍
+- `../README.md` - 项目整体介绍（位于项目根目录）
 - `ARCHITECTURE.md` - 平台架构
 - `MILVUS_ONLY_MIGRATION.md` - 从旧索引迁移到 Milvus-only 模式的操作手册
 
@@ -54,7 +54,7 @@ backend/app/vector_store/milvus/
 
 ## 文件职责
 
-### 1. `milvus_client.py` (763 行)
+### 1. `milvus_client.py` (719 行)
 
 **核心职责**：管理 Milvus 连接生命周期、Collection 初始化和全局配置。
 
@@ -102,7 +102,7 @@ client.count_video_modality_version(video_id, modality, asset_version) -> int
 **索引类型** (`_STATIC_INDEX_CONFIGS`)：
 - **Visual**: HNSW 或 DiskANN（可配置切换）
 - **ASR/OCR**: DiskANN + BM25 混合索引
-- **Face**: DiskANN (COSINE) 或 IVF_FLAT (L2) 兼容模式
+- **Face**: DiskANN (COSINE)
 - **Speaker**: DiskANN (COSINE)
 
 #### 启动时行为
@@ -311,7 +311,7 @@ _RETRY_BASE_DELAY = 1.0  # 指数退避：1s → 2s → 4s
 
 ---
 
-### 4. `milvus_search.py` (1053 行)
+### 4. `milvus_search.py` (898 行)
 
 **核心职责**：实现所有模态的向量检索，返回统一的 `Candidate` 对象。
 
@@ -381,7 +381,6 @@ def milvus_face_candidates(
 ) -> list[Candidate]
 ```
 - 单位归一化嵌入 + COSINE 度量 → `_distance` 就是余弦相似度（无需重算）
-- 兼容模式（IVF_FLAT/L2）：拉取 `embedding` 字段 + 重新计算余弦
 - `threshold` 仅影响 `above_threshold` 标志
 
 **Speaker - ANN 绝对阈值**
@@ -399,18 +398,7 @@ def milvus_speaker_candidates(
 - 单位归一化 + COSINE → 信任 Milvus 返回的 `_distance`
 - 不再重排（优化移除了二阶段重算）
 
-**Speaker - 跨视频作用域检索**
-```python
-def milvus_speaker_candidates_scoped(
-    client: MilvusClient,
-    queries: np.ndarray,             # [N_refs, 192]
-    asset_versions: dict[str, str],  # {video_id: asset_version}
-    limit: int,
-    threshold: float | None = None,
-) -> list[Candidate]
-```
-- 一次 RPC 检索多个视频的多个参考向量
-- 用于声纹身份匹配（在已发布视频中找相似话语）
+**注意**：文档曾提到的 `milvus_speaker_candidates_scoped()` 跨视频作用域检索函数目前代码中不存在。如需跨视频声纹匹配，需在调用层实现多视频循环检索。
 
 #### 索引验证缓存
 
@@ -686,8 +674,7 @@ embedding       FLOAT_VECTOR(512) # 最佳帧人脸嵌入（单位归一化）
 ```
 
 **索引**：
-- 新部署：DiskANN (COSINE)
-- 兼容模式：IVF_FLAT (L2)，检索时拉取 `embedding` 重算余弦
+- DiskANN (COSINE) - 当前生产配置
 
 **设计要点**：
 - 一个轨迹 = 一个连续出现的人脸
@@ -1652,4 +1639,5 @@ milvus-backup restore -n backup_20260825
 
 **文档维护者**：请在 Schema、索引配置、检索逻辑变更时及时更新本文档。
 
-**最后更新**：2026-08-25
+**最后更新**：2026-08-27（行数修正、移除不存在的 scoped 函数、更新索引配置描述）
+**创建日期**：2026-08-25
