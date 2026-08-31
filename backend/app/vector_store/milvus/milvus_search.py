@@ -42,8 +42,11 @@ from app.vector_store.milvus.row_contract import (
 if TYPE_CHECKING:
     from app.vector_store.milvus.milvus_client import MilvusClient
 
-# Visual modality optimization: ANN + sampling implementation (v2)
-from .milvus_search_visual_v2 import milvus_visual_candidates_ann
+# Visual modality ANN implementation.
+from .milvus_search_visual_v2 import (
+    milvus_visual_candidates_ann,
+    milvus_visual_candidates_global_ann,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +294,7 @@ def _ann_search(
     if profiler:
         profiler.increment("milvus", f"{modality}_rows", len(hits))
         profiler.increment("milvus", f"{modality}_requests")
+        profiler.increment("milvus_rows", f"{modality}_raw", len(hits))
     return hits
 
 
@@ -346,6 +350,27 @@ def milvus_visual_candidates(
 
     return milvus_visual_candidates_ann(
         client, video_id, asset_version, query_texts, limit, profile, profiler
+    )
+
+
+def milvus_visual_candidates_global(
+    client: MilvusClient,
+    query: np.ndarray,
+    publication_versions: dict[str, str],
+    *,
+    profile: str = "balanced",
+    limit: int = 72,
+    profiler: RetrievalProfiler | None = None,
+) -> list[Candidate]:
+    """Recall Visual candidates from one compatible publication cohort."""
+    query_texts = [query] if query.ndim == 1 else list(query)
+    return milvus_visual_candidates_global_ann(
+        client,
+        publication_versions,
+        query_texts,
+        limit,
+        profile,
+        profiler,
     )
 
 
@@ -533,6 +558,13 @@ def milvus_asr_candidates_hybrid(
         ))
 
     _log_dropped_time_rows("asr", video_id, invalid_time_rows)
+    if profiler:
+        raw_rows = len(results[0])
+        profiler.increment("milvus", "asr_requests")
+        profiler.increment("milvus", "asr_rows", len(candidates))
+        profiler.increment("milvus_rows", "asr_raw", raw_rows)
+        profiler.increment("milvus_rows", "asr_valid", len(candidates))
+        profiler.increment("milvus_rows", "asr_invalid", invalid_time_rows)
     return candidates
 
 
@@ -717,6 +749,13 @@ def milvus_ocr_candidates_hybrid(
         ))
 
     _log_dropped_time_rows("ocr", video_id, invalid_time_rows)
+    if profiler:
+        raw_rows = len(results[0])
+        profiler.increment("milvus", "ocr_requests")
+        profiler.increment("milvus", "ocr_rows", len(candidates))
+        profiler.increment("milvus_rows", "ocr_raw", raw_rows)
+        profiler.increment("milvus_rows", "ocr_valid", len(candidates))
+        profiler.increment("milvus_rows", "ocr_invalid", invalid_time_rows)
     return candidates
 
 
@@ -802,6 +841,8 @@ def milvus_face_candidates(
         ))
     _log_dropped_time_rows("face", video_id, invalid_time_rows)
     if profiler:
+        profiler.increment("milvus_rows", "face_valid", len(candidates))
+        profiler.increment("milvus_rows", "face_invalid", invalid_time_rows)
         profiler.add_seconds(
             "local_processing",
             "face_scoring",

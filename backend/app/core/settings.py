@@ -183,10 +183,15 @@ class Settings(BaseSettings):
     milvus_query_timeout_seconds: float = 3.0
     milvus_write_enabled: bool = True
     milvus_search_video_batch_size: int = 8
+    # Independent per-request fan-out bound. Keep 1 as the compatibility
+    # default; deployments may opt into 4 or 8 after equivalence/load tests.
+    milvus_search_max_workers: int = 1
 
     # Visual ANN search configuration
     visual_use_diskann: bool = True  # Index type: True=DiskANN (disk), False=HNSW (memory)
-    visual_ann_top_k: int = 500  # ANN recall size per subquery (recommended: 300-1000)
+    # Global recall size per subquery. Keep configurable for 1000/2000/4000
+    # quality/latency sweeps; 2000 is the first production-candidate baseline.
+    visual_ann_top_k: int = 2000
     visual_ann_segment_top_n: int = 3  # Number of top frames per segment for aggregation (recommended: 3-10)
 
     # OCR hybrid search configuration (DiskANN + BM25)
@@ -323,11 +328,25 @@ class Settings(BaseSettings):
             raise ValueError("milvus_search_video_batch_size 必须大于 0")
         return value
 
-    @field_validator("visual_ann_top_k", "visual_ann_segment_top_n")
+    @field_validator("milvus_search_max_workers")
     @classmethod
-    def validate_visual_ann_positive(cls, value: int) -> int:
+    def validate_milvus_search_max_workers(cls, value: int) -> int:
+        if not 1 <= value <= 8:
+            raise ValueError("milvus_search_max_workers 必须在 1 到 8 之间")
+        return value
+
+    @field_validator("visual_ann_top_k")
+    @classmethod
+    def validate_visual_ann_top_k(cls, value: int) -> int:
+        if not 1 <= value <= 16_383:
+            raise ValueError("visual_ann_top_k must be between 1 and 16383")
+        return value
+
+    @field_validator("visual_ann_segment_top_n")
+    @classmethod
+    def validate_visual_ann_segment_top_n(cls, value: int) -> int:
         if value <= 0:
-            raise ValueError("Visual ANN parameters must be greater than 0")
+            raise ValueError("visual_ann_segment_top_n must be greater than 0")
         return value
 
     @property

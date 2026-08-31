@@ -802,6 +802,7 @@ class SearchOrchestrator:
             "elapsed_seconds": round(time.perf_counter() - retrieval_started, 6),
             "result_count": len(results),
             "timing": retrieval_profile["timing"],
+            "timing_stats": retrieval_profile["timing_stats"],
             "counters": retrieval_profile["counters"],
             "parameters": {
                 "modalities": plan.modalities,

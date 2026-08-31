@@ -64,15 +64,34 @@ def test_milvus_search_video_batch_size_must_be_positive():
         Settings(_env_file=None, milvus_search_video_batch_size=0)
 
 
+def test_milvus_search_max_workers_is_safely_bounded():
+    assert Settings(_env_file=None).milvus_search_max_workers == 1
+    assert Settings(_env_file=None, milvus_search_max_workers=8).milvus_search_max_workers == 8
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, milvus_search_max_workers=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, milvus_search_max_workers=9)
+
+
 def test_visual_priority_is_enabled_by_default_and_can_be_disabled():
     assert Settings(_env_file=None).search_visual_priority_enabled is True
     assert Settings(_env_file=None, search_visual_priority_enabled=False).search_visual_priority_enabled is False
 
 
-@pytest.mark.parametrize(
-    "field",
-    ("visual_ann_top_k", "visual_ann_segment_top_n"),
-)
-def test_visual_ann_parameters_must_be_positive(field):
+@pytest.mark.parametrize("value", (0, 16_384))
+def test_visual_ann_top_k_is_bounded_by_milvus_limit(value):
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, **{field: 0})
+        Settings(_env_file=None, visual_ann_top_k=value)
+
+
+def test_visual_ann_top_k_accepts_supported_bounds():
+    assert Settings(_env_file=None, visual_ann_top_k=1).visual_ann_top_k == 1
+    assert (
+        Settings(_env_file=None, visual_ann_top_k=16_383).visual_ann_top_k
+        == 16_383
+    )
+
+
+def test_visual_ann_segment_top_n_must_be_positive():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, visual_ann_segment_top_n=0)
